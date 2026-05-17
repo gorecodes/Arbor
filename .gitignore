@@ -4,7 +4,6 @@ __pycache__/
 .venv/
 dist/
 node_modules/
-frontend/dist/
 *.egg-info/
 /etc/arbor/
 *.pem
