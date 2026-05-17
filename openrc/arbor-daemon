@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="Arbor privilege daemon"
+command="/usr/lib/arbor/.venv/bin/python3"
+command_args="-m daemon.main"
+command_background=true
+pidfile="/run/arbor/daemon.pid"
+directory="/usr/lib/arbor"
+output_log="/var/log/arbor/daemon.log"
+error_log="/var/log/arbor/daemon.log"
+
+depend() {
+    need localmount
+    after logger
+}
+
+start_pre() {
+    checkpath --directory --owner root:arbor --mode 0750 /run/arbor
+    checkpath --directory --owner arbor:arbor --mode 0755 /var/log/arbor
+}

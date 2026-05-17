@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+dist/
+node_modules/
+frontend/dist/
+*.egg-info/
+/etc/arbor/
+*.pem
+*.key
+.claude/
+CODE_REVIEW.md
+EMERGE_OPTIONS.md

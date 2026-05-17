@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+
+description="Arbor web UI"
+command="/usr/lib/arbor/.venv/bin/python3"
+command_args="-m arbor.server"
+command_user="arbor"
+command_background=true
+pidfile="/run/arbor/web.pid"
+directory="/usr/lib/arbor"
+output_log="/var/log/arbor/web.log"
+error_log="/var/log/arbor/web.log"
+
+env_file="/etc/arbor/arbor.env"
+
+depend() {
+    need arbor-daemon
+    after net
+}
+
+start_pre() {
+    checkpath --directory --owner root:arbor --mode 0750 /run/arbor
+    checkpath --directory --owner arbor:arbor --mode 0755 /var/log/arbor
+}
