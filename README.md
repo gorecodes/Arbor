@@ -23,7 +23,7 @@ Two processes run as separate privileges:
 ## Install
 
 ```bash
-git clone https://https://github.com/gorecodes/Arbor
+git clone https://github.com/gorecodes/Arbor.git
 cd arbor
 sudo bash install.sh
 ```
