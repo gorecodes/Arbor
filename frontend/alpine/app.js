@@ -179,21 +179,53 @@
     return {
       status: null,
       error: null,
+      _timer: null,
       init() {
         this._load()
-        this.$watch('$store.router.view', v => { if (v === 'dashboard') this._load() })
+        this.$watch('$store.router.view', v => {
+          if (v === 'dashboard') { this._load(); this._scheduleRefresh() }
+          else { clearInterval(this._timer); this._timer = null }
+        })
+        this._scheduleRefresh()
+      },
+      _scheduleRefresh() {
+        clearInterval(this._timer)
+        this._timer = setInterval(() => { if (Alpine.store('router').view === 'dashboard') this._load() }, 5000)
       },
       async _load() {
-        this.status = null; this.error = null
         try { this.status = await api.status() }
         catch(e) { this.error = e.message }
       },
       fmtBytes(b) {
+        if (!b) return '0 B'
         const gb = b / 1024 ** 3
         return gb >= 1 ? gb.toFixed(1) + ' GB' : (b / 1024 ** 2).toFixed(0) + ' MB'
       },
-      diskPct(used, total) {
-        return ((used / total) * 100).toFixed(1)
+      diskPct() {
+        if (!this.status) return 0
+        return Math.round((this.status.disk_used / this.status.disk_total) * 100)
+      },
+      memPct() {
+        if (!this.status || !this.status.mem_total) return 0
+        return Math.round((this.status.mem_used / this.status.mem_total) * 100)
+      },
+      cpuPct() {
+        return this.status ? Math.round(this.status.cpu_pct) : 0
+      },
+      // SVG gauge arc path for a semi-circle (left→top→right, viewBox 0 0 100 60)
+      // cx=50, cy=55, r=45
+      gaugePath(pct) {
+        const f = Math.max(0.001, Math.min(1, pct / 100))
+        const cx = 50, cy = 55, r = 45
+        const ex = cx - r * Math.cos(f * Math.PI)
+        const ey = cy - r * Math.sin(f * Math.PI)
+        const large = f > 0.5 ? 1 : 0
+        return `M ${cx - r} ${cy} A ${r} ${r} 0 ${large} 1 ${ex.toFixed(2)} ${ey.toFixed(2)}`
+      },
+      gaugeColor(pct) {
+        if (pct >= 85) return '#f85149'
+        if (pct >= 60) return '#d29922'
+        return '#3fb950'
       }
     }
   }

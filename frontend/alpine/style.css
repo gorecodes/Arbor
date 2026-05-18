@@ -582,6 +582,43 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
 
 .dashboard h2 { color: #e6edf3; margin-bottom: 1.5rem; }
 
+.dash-gauges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.dash-gauge-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 1rem 1.5rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 140px;
+  flex: 1;
+}
+
+.gauge-svg { width: 120px; height: 72px; }
+
+.gauge-val {
+  fill: #c9d1d9;
+  font-size: 18px;
+  font-family: monospace;
+}
+
+.gauge-label {
+  color: #8b949e;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 0.1rem;
+}
+
+.gauge-sub { color: #6e7681; font-size: 0.75rem; margin-top: 0.15rem; }
+
 .dash-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -598,26 +635,10 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
   gap: 0.5rem;
 }
 
-.dash-card.dash-wide { grid-column: 1 / -1; }
-
 .dash-label { color: #8b949e; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
 .dash-value { color: #7ee787; font-size: 1.6rem; }
 .dash-value.dash-mono { font-size: 0.95rem; }
 .dash-sub  { color: #8b949e; font-size: 0.8rem; }
-
-.dash-bar {
-  background: #21262d;
-  border-radius: 4px;
-  height: 8px;
-  overflow: hidden;
-}
-
-.dash-fill {
-  background: #7ee787;
-  height: 100%;
-  border-radius: 4px;
-  transition: width 0.4s ease;
-}
 
 /* ── Maintenance view (UpdatesView) ──────────────────────────────────────── */
 

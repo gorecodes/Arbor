@@ -211,12 +211,42 @@ def _system_status():
         last_sync = Path("/var/db/repos/gentoo/metadata/timestamp.chk").read_text().strip()
     except FileNotFoundError:
         last_sync = "unknown"
+
+    # RAM from /proc/meminfo (no external deps)
+    mem_total = mem_available = 0
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    mem_total = int(line.split()[1]) * 1024
+                elif line.startswith("MemAvailable:"):
+                    mem_available = int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    mem_used = mem_total - mem_available
+
+    # CPU load (stdlib os.getloadavg — no psutil needed)
+    try:
+        load1, load5, load15 = os.getloadavg()
+        cpu_count = os.cpu_count() or 1
+        cpu_pct = round(min(100.0, (load1 / cpu_count) * 100), 1)
+    except OSError:
+        load1 = load5 = load15 = 0.0
+        cpu_count = 1
+        cpu_pct = 0.0
+
     return [{
-        "pkg_count": pkg_count,
-        "disk_total": disk.total,
-        "disk_used": disk.used,
-        "disk_free": disk.free,
-        "last_sync": last_sync,
+        "pkg_count":    pkg_count,
+        "disk_total":   disk.total,
+        "disk_used":    disk.used,
+        "disk_free":    disk.free,
+        "mem_total":    mem_total,
+        "mem_used":     mem_used,
+        "mem_available": mem_available,
+        "cpu_pct":      cpu_pct,
+        "cpu_load1":    round(load1, 2),
+        "cpu_count":    cpu_count,
+        "last_sync":    last_sync,
     }]
 
 
