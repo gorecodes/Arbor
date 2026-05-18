@@ -6,6 +6,14 @@ A local web UI for managing Portage — browse packages, install, uninstall, and
 
 Designed for Gentoo systems on a local/LAN network. Not intended to be exposed to the internet.
 
+## Screenshots
+
+![Package browser and dependency tree](https://i.imgur.com/ww2S5zU.png)
+
+![Install flow with live emerge output](https://i.imgur.com/aZqroc4.png)
+
+![Maintenance — world update, depclean, sync](https://i.imgur.com/AllJcX6.png)
+
 ## Architecture
 
 Two processes run as separate privileges:

@@ -2,7 +2,6 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
-dist/
 node_modules/
 *.egg-info/
 /etc/arbor/
