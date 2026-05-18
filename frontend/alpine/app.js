@@ -30,6 +30,13 @@
     return res.json()
   }
 
+  async function _del(path) {
+    const res = await fetch(BASE + path, { method: 'DELETE', headers: _hdr() })
+    if (res.status === 401) throw new Error('Unauthorized')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    return res.json()
+  }
+
   const api = {
     setToken(t) { localStorage.setItem('arbor_token', t) },
     status:      ()          => _get('/status'),
@@ -51,6 +58,14 @@
     listByAtom: (atom) => _get('/jobs?atom=' + encodeURIComponent(atom)),
     list:       ()     => _get('/jobs'),
     cancel:     (id)   => _post('/jobs/' + encodeURIComponent(id) + '/cancel', {}),
+  }
+
+  const history = {
+    list:   (limit = 50, offset = 0, kind = '') =>
+      _get('/history?limit=' + limit + '&offset=' + offset + (kind ? '&kind=' + encodeURIComponent(kind) : '')),
+    log:    (id)   => _get('/history/' + encodeURIComponent(id) + '/log'),
+    delete: (id)   => _del('/history/' + encodeURIComponent(id)),
+    purge:  (days) => _post('/history/purge', { days }),
   }
 
   function _wsProto() { return location.protocol === 'https:' ? 'wss' : 'ws' }
@@ -486,14 +501,29 @@
   function jobsViewComponent() {
     const MAX_LINES = 5000
     const FLUSH_MS = 80
+    const PAGE_SIZE = 50
     return {
+      // active tab
+      tab: 'active',
+      // active jobs
       jobList: [], loading: true, error: null,
       expanded: null, activeLines: [], termWs: null,
       _refreshTimer: null, _pending: [], _flushTimer: null,
+      // history tab
+      histList: [], histTotal: 0, histOffset: 0, histLoading: false, histError: null,
+      histKind: '',
+      histExpanded: null, histLines: [], histLinesLoading: false,
+      // purge
+      purgeDays: 30, purgeMsg: null,
       init() {
         this._load().then(() => this._scheduleRefresh())
-        this.$watch('$store.router.view', v => { if (v === 'jobs') this._load() })
+        this.$watch('$store.router.view', v => { if (v === 'jobs') { this._load(); if (this.tab === 'history') this._loadHistory(0) } })
       },
+      switchTab(t) {
+        this.tab = t
+        if (t === 'history' && this.histList.length === 0) this._loadHistory(0)
+      },
+      // ── Active ────────────────────────────────────────────────────────────
       async _load() {
         try { this.jobList = await jobs.list(); this.error = null }
         catch(e) { this.error = e.message }
@@ -549,6 +579,54 @@
         else if (kind === 'uninstall' || atom.startsWith('uninstall:')) navigate('uninstall', atom.replace(/^uninstall:/, ''))
         else navigate('install', atom)
       },
+      // ── History ───────────────────────────────────────────────────────────
+      async _loadHistory(offset) {
+        this.histLoading = true; this.histError = null
+        try {
+          const res = await history.list(PAGE_SIZE, offset, this.histKind)
+          if (offset === 0) this.histList = res.items
+          else this.histList = this.histList.concat(res.items)
+          this.histTotal = res.total
+          this.histOffset = offset + res.items.length
+        } catch(e) { this.histError = e.message }
+        finally { this.histLoading = false }
+      },
+      filterHistory() { this._loadHistory(0) },
+      loadMore() { this._loadHistory(this.histOffset) },
+      async toggleHist(jobId) {
+        if (this.histExpanded === jobId) { this.histExpanded = null; this.histLines = []; return }
+        this.histExpanded = jobId; this.histLines = []; this.histLinesLoading = true
+        try {
+          const res = await history.log(jobId)
+          this.histLines = (res.log || '').split('\n')
+        } catch(e) { this.histLines = ['Error: ' + e.message] }
+        finally { this.histLinesLoading = false }
+        this.$nextTick(() => {
+          const el = document.getElementById('hv-terminal-' + jobId)
+          if (el) el.scrollTop = el.scrollHeight
+        })
+      },
+      async deleteEntry(jobId, e) {
+        e.stopPropagation()
+        if (!confirm('Delete this history entry?')) return
+        try {
+          await history.delete(jobId)
+          this.histList = this.histList.filter(j => j.job_id !== jobId)
+          this.histTotal = Math.max(0, this.histTotal - 1)
+          if (this.histExpanded === jobId) { this.histExpanded = null; this.histLines = [] }
+        } catch(e) { alert('Delete failed: ' + e.message) }
+      },
+      async purge() {
+        if (!confirm('Delete all history older than ' + this.purgeDays + ' days?')) return
+        try {
+          const res = await history.purge(this.purgeDays)
+          this.purgeMsg = 'Deleted ' + res.deleted + ' entries.'
+          this._loadHistory(0)
+          setTimeout(() => { this.purgeMsg = null }, 3000)
+        } catch(e) { alert('Purge failed: ' + e.message) }
+      },
+      histHasMore() { return this.histOffset < this.histTotal },
+      // ── Shared helpers ────────────────────────────────────────────────────
       statusLabel(j) {
         if (j.status === 'running') return 'running'
         if (j.status === 'done' && j.returncode === 0) return 'done'
@@ -565,7 +643,15 @@
         const s = Math.floor(Date.now() / 1000 - ts)
         if (s < 60) return s + 's ago'
         if (s < 3600) return Math.floor(s / 60) + 'm ago'
-        return Math.floor(s / 3600) + 'h ago'
+        if (s < 86400) return Math.floor(s / 3600) + 'h ago'
+        return Math.floor(s / 86400) + 'd ago'
+      },
+      duration(j) {
+        if (!j.finished_at || !j.created_at) return ''
+        const s = Math.round(j.finished_at - j.created_at)
+        if (s < 60) return s + 's'
+        if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's'
+        return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm'
       },
       lineClass(l) {
         if (/^\[ebuild/.test(l) || /^>>> /.test(l) || /Completed/.test(l)) return 'hi-ok'
@@ -1076,7 +1162,7 @@
   // Component factories must be on window so Alpine can resolve them by name.
   Object.assign(window, {
     navigate, navigateTo, navigateBack,
-    api, emerge, jobs,
+    api, emerge, jobs, history,
     wsEmerge, wsGlobalEmerge, wsJobAttach, detachWs,
     loginComponent,
     navComponent,

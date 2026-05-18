@@ -554,47 +554,120 @@
         <div class="jv-view">
           <div class="jv-header">
             <h2>Jobs</h2>
-            <button class="jv-btn-refresh" @click="_load()">Refresh</button>
+            <div class="jv-tabs">
+              <button class="jv-tab" :class="{ active: tab === 'active' }" @click="switchTab('active')">Active</button>
+              <button class="jv-tab" :class="{ active: tab === 'history' }" @click="switchTab('history')">History</button>
+            </div>
+            <button class="jv-btn-refresh" x-show="tab === 'active'" @click="_load()">Refresh</button>
           </div>
 
-          <p class="muted"    x-show="loading">Loading…</p>
-          <p class="jv-err-msg" x-show="!loading && error" x-text="error"></p>
-          <p class="muted"    x-show="!loading && !error && jobList.length === 0">No jobs.</p>
+          <!-- ── Active tab ─────────────────────────────────────────────── -->
+          <div x-show="tab === 'active'">
+            <p class="muted"    x-show="loading">Loading…</p>
+            <p class="jv-err-msg" x-show="!loading && error" x-text="error"></p>
+            <p class="muted"    x-show="!loading && !error && jobList.length === 0">No active jobs.</p>
 
-          <div class="jv-table" x-show="!loading && !error && jobList.length > 0">
-            <template x-for="job in jobList" :key="job.job_id">
-              <div class="jv-row" :class="{ expanded: expanded === job.job_id }">
+            <div class="jv-table" x-show="!loading && !error && jobList.length > 0">
+              <template x-for="job in jobList" :key="job.job_id">
+                <div class="jv-row" :class="{ expanded: expanded === job.job_id }">
 
-                <div class="jv-row-main">
-                  <span class="jv-atom" x-text="job.atom"></span>
-                  <span class="jv-badge" :class="statusClass(job)" x-text="statusLabel(job)"></span>
-                  <span class="jv-ago"  x-text="ago(job.created_at)"></span>
-                  <div class="jv-actions">
-                    <button class="jv-btn-output" @click="toggle(job.job_id)"
-                      x-text="expanded === job.job_id ? '▲ output' : '▼ output'"></button>
-                    <template x-if="job.status === 'running'">
-                      <span>
-                        <button class="jv-btn-open" @click="openPanel(job, $event)">Open</button>
-                        <button class="jv-btn-kill" @click="kill(job.job_id, $event)">Kill</button>
-                      </span>
-                    </template>
+                  <div class="jv-row-main">
+                    <span class="jv-atom" x-text="job.atom"></span>
+                    <span class="jv-badge" :class="statusClass(job)" x-text="statusLabel(job)"></span>
+                    <span class="jv-ago"  x-text="ago(job.created_at)"></span>
+                    <div class="jv-actions">
+                      <button class="jv-btn-output" @click="toggle(job.job_id)"
+                        x-text="expanded === job.job_id ? '▲ output' : '▼ output'"></button>
+                      <template x-if="job.status === 'running'">
+                        <span>
+                          <button class="jv-btn-open" @click="openPanel(job, $event)">Open</button>
+                          <button class="jv-btn-kill" @click="kill(job.job_id, $event)">Kill</button>
+                        </span>
+                      </template>
+                    </div>
                   </div>
+
+                  <template x-if="expanded === job.job_id">
+                    <div class="terminal" :id="'jv-terminal-' + job.job_id">
+                      <template x-for="(line, i) in activeLines" :key="i">
+                        <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                      </template>
+                      <div class="line cursor" x-show="job.status === 'running' && termWs">▊</div>
+                      <div class="line muted-line"
+                        x-show="activeLines.length === 0 && !termWs">No output available.</div>
+                    </div>
+                  </template>
+
                 </div>
-
-                <template x-if="expanded === job.job_id">
-                  <div class="terminal" :id="'jv-terminal-' + job.job_id">
-                    <template x-for="(line, i) in activeLines" :key="i">
-                      <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
-                    </template>
-                    <div class="line cursor" x-show="job.status === 'running' && termWs">▊</div>
-                    <div class="line muted-line"
-                      x-show="activeLines.length === 0 && !termWs">No output available.</div>
-                  </div>
-                </template>
-
-              </div>
-            </template>
+              </template>
+            </div>
           </div>
+
+          <!-- ── History tab ────────────────────────────────────────────── -->
+          <div x-show="tab === 'history'">
+            <div class="jv-hist-toolbar">
+              <select class="jv-hist-filter" x-model="histKind" @change="filterHistory()">
+                <option value="">All types</option>
+                <option value="install">install</option>
+                <option value="uninstall">uninstall</option>
+                <option value="world">world update</option>
+                <option value="depclean">depclean</option>
+                <option value="depclean-pretend">depclean-pretend</option>
+                <option value="preserved-rebuild">preserved-rebuild</option>
+                <option value="sync">sync</option>
+              </select>
+              <div class="jv-purge-row">
+                <span class="muted">Purge older than</span>
+                <input class="jv-purge-input" type="number" x-model.number="purgeDays" min="1" max="365">
+                <span class="muted">days</span>
+                <button class="jv-btn-purge" @click="purge()">Purge</button>
+                <span class="jv-purge-msg" x-show="purgeMsg" x-text="purgeMsg"></span>
+              </div>
+            </div>
+
+            <p class="muted" x-show="histLoading && histList.length === 0">Loading…</p>
+            <p class="jv-err-msg" x-show="histError" x-text="histError"></p>
+            <p class="muted" x-show="!histLoading && !histError && histList.length === 0">No history.</p>
+
+            <div class="jv-table" x-show="histList.length > 0">
+              <template x-for="job in histList" :key="job.job_id">
+                <div class="jv-row" :class="{ expanded: histExpanded === job.job_id }">
+
+                  <div class="jv-row-main">
+                    <span class="jv-atom" x-text="job.atom"></span>
+                    <span class="jv-badge jv-kind" x-text="job.kind"></span>
+                    <span class="jv-badge" :class="statusClass(job)" x-text="statusLabel(job)"></span>
+                    <span class="jv-ago" x-text="ago(job.created_at)"></span>
+                    <span class="jv-dur" x-show="job.finished_at" x-text="duration(job)"></span>
+                    <div class="jv-actions">
+                      <button class="jv-btn-output" @click="toggleHist(job.job_id)"
+                        x-text="histExpanded === job.job_id ? '▲ log' : '▼ log'"></button>
+                      <button class="jv-btn-kill" @click="deleteEntry(job.job_id, $event)">Delete</button>
+                    </div>
+                  </div>
+
+                  <template x-if="histExpanded === job.job_id">
+                    <div class="terminal" :id="'hv-terminal-' + job.job_id">
+                      <p class="muted" x-show="histLinesLoading">Loading log…</p>
+                      <template x-for="(line, i) in histLines" :key="i">
+                        <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                      </template>
+                      <div class="line muted-line"
+                        x-show="!histLinesLoading && histLines.length === 0">No log stored.</div>
+                    </div>
+                  </template>
+
+                </div>
+              </template>
+            </div>
+
+            <div class="jv-loadmore" x-show="histHasMore()">
+              <button class="jv-btn-refresh" :disabled="histLoading" @click="loadMore()">
+                Load more (<span x-text="histTotal - histOffset"></span> remaining)
+              </button>
+            </div>
+          </div>
+
         </div>
       </div>
 
