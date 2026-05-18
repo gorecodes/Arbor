@@ -26,7 +26,6 @@ Two processes run as separate privileges:
 - Gentoo Linux with OpenRC
 - Python 3.11+
 - `openssl` (for certificate generation)
-- Node.js 18+ and npm (only needed if building the frontend from source)
 
 ## Install
 
@@ -38,12 +37,11 @@ sudo bash install.sh
 
 The installer will:
 
-1. Build the frontend (if `frontend/dist/` is not already present)
-2. Install the backend to `/usr/lib/arbor/` with a Python venv
-3. Install OpenRC service files
-4. Create the `arbor` system user
-5. Generate a self-signed TLS certificate in `/etc/arbor/`
-6. Generate a random access token (printed once, also saved to `/etc/arbor/token`)
+1. Install the backend to `/usr/lib/arbor/` with a Python venv
+2. Install OpenRC service files
+3. Create the `arbor` system user
+4. Generate a self-signed TLS certificate in `/etc/arbor/`
+5. Generate a random access token (printed once, also saved to `/etc/arbor/token`)
 
 ## First run
 
