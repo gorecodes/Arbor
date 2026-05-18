@@ -30,7 +30,7 @@ It is **not intended to be exposed to the public internet**.
 - **Install / Uninstall** — live emerge output streamed to the browser, with emerge option flags
 - **Maintenance** — world update, depclean, preserved-rebuild, sync, all with pretend mode
 - **Jobs** — active running jobs with live output; completed jobs are automatically archived to **History**
-- **History** — searchable log of all past emerge operations, filterable by kind, with per-entry log viewer and purge
+- **History** — searchable log of all past emerge operations, filterable by kind, with per-entry log viewer and purge (persisted in SQLite at `/var/lib/arbor/history.db`)
 
 ## Screenshots
 
