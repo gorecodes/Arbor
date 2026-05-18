@@ -3,7 +3,7 @@
 > This is a hobby project built to scratch my own itch. While I designed the architecture and heavily used AI (Claude) to speed up the boilerplate and implementation, the code has been thoroughly reviewed and tested on my own machine. It works perfectly for my workflow, but it's an early release — issues and PRs are highly welcome.
 
 A local web UI for managing Portage — browse packages, install, uninstall, and track running jobs from your browser.
-
+The goal isn't to hide Portage's complexity, but to make deep dependency trees and USE flags easier to visualize without losing granular control. 
 Designed for Gentoo systems on a local/LAN network. Not intended to be exposed to the internet.
 
 ## Screenshots
