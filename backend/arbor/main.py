@@ -238,9 +238,12 @@ async def job_list(auth: Auth, atom: str = Query(default="")):
     if atom:
         # The daemon normalizes CPV atoms with a leading = (e.g. dev-libs/foo-1.0 →
         # =dev-libs/foo-1.0), so match against both the raw and prefixed form.
+        # Uninstall jobs store their atom as "uninstall:{atom}", so also match that.
         variants = {atom}
         if not atom.startswith(("=", "<", ">", "~", "!")):
             variants.add("=" + atom)
+        for v in list(variants):
+            variants.add("uninstall:" + v)
         jobs = [j for j in jobs if j["atom"] in variants]
     return jobs
 
@@ -309,12 +312,16 @@ async def ws_world_updates(websocket: WebSocket, token: str = Query(default=""))
 # Serve frontend static files (populated by Svelte build)
 # ---------------------------------------------------------------------------
 
-# Search order: ARBOR_STATIC_DIR env, install path, repo dev path.
+# Search order: ARBOR_STATIC_DIR env, install paths, repo dev paths.
+# Alpine (no-build) layout has files directly in /usr/lib/arbor/frontend/.
+# The old dist/ layout is kept as a fallback during transition.
 _static_candidates = [
     os.environ.get("ARBOR_STATIC_DIR"),
-    "/usr/lib/arbor/frontend/dist",
-    str(Path(__file__).parent.parent / "frontend" / "dist"),
-    str(Path(__file__).parent.parent.parent / "frontend" / "dist"),
+    "/usr/share/arbor/frontend",                                       # Portage-installed (ebuild)
+    "/usr/lib/arbor/frontend",                                         # installed (alpine, no-build)
+    "/usr/lib/arbor/frontend/dist",                                    # installed (old dist)
+    str(Path(__file__).parent.parent.parent / "frontend" / "alpine"), # dev (alpine)
+    str(Path(__file__).parent.parent.parent / "frontend" / "dist"),   # dev (old dist)
 ]
 for _candidate in _static_candidates:
     if _candidate and Path(_candidate).is_dir():

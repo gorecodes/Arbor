@@ -1,11 +1,9 @@
 #!/sbin/openrc-run
 
 description="Arbor privilege daemon"
-command="/usr/lib/arbor/.venv/bin/python3"
-command_args="-m daemon.main"
+command="/usr/bin/arbor-daemon"
 command_background=true
 pidfile="/run/arbor/daemon.pid"
-directory="/usr/lib/arbor"
 output_log="/var/log/arbor/daemon.log"
 error_log="/var/log/arbor/daemon.log"
 

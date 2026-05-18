@@ -1,12 +1,10 @@
 #!/sbin/openrc-run
 
 description="Arbor web UI"
-command="/usr/lib/arbor/.venv/bin/python3"
-command_args="-m arbor.server"
+command="/usr/bin/arbor"
 command_user="arbor"
 command_background=true
 pidfile="/run/arbor/web.pid"
-directory="/usr/lib/arbor"
 output_log="/var/log/arbor/web.log"
 error_log="/var/log/arbor/web.log"
 
