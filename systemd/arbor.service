@@ -1,0 +1,16 @@
+[Unit]
+Description=Arbor web UI
+After=network.target arbor-daemon.service
+Requires=arbor-daemon.service
+
+[Service]
+Type=simple
+User=arbor
+EnvironmentFile=-/etc/arbor/arbor.env
+ExecStart=/usr/bin/arbor
+StandardOutput=append:/var/log/arbor/web.log
+StandardError=append:/var/log/arbor/web.log
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

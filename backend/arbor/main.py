@@ -36,7 +36,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
@@ -273,6 +273,41 @@ async def ws_emerge_autounmask(websocket: WebSocket, token: str = Query(default=
 async def etc_update_check(auth: Auth):
     results = await query_all("etc_update_check", {})
     return [r for r in results if "cfg_file" in r]
+
+
+@app.get("/api/history")
+async def history_list(
+    auth: Auth,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    kind: str = Query(default=""),
+):
+    data = await query_one("history_list", {"limit": limit, "offset": offset, "kind": kind})
+    return data
+
+
+@app.get("/api/history/{job_id}/log")
+async def history_log(auth: Auth, job_id: str):
+    data = await query_one("history_log", {"job_id": job_id})
+    if "error" in data:
+        return JSONResponse(status_code=404, content=data)
+    return data
+
+
+@app.delete("/api/history/{job_id}")
+async def history_delete(auth: Auth, job_id: str):
+    data = await query_one("history_delete", {"job_id": job_id})
+    if "error" in data:
+        return JSONResponse(status_code=404, content=data)
+    return data
+
+
+@app.post("/api/history/purge")
+async def history_purge(auth: Auth, request: Request):
+    body = await request.json()
+    days = max(int(body.get("days", 30)), 1)
+    data = await query_one("history_purge", {"days": days})
+    return data
 
 
 @app.post("/api/emerge/etc-update/resolve")

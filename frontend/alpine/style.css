@@ -321,6 +321,42 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
 }
 .jv-btn-kill:hover { background: #5a2020; border-color: #f85149; }
 
+.jv-tabs { display: flex; gap: 0.3rem; }
+.jv-tab {
+  font-family: inherit; font-size: 0.8rem; border-radius: 5px 5px 0 0; cursor: pointer;
+  padding: 0.25rem 0.9rem; background: #161b22; border: 1px solid #30363d; color: #8b949e;
+  border-bottom: none;
+}
+.jv-tab.active { background: #0d1117; color: #c9d1d9; border-color: #58a6ff66; }
+.jv-tab:hover:not(.active) { color: #c9d1d9; }
+
+.jv-hist-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem;
+  padding: 0.5rem 0; margin-bottom: 0.75rem; border-bottom: 1px solid #21262d;
+}
+.jv-hist-filter {
+  font-family: inherit; font-size: 0.8rem; background: #161b22; border: 1px solid #30363d;
+  color: #c9d1d9; border-radius: 5px; padding: 0.2rem 0.5rem;
+}
+.jv-purge-row { display: flex; align-items: center; gap: 0.4rem; margin-left: auto; }
+.jv-purge-input {
+  width: 3.5rem; font-family: inherit; font-size: 0.8rem; background: #161b22;
+  border: 1px solid #30363d; color: #c9d1d9; border-radius: 5px; padding: 0.2rem 0.4rem;
+  text-align: center;
+}
+.jv-btn-purge {
+  font-family: inherit; font-size: 0.75rem; border-radius: 5px; cursor: pointer;
+  padding: 0.2rem 0.6rem; background: #2a1a1a; border: 1px solid #f8514966; color: #f85149;
+}
+.jv-btn-purge:hover { background: #3a2020; border-color: #f85149; }
+.jv-purge-msg { font-size: 0.78rem; color: #3fb950; }
+
+.jv-kind {
+  background: #1a2535; color: #8b949e; font-size: 0.72rem;
+}
+.jv-dur { color: #6e7681; font-size: 0.78rem; min-width: 3.5rem; text-align: right; }
+.jv-loadmore { margin-top: 0.75rem; text-align: center; }
+
 /* ── Shared emerge-view layout (Install + Uninstall) ─────────────────────── */
 
 .ev-view-page {
@@ -546,6 +582,70 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
 
 .dashboard h2 { color: #e6edf3; margin-bottom: 1.5rem; }
 
+.dash-gauges {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.dash-gauge-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 0.75rem 1rem 0.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 160px;
+}
+
+/* CSS conic-gradient ring gauge — no SVG, no x-html, works with Alpine :style */
+.gauge-outer {
+  position: relative;
+  width: 140px;
+  height: 70px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.gauge-ring {
+  position: absolute;
+  top: 0; left: 0;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  /* background set via :style gaugeStyle() */
+}
+.gauge-hole {
+  position: absolute;
+  top: 16px; left: 16px;
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
+  background: #161b22;
+}
+.gauge-text {
+  position: absolute;
+  bottom: 4px;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 1rem;
+  font-family: monospace;
+  color: #c9d1d9;
+  z-index: 1;
+}
+
+.gauge-label {
+  color: #8b949e;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 0.3rem;
+}
+
+.gauge-sub { color: #6e7681; font-size: 0.75rem; margin-top: 0.1rem; }
+
 .dash-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -562,26 +662,10 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
   gap: 0.5rem;
 }
 
-.dash-card.dash-wide { grid-column: 1 / -1; }
-
 .dash-label { color: #8b949e; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
 .dash-value { color: #7ee787; font-size: 1.6rem; }
 .dash-value.dash-mono { font-size: 0.95rem; }
 .dash-sub  { color: #8b949e; font-size: 0.8rem; }
-
-.dash-bar {
-  background: #21262d;
-  border-radius: 4px;
-  height: 8px;
-  overflow: hidden;
-}
-
-.dash-fill {
-  background: #7ee787;
-  height: 100%;
-  border-radius: 4px;
-  transition: width 0.4s ease;
-}
 
 /* ── Maintenance view (UpdatesView) ──────────────────────────────────────── */
 

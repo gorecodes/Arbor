@@ -1,0 +1,19 @@
+[Unit]
+Description=Arbor privilege daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/arbor-daemon
+RuntimeDirectory=arbor
+RuntimeDirectoryMode=0750
+RuntimeDirectoryGroup=arbor
+LogsDirectory=arbor
+LogsDirectoryMode=0755
+LogsDirectoryUser=arbor
+StandardOutput=append:/var/log/arbor/daemon.log
+StandardError=append:/var/log/arbor/daemon.log
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
