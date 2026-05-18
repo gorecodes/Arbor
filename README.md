@@ -29,9 +29,20 @@ Two processes run as separate privileges:
 
 ## Install
 
+### Via Portage overlay (recommended for Gentoo)
+
 ```bash
-git clone https://github.com/gorecodes/Arbor.git
-cd arbor
+eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
+emaint sync -r arbor-overlay
+ACCEPT_KEYWORDS="**" emerge 'app-admin/arbor'
+bash /usr/share/arbor/setup.sh
+```
+
+### Via install script
+
+```bash
+git clone https://github.com/gorecodes/Arbor
+cd Arbor
 sudo bash install.sh
 ```
 
@@ -61,6 +72,16 @@ rc-update add arbor default
 
 ## Update
 
+### Via Portage overlay
+
+```bash
+emaint sync -r arbor-overlay
+emerge 'app-admin/arbor'
+rc-service arbor restart; rc-service arbor-daemon restart
+```
+
+### Via install script
+
 ```bash
 git pull
 sudo bash install.sh
@@ -69,6 +90,36 @@ rc-service arbor-daemon start; rc-service arbor start
 ```
 
 The installer skips certificate and token generation if `/etc/arbor/cert.pem` and `/etc/arbor/token` already exist.
+
+## Uninstall
+
+### Via Portage overlay
+
+```bash
+emerge --unmerge app-admin/arbor
+emerge --depclean
+rc-update del arbor; rc-update del arbor-daemon
+userdel arbor
+```
+
+### Via install script
+
+```bash
+rc-service arbor stop; rc-service arbor-daemon stop
+rc-update del arbor; rc-update del arbor-daemon
+rm -f /etc/init.d/arbor /etc/init.d/arbor-daemon
+rm -f /usr/local/bin/arbor /usr/local/bin/arbor-daemon
+rm -rf /usr/lib/arbor
+userdel arbor
+```
+
+In both cases, configuration files (`/etc/arbor/`) and logs (`/var/log/arbor/`) are **not** removed automatically. Delete them manually if you want a full clean:
+
+```bash
+rm -rf /etc/arbor /var/log/arbor /run/arbor
+```
+
+> **Note:** `/etc/arbor/` contains your TLS certificate and access token. Skip this step if you plan to reinstall and want to keep them.
 
 ## Logs
 
