@@ -295,12 +295,33 @@
           <p class="error"  x-show="error" x-text="error"></p>
 
           <div class="dash-gauges" x-show="status && !error">
-            <div class="dash-gauge-card"
-              x-html="_gaugeHtml(cpuPct(), 'CPU', 'load avg ' + (status?.cpu_load1 ?? 0))"></div>
-            <div class="dash-gauge-card"
-              x-html="_gaugeHtml(memPct(), 'RAM', fmtBytes(status?.mem_used ?? 0) + ' / ' + fmtBytes(status?.mem_total ?? 0))"></div>
-            <div class="dash-gauge-card"
-              x-html="_gaugeHtml(diskPct(), 'Disk /', fmtBytes(status?.disk_used ?? 0) + ' / ' + fmtBytes(status?.disk_total ?? 0))"></div>
+            <div class="dash-gauge-card">
+              <div class="gauge-outer">
+                <div class="gauge-ring" :style="gaugeStyle(cpuPct())"></div>
+                <div class="gauge-hole"></div>
+                <span class="gauge-text" x-text="cpuPct() + '%'"></span>
+              </div>
+              <span class="gauge-label">CPU</span>
+              <span class="gauge-sub" x-text="'load avg ' + (status?.cpu_load1 ?? 0)"></span>
+            </div>
+            <div class="dash-gauge-card">
+              <div class="gauge-outer">
+                <div class="gauge-ring" :style="gaugeStyle(memPct())"></div>
+                <div class="gauge-hole"></div>
+                <span class="gauge-text" x-text="memPct() + '%'"></span>
+              </div>
+              <span class="gauge-label">RAM</span>
+              <span class="gauge-sub" x-text="fmtBytes(status?.mem_used ?? 0) + ' / ' + fmtBytes(status?.mem_total ?? 0)"></span>
+            </div>
+            <div class="dash-gauge-card">
+              <div class="gauge-outer">
+                <div class="gauge-ring" :style="gaugeStyle(diskPct())"></div>
+                <div class="gauge-hole"></div>
+                <span class="gauge-text" x-text="diskPct() + '%'"></span>
+              </div>
+              <span class="gauge-label">Disk /</span>
+              <span class="gauge-sub" x-text="fmtBytes(status?.disk_used ?? 0) + ' / ' + fmtBytes(status?.disk_total ?? 0)"></span>
+            </div>
           </div>
 
           <div class="dash-cards" x-show="status && !error">
@@ -662,7 +683,7 @@
 
             <div class="jv-loadmore" x-show="histHasMore()">
               <button class="jv-btn-refresh" :disabled="histLoading" @click="loadMore()">
-                Load more (<span x-text="histTotal - histOffset"></span> remaining)
+                Load more (<span x-text="histRemaining()"></span> remaining)
               </button>
             </div>
           </div>

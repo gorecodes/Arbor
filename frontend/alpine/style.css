@@ -601,12 +601,47 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
   width: 160px;
 }
 
+/* CSS conic-gradient ring gauge — no SVG, no x-html, works with Alpine :style */
+.gauge-outer {
+  position: relative;
+  width: 140px;
+  height: 70px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.gauge-ring {
+  position: absolute;
+  top: 0; left: 0;
+  width: 140px;
+  height: 140px;
+  border-radius: 50%;
+  /* background set via :style gaugeStyle() */
+}
+.gauge-hole {
+  position: absolute;
+  top: 16px; left: 16px;
+  width: 108px;
+  height: 108px;
+  border-radius: 50%;
+  background: #161b22;
+}
+.gauge-text {
+  position: absolute;
+  bottom: 4px;
+  left: 0; right: 0;
+  text-align: center;
+  font-size: 1rem;
+  font-family: monospace;
+  color: #c9d1d9;
+  z-index: 1;
+}
+
 .gauge-label {
   color: #8b949e;
   font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  margin-top: 0.2rem;
+  margin-top: 0.3rem;
 }
 
 .gauge-sub { color: #6e7681; font-size: 0.75rem; margin-top: 0.1rem; }

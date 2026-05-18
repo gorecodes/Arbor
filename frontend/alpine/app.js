@@ -208,23 +208,14 @@
       diskPct() { return this.status ? this._safePct(this.status.disk_used, this.status.disk_total) : 0 },
       memPct()  { return this.status ? this._safePct(this.status.mem_used,  this.status.mem_total)  : 0 },
       cpuPct()  { return this.status ? Math.round(this.status.cpu_pct || 0) : 0 },
-      // Generate a complete SVG gauge as HTML string — avoids Alpine SVG attribute binding issues.
-      // Semi-circle: left → top → right, viewBox 0 0 120 70, center (60,65), radius 52.
-      _gaugeHtml(pct, label, sub) {
-        const safeP = isNaN(pct) || !isFinite(pct) ? 0 : Math.max(0, Math.min(100, pct))
-        const f = Math.max(0.001, Math.min(0.999, safeP / 100))
-        const [cx, cy, r] = [60, 65, 52]
-        const ex = (cx - r * Math.cos(f * Math.PI)).toFixed(1)
-        const ey = (cy - r * Math.sin(f * Math.PI)).toFixed(1)
-        const large = f > 0.5 ? 1 : 0
-        const color = safeP >= 85 ? '#f85149' : safeP >= 60 ? '#d29922' : '#3fb950'
-        return `<svg viewBox="0 0 120 70" width="130" height="76">
-          <path d="M 8 65 A 52 52 0 1 1 112 65" fill="none" stroke="#21262d" stroke-width="10" stroke-linecap="round"/>
-          <path d="M 8 65 A 52 52 0 ${large} 1 ${ex} ${ey}" fill="none" stroke="${color}" stroke-width="10" stroke-linecap="round"/>
-          <text x="60" y="57" text-anchor="middle" fill="#c9d1d9" font-size="18" font-family="monospace">${safeP}%</text>
-        </svg>
-        <span class="gauge-label">${label}</span>
-        <span class="gauge-sub">${sub}</span>`
+      // Returns :style string for the conic-gradient ring gauge.
+      // Semi-circle: starts at left (270deg), fills clockwise over the top to right.
+      // Outer div (150x75 overflow:hidden) clips to show only the top half of the 150x150 circle.
+      gaugeStyle(pct) {
+        const p = isNaN(pct) || !isFinite(pct) ? 0 : Math.max(0, Math.min(100, pct))
+        const color = p >= 85 ? '#f85149' : p >= 60 ? '#d29922' : '#3fb950'
+        const deg = (p / 100) * 180
+        return `background:conic-gradient(from 270deg,${color} 0deg ${deg}deg,#21262d ${deg}deg 180deg,transparent 180deg 360deg)`
       }
     }
   }
@@ -657,6 +648,7 @@
         } catch(e) { alert('Purge failed: ' + e.message) }
       },
       histHasMore() { return this.histOffset < this.histTotal },
+      histRemaining() { return this.histTotal - this.histOffset },
       // ── Shared helpers ────────────────────────────────────────────────────
       statusLabel(j) {
         if (j.status === 'running') return 'running'
