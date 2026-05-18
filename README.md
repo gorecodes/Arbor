@@ -99,6 +99,7 @@ The installer skips certificate and token generation if `/etc/arbor/cert.pem` an
 emerge --unmerge app-admin/arbor
 emerge --depclean
 rc-update del arbor; rc-update del arbor-daemon
+userdel arbor
 ```
 
 ### Via install script
