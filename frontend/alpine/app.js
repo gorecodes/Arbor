@@ -60,7 +60,7 @@
     cancel:     (id)   => _post('/jobs/' + encodeURIComponent(id) + '/cancel', {}),
   }
 
-  const history = {
+  const jobHistory = {
     list:   (limit = 50, offset = 0, kind = '') =>
       _get('/history?limit=' + limit + '&offset=' + offset + (kind ? '&kind=' + encodeURIComponent(kind) : '')),
     log:    (id)   => _get('/history/' + encodeURIComponent(id) + '/log'),
@@ -547,9 +547,13 @@
       },
       // ── Active ────────────────────────────────────────────────────────────
       async _load() {
+        const prevIds = new Set(this.jobList.map(j => j.job_id))
         try { this.jobList = await jobs.list(); this.error = null }
         catch(e) { this.error = e.message }
         finally { this.loading = false }
+        // if any previously-running job has disappeared (finished → archived), refresh history
+        const anyFinished = [...prevIds].some(id => !this.jobList.find(j => j.job_id === id))
+        if (anyFinished) this._loadHistory(0)
       },
       _scheduleRefresh() {
         clearTimeout(this._refreshTimer)
@@ -605,7 +609,7 @@
       async _loadHistory(offset) {
         this.histLoading = true; this.histError = null
         try {
-          const res = await history.list(PAGE_SIZE, offset, this.histKind)
+          const res = await jobHistory.list(PAGE_SIZE, offset, this.histKind)
           if (offset === 0) this.histList = res.items
           else this.histList = this.histList.concat(res.items)
           this.histTotal = res.total
@@ -619,7 +623,7 @@
         if (this.histExpanded === jobId) { this.histExpanded = null; this.histLines = []; return }
         this.histExpanded = jobId; this.histLines = []; this.histLinesLoading = true
         try {
-          const res = await history.log(jobId)
+          const res = await jobHistory.log(jobId)
           this.histLines = (res.log || '').split('\n')
         } catch(e) { this.histLines = ['Error: ' + e.message] }
         finally { this.histLinesLoading = false }
@@ -632,7 +636,7 @@
         e.stopPropagation()
         if (!confirm('Delete this history entry?')) return
         try {
-          await history.delete(jobId)
+          await jobHistory.delete(jobId)
           this.histList = this.histList.filter(j => j.job_id !== jobId)
           this.histTotal = Math.max(0, this.histTotal - 1)
           if (this.histExpanded === jobId) { this.histExpanded = null; this.histLines = [] }
@@ -641,7 +645,7 @@
       async purge() {
         if (!confirm('Delete all history older than ' + this.purgeDays + ' days?')) return
         try {
-          const res = await history.purge(this.purgeDays)
+          const res = await jobHistory.purge(this.purgeDays)
           this.purgeMsg = 'Deleted ' + res.deleted + ' entries.'
           this._loadHistory(0)
           setTimeout(() => { this.purgeMsg = null }, 3000)
@@ -1185,7 +1189,7 @@
   // Component factories must be on window so Alpine can resolve them by name.
   Object.assign(window, {
     navigate, navigateTo, navigateBack,
-    api, emerge, jobs, history,
+    api, emerge, jobs, jobHistory,
     wsEmerge, wsGlobalEmerge, wsJobAttach, detachWs,
     loginComponent,
     navComponent,

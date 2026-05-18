@@ -6,6 +6,15 @@ A local web UI for managing Portage — browse packages, install, uninstall, and
 
 Designed for Gentoo systems on a local/LAN network. Not intended to be exposed to the internet.
 
+## Features
+
+- **Dashboard** — system gauges (CPU, RAM, disk) with live load average
+- **Package browser** — search packages, view details, dependency tree, installed files
+- **Install / Uninstall** — live emerge output streamed to the browser, with emerge option flags
+- **Maintenance** — world update, depclean, preserved-rebuild, sync, all with pretend mode
+- **Jobs** — active running jobs with live output; completed jobs are automatically archived to **History**
+- **History** — searchable log of all past emerge operations, filterable by kind, with per-entry log viewer and purge
+
 ## Screenshots
 
 ![Package browser and dependency tree](https://i.imgur.com/ww2S5zU.png)
@@ -23,7 +32,7 @@ Two processes run as separate privileges:
 
 ## Prerequisites
 
-- Gentoo Linux with OpenRC
+- Gentoo Linux with OpenRC or systemd
 - Python 3.11+
 - `openssl` (for certificate generation)
 
@@ -34,7 +43,9 @@ Two processes run as separate privileges:
 ```bash
 eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
 emaint sync -r arbor-overlay
-ACCEPT_KEYWORDS="**" emerge 'app-admin/arbor'
+# choose your init system via USE flag:
+echo 'app-admin/arbor systemd' >> /etc/portage/package.use/arbor   # or: openrc
+ACCEPT_KEYWORDS="**" emerge app-admin/arbor
 bash /usr/share/arbor/setup.sh
 ```
 
@@ -46,28 +57,40 @@ cd Arbor
 sudo bash install.sh
 ```
 
-The installer will:
+The installer automatically detects your init system (OpenRC or systemd) and will:
 
 1. Install the backend to `/usr/lib/arbor/` with a Python venv
-2. Install OpenRC service files
+2. Install the appropriate service files
 3. Create the `arbor` system user
 4. Generate a self-signed TLS certificate in `/etc/arbor/`
 5. Generate a random access token (printed once, also saved to `/etc/arbor/token`)
 
 ## First run
 
+**OpenRC:**
 ```bash
 rc-service arbor-daemon start
 rc-service arbor start
+```
+
+**systemd:**
+```bash
+systemctl start arbor-daemon arbor
 ```
 
 Open `https://localhost:8443` in your browser. Accept the self-signed certificate warning, then enter the token shown during install (or read it with `sudo cat /etc/arbor/token`).
 
 ## Start at boot
 
+**OpenRC:**
 ```bash
 rc-update add arbor-daemon default
 rc-update add arbor default
+```
+
+**systemd:**
+```bash
+systemctl enable arbor-daemon arbor
 ```
 
 ## Update
@@ -76,17 +99,16 @@ rc-update add arbor default
 
 ```bash
 emaint sync -r arbor-overlay
-emerge 'app-admin/arbor'
-rc-service arbor restart; rc-service arbor-daemon restart
+emerge app-admin/arbor
 ```
+
+Then restart the services (OpenRC: `rc-service arbor restart; rc-service arbor-daemon restart` / systemd: `systemctl restart arbor-daemon arbor`).
 
 ### Via install script
 
 ```bash
 git pull
 sudo bash install.sh
-rc-service arbor stop; rc-service arbor-daemon stop
-rc-service arbor-daemon start; rc-service arbor start
 ```
 
 The installer skips certificate and token generation if `/etc/arbor/cert.pem` and `/etc/arbor/token` already exist.
@@ -97,17 +119,33 @@ The installer skips certificate and token generation if `/etc/arbor/cert.pem` an
 
 ```bash
 emerge --unmerge app-admin/arbor
-emerge --depclean
-rc-update del arbor; rc-update del arbor-daemon
+```
+
+**OpenRC:** `rc-update del arbor; rc-update del arbor-daemon`  
+**systemd:** `systemctl disable arbor-daemon arbor`
+
+```bash
 userdel arbor
 ```
 
 ### Via install script
 
+**OpenRC:**
 ```bash
 rc-service arbor stop; rc-service arbor-daemon stop
 rc-update del arbor; rc-update del arbor-daemon
 rm -f /etc/init.d/arbor /etc/init.d/arbor-daemon
+```
+
+**systemd:**
+```bash
+systemctl stop arbor arbor-daemon
+systemctl disable arbor arbor-daemon
+rm -f /usr/lib/systemd/system/arbor.service /usr/lib/systemd/system/arbor-daemon.service
+systemctl daemon-reload
+```
+
+```bash
 rm -f /usr/local/bin/arbor /usr/local/bin/arbor-daemon
 rm -rf /usr/lib/arbor
 userdel arbor

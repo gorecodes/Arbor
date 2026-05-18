@@ -7,7 +7,9 @@ import asyncio
 import json
 import os
 import re
+import sqlite3
 import sys
+import threading
 import time
 import uuid
 import logging
@@ -40,6 +42,10 @@ ALLOWED_COMMANDS = {
     "job_status",
     "job_cancel",
     "job_list",
+    "history_list",
+    "history_log",
+    "history_delete",
+    "history_purge",
 }
 
 # ---------------------------------------------------------------------------
@@ -83,6 +89,89 @@ _jobs: dict[str, _Job] = {}
 # clients clicking "install <atom>" can't both decide "no running job" and
 # spawn duplicate emerge processes.
 _jobs_lock: asyncio.Lock | None = None
+
+# ---------------------------------------------------------------------------
+# SQLite history store
+# ---------------------------------------------------------------------------
+
+_DB_PATH = "/var/lib/arbor/history.db"
+_db_lock = threading.Lock()
+
+
+def _db_init():
+    Path(_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+    with _db_lock:
+        with sqlite3.connect(_DB_PATH) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS job_history (
+                    job_id TEXT PRIMARY KEY,
+                    atom TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    returncode INTEGER,
+                    created_at REAL NOT NULL,
+                    finished_at REAL,
+                    log TEXT
+                )
+            """)
+
+
+def _history_save(job_id: str, atom: str, kind: str, status: str, returncode, created_at: float, finished_at: float, log_text: str):
+    with _db_lock:
+        with sqlite3.connect(_DB_PATH) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO job_history "
+                "(job_id, atom, kind, status, returncode, created_at, finished_at, log) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (job_id, atom, kind, status, returncode, created_at, finished_at, log_text),
+            )
+
+
+def _history_list(limit: int, offset: int, kind: str) -> dict:
+    with _db_lock:
+        with sqlite3.connect(_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            if kind:
+                total = conn.execute("SELECT COUNT(*) FROM job_history WHERE kind=?", (kind,)).fetchone()[0]
+                rows = conn.execute(
+                    "SELECT job_id, atom, kind, status, returncode, created_at, finished_at "
+                    "FROM job_history WHERE kind=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    (kind, limit, offset),
+                ).fetchall()
+            else:
+                total = conn.execute("SELECT COUNT(*) FROM job_history").fetchone()[0]
+                rows = conn.execute(
+                    "SELECT job_id, atom, kind, status, returncode, created_at, finished_at "
+                    "FROM job_history ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    (limit, offset),
+                ).fetchall()
+            return {"items": [dict(r) for r in rows], "total": total}
+
+
+def _history_log(job_id: str) -> dict:
+    with _db_lock:
+        with sqlite3.connect(_DB_PATH) as conn:
+            row = conn.execute("SELECT log FROM job_history WHERE job_id=?", (job_id,)).fetchone()
+            if row is None:
+                return {"error": "not found"}
+            return {"log": row[0] or ""}
+
+
+def _history_delete(job_id: str) -> dict:
+    with _db_lock:
+        with sqlite3.connect(_DB_PATH) as conn:
+            deleted = conn.execute("DELETE FROM job_history WHERE job_id=?", (job_id,)).rowcount
+            if deleted == 0:
+                return {"error": "not found"}
+            return {"ok": True}
+
+
+def _history_purge(days: int) -> dict:
+    cutoff = time.time() - days * 86400
+    with _db_lock:
+        with sqlite3.connect(_DB_PATH) as conn:
+            deleted = conn.execute("DELETE FROM job_history WHERE created_at < ?", (cutoff,)).rowcount
+            return {"deleted": deleted}
 
 
 def _get_jobs_lock() -> asyncio.Lock:
@@ -808,6 +897,13 @@ async def _run_job(job_id: str):
         for q in list(job._queues):
             q.put_nowait(None)  # sentinel: stream ended
         log.info("job %s finished status=%s rc=%s", job_id, job.status, job.returncode)
+        finished_at = time.time()
+        log_text = "\n".join(c["line"] for c in job.logs if "line" in c)
+        try:
+            await in_thread(_history_save, job_id, job.atom, job.kind, job.status,
+                            job.returncode, job.created_at, finished_at, log_text)
+        except Exception as exc:
+            log.warning("failed to persist history for job %s: %s", job_id, exc)
 
 
 async def _cleanup_jobs():
@@ -988,8 +1084,9 @@ async def cmd_job_status(args):
 
 async def cmd_job_list(_args):
     for jid, job in _jobs.items():
-        yield {"job_id": jid, "atom": job.atom, "kind": job.kind,
-               "status": job.status, "returncode": job.returncode, "created_at": job.created_at}
+        if job.status == "running":
+            yield {"job_id": jid, "atom": job.atom, "kind": job.kind,
+                   "status": job.status, "returncode": job.returncode, "created_at": job.created_at}
     yield {"done": True}
 
 
@@ -1098,6 +1195,26 @@ async def cmd_etc_update_resolve(args):
         yield item
 
 
+async def cmd_history_list(args):
+    limit = min(max(int(args.get("limit", 50)), 1), 500)
+    offset = max(int(args.get("offset", 0)), 0)
+    kind = args.get("kind", "")
+    yield await in_thread(_history_list, limit, offset, kind)
+
+
+async def cmd_history_log(args):
+    yield await in_thread(_history_log, args.get("job_id", ""))
+
+
+async def cmd_history_delete(args):
+    yield await in_thread(_history_delete, args.get("job_id", ""))
+
+
+async def cmd_history_purge(args):
+    days = max(int(args.get("days", 30)), 1)
+    yield await in_thread(_history_purge, days)
+
+
 HANDLERS = {
     "system_status":      cmd_system_status,
     "installed_packages": cmd_installed_packages,
@@ -1123,6 +1240,10 @@ HANDLERS = {
     "job_status":         cmd_job_status,
     "job_cancel":         cmd_job_cancel,
     "job_list":           cmd_job_list,
+    "history_list":       cmd_history_list,
+    "history_log":        cmd_history_log,
+    "history_delete":     cmd_history_delete,
+    "history_purge":      cmd_history_purge,
 }
 
 
@@ -1151,6 +1272,7 @@ async def main():
     os.chown(SOCKET_PATH, 0, arbor_gid)
     os.chmod(SOCKET_PATH, 0o660)
 
+    _db_init()
     asyncio.create_task(_cleanup_jobs())
     log.info("listening on %s", SOCKET_PATH)
     async with server:
