@@ -201,31 +201,30 @@
         const gb = b / 1024 ** 3
         return gb >= 1 ? gb.toFixed(1) + ' GB' : (b / 1024 ** 2).toFixed(0) + ' MB'
       },
-      diskPct() {
-        if (!this.status) return 0
-        return Math.round((this.status.disk_used / this.status.disk_total) * 100)
+      _safePct(used, total) {
+        if (!total || isNaN(used) || isNaN(total)) return 0
+        return Math.min(100, Math.max(0, Math.round((used / total) * 100)))
       },
-      memPct() {
-        if (!this.status || !this.status.mem_total) return 0
-        return Math.round((this.status.mem_used / this.status.mem_total) * 100)
-      },
-      cpuPct() {
-        return this.status ? Math.round(this.status.cpu_pct) : 0
-      },
-      // SVG gauge arc path for a semi-circle (left→top→right, viewBox 0 0 100 60)
-      // cx=50, cy=55, r=45
-      gaugePath(pct) {
-        const f = Math.max(0.001, Math.min(1, pct / 100))
-        const cx = 50, cy = 55, r = 45
-        const ex = cx - r * Math.cos(f * Math.PI)
-        const ey = cy - r * Math.sin(f * Math.PI)
+      diskPct() { return this.status ? this._safePct(this.status.disk_used, this.status.disk_total) : 0 },
+      memPct()  { return this.status ? this._safePct(this.status.mem_used,  this.status.mem_total)  : 0 },
+      cpuPct()  { return this.status ? Math.round(this.status.cpu_pct || 0) : 0 },
+      // Generate a complete SVG gauge as HTML string — avoids Alpine SVG attribute binding issues.
+      // Semi-circle: left → top → right, viewBox 0 0 120 70, center (60,65), radius 52.
+      _gaugeHtml(pct, label, sub) {
+        const safeP = isNaN(pct) || !isFinite(pct) ? 0 : Math.max(0, Math.min(100, pct))
+        const f = Math.max(0.001, Math.min(0.999, safeP / 100))
+        const [cx, cy, r] = [60, 65, 52]
+        const ex = (cx - r * Math.cos(f * Math.PI)).toFixed(1)
+        const ey = (cy - r * Math.sin(f * Math.PI)).toFixed(1)
         const large = f > 0.5 ? 1 : 0
-        return `M ${cx - r} ${cy} A ${r} ${r} 0 ${large} 1 ${ex.toFixed(2)} ${ey.toFixed(2)}`
-      },
-      gaugeColor(pct) {
-        if (pct >= 85) return '#f85149'
-        if (pct >= 60) return '#d29922'
-        return '#3fb950'
+        const color = safeP >= 85 ? '#f85149' : safeP >= 60 ? '#d29922' : '#3fb950'
+        return `<svg viewBox="0 0 120 70" width="130" height="76">
+          <path d="M 8 65 A 52 52 0 1 1 112 65" fill="none" stroke="#21262d" stroke-width="10" stroke-linecap="round"/>
+          <path d="M 8 65 A 52 52 0 ${large} 1 ${ex} ${ey}" fill="none" stroke="${color}" stroke-width="10" stroke-linecap="round"/>
+          <text x="60" y="57" text-anchor="middle" fill="#c9d1d9" font-size="18" font-family="monospace">${safeP}%</text>
+        </svg>
+        <span class="gauge-label">${label}</span>
+        <span class="gauge-sub">${sub}</span>`
       }
     }
   }

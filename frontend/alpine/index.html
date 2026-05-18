@@ -295,44 +295,12 @@
           <p class="error"  x-show="error" x-text="error"></p>
 
           <div class="dash-gauges" x-show="status && !error">
-            <!-- CPU gauge -->
-            <div class="dash-gauge-card">
-              <svg viewBox="0 0 100 60" class="gauge-svg">
-                <path d="M 5 55 A 45 45 0 1 1 95 55"
-                      fill="none" stroke="#21262d" stroke-width="9" stroke-linecap="round"/>
-                <path :d="gaugePath(cpuPct())"
-                      fill="none" :stroke="gaugeColor(cpuPct())" stroke-width="9" stroke-linecap="round"/>
-                <text x="50" y="45" text-anchor="middle" class="gauge-val" x-text="cpuPct() + '%'"></text>
-              </svg>
-              <span class="gauge-label">CPU load</span>
-              <span class="gauge-sub" x-text="'load avg ' + (status?.cpu_load1 ?? '')"></span>
-            </div>
-
-            <!-- RAM gauge -->
-            <div class="dash-gauge-card">
-              <svg viewBox="0 0 100 60" class="gauge-svg">
-                <path d="M 5 55 A 45 45 0 1 1 95 55"
-                      fill="none" stroke="#21262d" stroke-width="9" stroke-linecap="round"/>
-                <path :d="gaugePath(memPct())"
-                      fill="none" :stroke="gaugeColor(memPct())" stroke-width="9" stroke-linecap="round"/>
-                <text x="50" y="45" text-anchor="middle" class="gauge-val" x-text="memPct() + '%'"></text>
-              </svg>
-              <span class="gauge-label">RAM</span>
-              <span class="gauge-sub" x-text="fmtBytes(status?.mem_used) + ' / ' + fmtBytes(status?.mem_total)"></span>
-            </div>
-
-            <!-- Disk gauge -->
-            <div class="dash-gauge-card">
-              <svg viewBox="0 0 100 60" class="gauge-svg">
-                <path d="M 5 55 A 45 45 0 1 1 95 55"
-                      fill="none" stroke="#21262d" stroke-width="9" stroke-linecap="round"/>
-                <path :d="gaugePath(diskPct())"
-                      fill="none" :stroke="gaugeColor(diskPct())" stroke-width="9" stroke-linecap="round"/>
-                <text x="50" y="45" text-anchor="middle" class="gauge-val" x-text="diskPct() + '%'"></text>
-              </svg>
-              <span class="gauge-label">Disk /</span>
-              <span class="gauge-sub" x-text="fmtBytes(status?.disk_used) + ' / ' + fmtBytes(status?.disk_total)"></span>
-            </div>
+            <div class="dash-gauge-card"
+              x-html="_gaugeHtml(cpuPct(), 'CPU', 'load avg ' + (status?.cpu_load1 ?? 0))"></div>
+            <div class="dash-gauge-card"
+              x-html="_gaugeHtml(memPct(), 'RAM', fmtBytes(status?.mem_used ?? 0) + ' / ' + fmtBytes(status?.mem_total ?? 0))"></div>
+            <div class="dash-gauge-card"
+              x-html="_gaugeHtml(diskPct(), 'Disk /', fmtBytes(status?.disk_used ?? 0) + ' / ' + fmtBytes(status?.disk_total ?? 0))"></div>
           </div>
 
           <div class="dash-cards" x-show="status && !error">
