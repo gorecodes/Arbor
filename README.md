@@ -91,6 +91,35 @@ rc-service arbor-daemon start; rc-service arbor start
 
 The installer skips certificate and token generation if `/etc/arbor/cert.pem` and `/etc/arbor/token` already exist.
 
+## Uninstall
+
+### Via Portage overlay
+
+```bash
+emerge --unmerge app-admin/arbor
+emerge --depclean
+rc-update del arbor; rc-update del arbor-daemon
+```
+
+### Via install script
+
+```bash
+rc-service arbor stop; rc-service arbor-daemon stop
+rc-update del arbor; rc-update del arbor-daemon
+rm -f /etc/init.d/arbor /etc/init.d/arbor-daemon
+rm -f /usr/local/bin/arbor /usr/local/bin/arbor-daemon
+rm -rf /usr/lib/arbor
+userdel arbor
+```
+
+In both cases, configuration files (`/etc/arbor/`) and logs (`/var/log/arbor/`) are **not** removed automatically. Delete them manually if you want a full clean:
+
+```bash
+rm -rf /etc/arbor /var/log/arbor /run/arbor
+```
+
+> **Note:** `/etc/arbor/` contains your TLS certificate and access token. Skip this step if you plan to reinstall and want to keep them.
+
 ## Logs
 
 ```
