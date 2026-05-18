@@ -7,6 +7,9 @@ node_modules/
 /etc/arbor/
 *.pem
 *.key
+
+# GitHub Copilot
 .claude/
+.copilot/
 CODE_REVIEW.md
 EMERGE_OPTIONS.md

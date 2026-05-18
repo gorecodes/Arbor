@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Arbor</title>
+  <link rel="stylesheet" href="style.css">
+  <!-- app.js must load before alpine so component factories are on window
+       when Alpine processes x-data attributes. Both are deferred and execute
+       in DOM order after the document is parsed. -->
+  <script src="app.js" defer></script>
+  <script src="vendor/alpine.min.js" defer></script>
+</head>
+<body x-data>
+
+  <!-- ── Login ──────────────────────────────────────────────────────────── -->
+  <div x-show="!$store.auth.isLoggedIn" x-cloak x-data="loginComponent()">
+    <div class="login">
+      <div class="card">
+        <h1>Arbor</h1>
+        <p class="sub">Portage explorer</p>
+        <form @submit.prevent="submit">
+          <input
+            type="password"
+            x-model="token"
+            placeholder="Access token"
+            autocomplete="current-password"
+          >
+          <span class="error" x-show="error" x-text="error"></span>
+          <button
+            type="submit"
+            :disabled="loading || !token"
+            x-text="loading ? 'Connecting…' : 'Connect'"
+          ></button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── App layout ─────────────────────────────────────────────────────── -->
+  <div x-show="$store.auth.isLoggedIn" x-cloak class="layout">
+
+    <!-- Sidebar -->
+    <nav x-data="navComponent()">
+      <div class="logo"><span class="tree">⬡</span> Arbor</div>
+      <ul>
+        <template x-for="item in items" :key="item.id">
+          <li :class="{ active: isActive(item.id) }">
+            <button @click="nav(item.id)" x-text="item.label"></button>
+          </li>
+        </template>
+      </ul>
+      <div class="bottom">
+        <button class="logout" @click="logout">Logout</button>
+      </div>
+    </nav>
+
+    <!-- Main content — views toggled with x-show (never destroyed, preserving
+         WebSocket state across navigation). Priority matches the original
+         Svelte if-else chain: install > uninstall > pkg-detail > rest. -->
+    <main>
+
+      <!-- Install flow -->
+      <div x-show="$store.router.view === 'install'" x-data="installComponent()">
+        <div class="ev-view-page">
+          <div class="ev-page-header">
+            <button class="ev-back" @click="goBack()">← <span x-text="$store.router.installAtom"></span></button>
+            <span class="ev-step-title" x-text="stepTitle()"></span>
+          </div>
+
+          <div class="ev-content">
+            <!-- EmergeOptions (pretend / autounmask / install steps) -->
+            <div class="iv-opts-wrap" x-show="step !== 'etcupdate' && step !== 'done'">
+              <div class="eo-opts">
+                <div class="eo-preview" title="Command that will be executed">
+                  <span class="eo-prompt">$</span>
+                  <span class="eo-cmd" x-text="_eoCommand"></span>
+                  <template x-for="f in _eoBaseFlags" :key="f">
+                    <span class="eo-base" x-text="f"></span>
+                  </template>
+                  <template x-for="f in eoUserFlags()" :key="f">
+                    <span class="eo-user" x-text="f"></span>
+                  </template>
+                  <span class="eo-target" x-text="$store.router.installAtom"></span>
+                </div>
+                <button class="eo-toggle" type="button" @click="eoOpen = !eoOpen">
+                  <span x-text="eoOpen ? '▾' : '▸'"></span>
+                  <span>Options</span>
+                  <span class="eo-badge" x-show="eoActiveCount() > 0" x-text="eoActiveCount()"></span>
+                </button>
+                <div class="eo-list" x-show="eoOpen">
+                  <template x-for="item in _eoSchema" :key="item.key">
+                    <label class="eo-opt">
+                      <input type="checkbox" :checked="!!eoChecked[item.key]" @change="eoToggle(item.key)">
+                      <span class="eo-flag" x-text="item.label"></span>
+                      <input type="number" class="eo-num"
+                             :min="item.min ?? 1" :max="item.max ?? 100"
+                             :value="item.type === 'int' ? _eoValueFor(item) : ''"
+                             :disabled="!eoChecked[item.key]"
+                             @input="item.type === 'int' && eoSetValue(item, $event.target.value)"
+                             :style="item.type !== 'int' ? 'visibility:hidden' : ''">
+                      <span class="eo-desc" x-text="item.desc"></span>
+                    </label>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <!-- Terminal (pretend / autounmask / install) -->
+            <div class="ev-terminal" x-ref="installTerm" x-show="step !== 'etcupdate' && step !== 'done'">
+              <template x-for="(line, i) in lines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+              <div class="line cursor" x-show="running">▊</div>
+              <div class="line status" :class="statusClass()"
+                   x-show="returncode !== null && !running"
+                   x-text="'── ' + statusText() + ' ──'"></div>
+            </div>
+
+            <!-- etc-update: config file list -->
+            <div class="iv-etclist" x-show="step === 'etcupdate'">
+              <template x-for="file in etcFiles" :key="file.cfg_file">
+                <div class="iv-etcfile" :class="{ resolved: file.resolved }">
+                  <div class="iv-etcfile-header">
+                    <span class="iv-fname" x-text="file.real_file"></span>
+                    <span class="iv-badge-action" x-show="file.resolved"
+                          x-text="file.action === 'replace' ? '✓ replaced' : '✓ kept'"></span>
+                    <div class="iv-etcfile-actions" x-show="!file.resolved">
+                      <button class="iv-btn-keep" @click="resolveFile(file, 'keep')">Keep old</button>
+                      <button class="iv-btn-replace" @click="resolveFile(file, 'replace')">Take new</button>
+                    </div>
+                  </div>
+                  <pre class="iv-diff" x-show="!file.resolved && file.diff" x-text="file.diff"></pre>
+                </div>
+              </template>
+            </div>
+
+            <!-- Done -->
+            <div class="ev-done-msg" x-show="step === 'done'">
+              <span class="ev-done-icon">✓</span>
+              <span x-text="($store.router.installAtom || '') + ' installed successfully.'"></span>
+            </div>
+
+            <!-- Actions -->
+            <div class="ev-actions">
+              <button class="ev-btn-primary"
+                x-show="step === 'pretend' && !running && needsUnmask"
+                @click="runAutounmask()">Unmask &amp; retry</button>
+              <button class="ev-btn-primary"
+                x-show="step === 'pretend' && !running && !needsUnmask && returncode === 0"
+                @click="runInstall()">Install</button>
+              <button class="ev-btn-primary"
+                x-show="step === 'pretend' && !running && !needsUnmask && returncode === null"
+                @click="runPretend()">Run pretend</button>
+              <button class="ev-btn-secondary"
+                x-show="step === 'pretend' && !running && !needsUnmask && returncode !== null && returncode !== 0"
+                @click="runPretend()">Retry pretend</button>
+              <button class="ev-btn-secondary"
+                x-show="(step === 'install' || step === 'autounmask') && !running && returncode !== null && returncode !== 0"
+                @click="retry()">Retry</button>
+              <button class="ev-btn-primary"
+                x-show="step === 'done'"
+                @click="navigate('packages', $store.router.installAtom)">Close</button>
+              <button class="ev-btn-cancel" x-show="step !== 'done'"
+                :disabled="running && step === 'install'"
+                @click="goBack()"
+                x-text="running ? 'Running…' : 'Cancel'"></button>
+              <span class="ev-spinner" x-show="running">⟳</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Uninstall flow -->
+      <div x-show="$store.router.view === 'uninstall'" x-data="uninstallComponent()">
+        <div class="ev-view-page">
+          <div class="ev-page-header">
+            <button class="ev-back" @click="goBack()">← <span x-text="$store.router.uninstallAtom"></span></button>
+            <span class="ev-step-title" x-text="stepTitle()"></span>
+          </div>
+
+          <div class="ev-content">
+            <!-- Terminal -->
+            <div class="ev-terminal" x-ref="uninstallTerm" x-show="step !== 'done'">
+              <template x-for="(line, i) in lines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+              <div class="line cursor" x-show="running">▊</div>
+              <div class="line status" :class="statusClass()"
+                   x-show="returncode !== null && !running"
+                   x-text="'── ' + statusText() + ' ──'"></div>
+            </div>
+
+            <!-- Done -->
+            <div class="ev-done-msg" x-show="step === 'done'">
+              <span class="ev-done-icon">✓</span>
+              <span x-text="($store.router.uninstallAtom || '') + ' removed successfully.'"></span>
+            </div>
+
+            <!-- Actions -->
+            <div class="ev-actions">
+              <button class="ev-btn-primary"
+                x-show="step === 'pretend' && !running && returncode === null"
+                @click="runPretend()">Run pretend</button>
+              <button class="ev-btn-danger"
+                x-show="step === 'pretend' && !running && returncode === 0"
+                @click="runUninstall()">Uninstall</button>
+              <button class="ev-btn-secondary"
+                x-show="(step === 'pretend' || step === 'uninstall') && !running && returncode !== null && returncode !== 0"
+                @click="retry()">Retry</button>
+              <button class="ev-btn-primary"
+                x-show="step === 'done'"
+                @click="navigate('packages', $store.router.uninstallAtom)">Close</button>
+              <button class="ev-btn-cancel" x-show="step !== 'done'"
+                :disabled="running && step === 'uninstall'"
+                @click="goBack()"
+                x-text="running ? 'Running…' : 'Cancel'"></button>
+              <span class="ev-spinner" x-show="running">⟳</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Package detail (view='packages' + selectedPackage set) -->
+      <div x-show="$store.router.selectedPackage && $store.router.view === 'packages'"
+           x-data="packageDetailComponent()">
+        <button class="pd-back" @click="navigateBack()">← Back</button>
+
+        <p class="error" x-show="error" x-text="error"></p>
+        <p class="muted"  x-show="!error && !info">Loading…</p>
+
+        <div x-show="info">
+          <div class="pd-header">
+            <div class="pd-header-row">
+              <h2 x-text="info?.cpv"></h2>
+              <button class="pd-btn-install"   x-show="info && !info.installed"
+                @click="navigate('install',   $store.router.selectedPackage)">⬇ Install</button>
+              <span   class="pd-installed-badge" x-show="info && info.installed">✓ installed</span>
+              <button class="pd-btn-uninstall" x-show="info && info.installed"
+                @click="navigate('uninstall', $store.router.selectedPackage)">✕ Uninstall</button>
+            </div>
+            <p class="pd-desc" x-text="info?.DESCRIPTION"></p>
+            <a x-show="validHomepage()" :href="info?.HOMEPAGE" target="_blank" rel="noopener noreferrer"
+               x-text="info?.HOMEPAGE"></a>
+          </div>
+
+          <div class="pd-meta">
+            <span class="pd-badge" x-text="'slot ' + (info?.SLOT || '0')"></span>
+            <span class="pd-badge" x-text="info?.LICENSE"></span>
+            <span class="pd-badge pd-muted" x-show="info?.installed" x-text="'built ' + fmtDate(info?.BUILD_TIME)"></span>
+            <span class="pd-badge pd-muted" x-show="info?.installed" x-text="fmtSize(info?.SIZE)"></span>
+          </div>
+
+          <!-- Tabs -->
+          <div class="pd-tabs">
+            <template x-for="t in ['info', 'use flags', 'deps']" :key="t">
+              <button :class="{ active: tab === t }" @click="tab = t" x-text="t"></button>
+            </template>
+          </div>
+
+          <!-- Info tab: RDEPEND -->
+          <div class="pd-panel" x-show="tab === 'info'">
+            <h4>RDEPEND</h4>
+            <pre class="dep-raw" x-text="deps && deps.rdepend ? deps.rdepend : '—'"></pre>
+          </div>
+
+          <!-- Use flags tab -->
+          <div x-show="tab === 'use flags'">
+            <p class="error" x-show="flagsError" x-text="flagsError"></p>
+            <div class="pd-flags" x-show="!flagsError && flags && flags.flags && flags.flags.length">
+              <template x-for="f in (flags && flags.flags || [])" :key="f.name">
+                <span class="pd-flag" :class="{ on: f.enabled, off: !f.enabled }"
+                  x-text="(f.enabled ? '+' : '-') + f.name"></span>
+              </template>
+            </div>
+            <p class="muted" x-show="!flagsError && (!flags || !flags.flags || !flags.flags.length)">
+              No USE flags.
+            </p>
+          </div>
+
+          <!-- Deps tab: DepGraph -->
+          <div x-show="tab === 'deps'" x-data="depGraphComponent()">
+            <p class="error" x-show="error && !loading" x-text="error"></p>
+            <p class="muted"  x-show="loading">Resolving…</p>
+            <div class="dg-tree" x-ref="treeRoot" x-show="root && !loading"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dashboard -->
+      <div x-show="$store.router.view === 'dashboard'" x-data="dashboardComponent()">
+        <div class="dashboard">
+          <h2>System Overview</h2>
+          <p class="muted"  x-show="!status && !error">Loading…</p>
+          <p class="error"  x-show="error" x-text="error"></p>
+          <div class="dash-cards" x-show="status && !error">
+            <div class="dash-card">
+              <span class="dash-label">Installed packages</span>
+              <span class="dash-value" x-text="status?.pkg_count"></span>
+            </div>
+            <div class="dash-card">
+              <span class="dash-label">Last sync</span>
+              <span class="dash-value dash-mono" x-text="status?.last_sync"></span>
+            </div>
+            <div class="dash-card dash-wide">
+              <span class="dash-label"
+                x-text="status ? 'Disk usage (' + fmtBytes(status.disk_used) + ' / ' + fmtBytes(status.disk_total) + ')' : ''">
+              </span>
+              <div class="dash-bar">
+                <div class="dash-fill"
+                  :style="status ? 'width:' + diskPct(status.disk_used, status.disk_total) + '%' : 'width:0'">
+                </div>
+              </div>
+              <span class="dash-sub" x-text="status ? fmtBytes(status.disk_free) + ' free' : ''"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Installed packages list -->
+      <div x-show="$store.router.view === 'packages' && !$store.router.selectedPackage"
+           x-data="packageListComponent()">
+        <div class="pkg-toolbar">
+          <h2>Installed Packages</h2>
+          <input type="search" x-model="search" @input="onInput()" placeholder="Filter…">
+        </div>
+        <p class="muted" x-show="loading">Loading…</p>
+        <div x-show="!loading">
+          <table class="pkg-table">
+            <thead>
+              <tr>
+                <th>Package</th><th>Category</th><th>Slot</th><th>Built</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="pkg in packages" :key="pkg.cpv">
+                <tr class="clickable" @click="navigateTo(pkg.cpv)">
+                  <td class="td-pkg" x-text="pkg.pf"></td>
+                  <td class="td-cat" x-text="pkg.cat"></td>
+                  <td x-text="pkg.slot"></td>
+                  <td x-text="fmtDate(pkg.build_time)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+          <p class="pkg-count" x-text="packages.length + ' packages'"></p>
+        </div>
+      </div>
+
+      <!-- Search -->
+      <div x-show="$store.router.view === 'search'" x-data="searchComponent()">
+        <div class="pkg-toolbar">
+          <h2>Search Portage Tree</h2>
+          <input type="search" x-model="query" @input="onInput()" placeholder="package name…" style="width:300px">
+        </div>
+        <p class="muted" x-show="loading">Searching…</p>
+        <p class="muted" x-show="!loading && searched && results.length === 0">
+          No results for "<span x-text="query"></span>"
+        </p>
+        <table class="pkg-table" x-show="!loading && results.length > 0">
+          <thead>
+            <tr>
+              <th>Package</th><th>Best version</th><th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template x-for="r in results" :key="r.cp">
+              <tr class="clickable" @click="navigateTo(r.best || r.cp)">
+                <td class="td-pkg" x-text="r.cp"></td>
+                <td class="td-ver" x-text="r.best || '—'"></td>
+                <td class="td-desc" x-text="r.description"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Maintenance / world-update / sync -->
+      <div x-show="$store.router.view === 'updates'" x-data="updatesComponent()">
+        <div class="mv-view">
+          <h2>Maintenance</h2>
+
+          <!-- Sync -->
+          <div class="mv-card">
+            <div class="mv-card-header">
+              <div class="mv-card-title">
+                <span class="mv-title">Sync</span>
+                <span class="mv-cmd">emaint sync -a</span>
+              </div>
+              <div class="mv-card-actions">
+                <span class="mv-rc" :class="statusClass(sync.rc)" x-show="sync.rc !== null"
+                      x-text="sync.rc === 0 ? 'done' : 'exit ' + sync.rc"></span>
+                <button class="mv-btn-toggle" @click="sync.expanded = !sync.expanded"
+                        x-text="sync.expanded ? '▲' : '▼'"></button>
+                <button class="mv-btn-run" @click="startSync()" :disabled="sync.running"
+                        x-text="sync.running ? 'Running…' : sync.rc !== null ? 'Re-sync' : 'Sync'"></button>
+              </div>
+            </div>
+            <div class="terminal" x-ref="syncTerm" x-show="sync.expanded">
+              <template x-for="(line, i) in sync.lines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+              <div class="line cursor" x-show="sync.running">▊</div>
+              <div class="line muted-line" x-show="sync.lines.length === 0 && !sync.running">Run sync to update the portage tree.</div>
+            </div>
+          </div>
+
+          <!-- Check updates -->
+          <div class="mv-card">
+            <div class="mv-card-header">
+              <div class="mv-card-title">
+                <span class="mv-title">Check updates</span>
+                <span class="mv-cmd">emerge -uDN --pretend @world</span>
+              </div>
+              <div class="mv-card-actions">
+                <span class="mv-rc" :class="statusClass(worldPretend.rc)" x-show="worldPretend.rc !== null"
+                      x-text="worldPretend.rc === 0 ? 'done' : 'exit ' + worldPretend.rc"></span>
+                <button class="mv-btn-toggle" @click="worldPretend.expanded = !worldPretend.expanded"
+                        x-text="worldPretend.expanded ? '▲' : '▼'"></button>
+                <button class="mv-btn-run" @click="startWorldPretend()" :disabled="worldPretend.running"
+                        x-text="worldPretend.running ? 'Running…' : 'Check'"></button>
+              </div>
+            </div>
+            <div class="terminal" x-ref="wpTerm" x-show="worldPretend.expanded">
+              <template x-for="(line, i) in worldPretend.lines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+              <div class="line cursor" x-show="worldPretend.running">▊</div>
+              <div class="line muted-line" x-show="worldPretend.lines.length === 0 && !worldPretend.running">Run a check to see pending updates.</div>
+            </div>
+          </div>
+
+          <!-- Update @world -->
+          <div class="mv-card">
+            <div class="mv-card-header">
+              <div class="mv-card-title">
+                <span class="mv-title">Update @world</span>
+                <span class="mv-cmd">emerge -uDN --with-bdeps=y @world</span>
+              </div>
+              <div class="mv-card-actions">
+                <span class="mv-rc" :class="statusClass(worldUpdate.rc)" x-show="worldUpdate.rc !== null"
+                      x-text="worldUpdate.rc === 0 ? 'done' : 'exit ' + worldUpdate.rc"></span>
+                <button class="mv-btn-toggle" @click="worldUpdate.expanded = !worldUpdate.expanded"
+                        x-text="worldUpdate.expanded ? '▲' : '▼'"></button>
+                <button class="mv-btn-run" @click="startWorldUpdate()" :disabled="worldUpdate.running"
+                        x-text="worldUpdate.running ? 'Running…' : worldUpdate.rc !== null ? 'Retry' : 'Update'"></button>
+              </div>
+            </div>
+            <div class="mv-card-opts">
+              <div class="eo-opts">
+                <div class="eo-preview" title="Command that will be executed">
+                  <span class="eo-prompt">$</span>
+                  <span class="eo-cmd" x-text="_eoCommand"></span>
+                  <template x-for="f in _eoBaseFlags" :key="f">
+                    <span class="eo-base" x-text="f"></span>
+                  </template>
+                  <template x-for="f in eoUserFlags()" :key="f">
+                    <span class="eo-user" x-text="f"></span>
+                  </template>
+                  <span class="eo-target">@world</span>
+                </div>
+                <button class="eo-toggle" type="button" @click="eoOpen = !eoOpen">
+                  <span x-text="eoOpen ? '▾' : '▸'"></span>
+                  <span>Options</span>
+                  <span class="eo-badge" x-show="eoActiveCount() > 0" x-text="eoActiveCount()"></span>
+                </button>
+                <div class="eo-list" x-show="eoOpen">
+                  <template x-for="item in _eoSchema" :key="item.key">
+                    <label class="eo-opt">
+                      <input type="checkbox" :checked="!!eoChecked[item.key]" @change="eoToggle(item.key)">
+                      <span class="eo-flag" x-text="item.label"></span>
+                      <input type="number" class="eo-num"
+                             :min="item.min ?? 1" :max="item.max ?? 100"
+                             :value="item.type === 'int' ? _eoValueFor(item) : ''"
+                             :disabled="!eoChecked[item.key]"
+                             @input="item.type === 'int' && eoSetValue(item, $event.target.value)"
+                             :style="item.type !== 'int' ? 'visibility:hidden' : ''">
+                      <span class="eo-desc" x-text="item.desc"></span>
+                    </label>
+                  </template>
+                </div>
+              </div>
+            </div>
+            <div class="terminal" x-ref="wuTerm" x-show="worldUpdate.expanded">
+              <template x-for="(line, i) in worldUpdate.lines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+              <div class="line cursor" x-show="worldUpdate.running">▊</div>
+              <div class="line muted-line" x-show="worldUpdate.lines.length === 0 && !worldUpdate.running">Runs as a background job — safe to navigate away.</div>
+            </div>
+          </div>
+
+          <!-- Preserved rebuild -->
+          <div class="mv-card">
+            <div class="mv-card-header">
+              <div class="mv-card-title">
+                <span class="mv-title">Preserved rebuild</span>
+                <span class="mv-cmd">emerge @preserved-rebuild</span>
+              </div>
+              <div class="mv-card-actions">
+                <span class="mv-rc" :class="statusClass(preserved.rc)" x-show="preserved.rc !== null"
+                      x-text="preserved.rc === 0 ? 'done' : 'exit ' + preserved.rc"></span>
+                <button class="mv-btn-toggle" @click="preserved.expanded = !preserved.expanded"
+                        x-text="preserved.expanded ? '▲' : '▼'"></button>
+                <button class="mv-btn-run" @click="startPreserved()" :disabled="preserved.running"
+                        x-text="preserved.running ? 'Running…' : preserved.rc !== null ? 'Retry' : 'Rebuild'"></button>
+              </div>
+            </div>
+            <div class="terminal" x-ref="psTerm" x-show="preserved.expanded">
+              <template x-for="(line, i) in preserved.lines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+              <div class="line cursor" x-show="preserved.running">▊</div>
+              <div class="line muted-line" x-show="preserved.lines.length === 0 && !preserved.running">Rebuild libraries preserved after updates.</div>
+            </div>
+          </div>
+
+          <!-- Depclean -->
+          <div class="mv-card">
+            <div class="mv-card-header">
+              <div class="mv-card-title">
+                <span class="mv-title">Depclean</span>
+                <span class="mv-cmd">emerge --depclean</span>
+              </div>
+              <div class="mv-card-actions">
+                <span class="mv-rc" :class="statusClass(depclean.rc)" x-show="depclean.rc !== null"
+                      x-text="depclean.rc === 0 ? 'done' : 'exit ' + depclean.rc"></span>
+                <button class="mv-btn-toggle" @click="depclean.expanded = !depclean.expanded"
+                        x-text="depclean.expanded ? '▲' : '▼'"></button>
+                <button class="mv-btn-run" @click="startDepcleanPretend()" :disabled="depclean.running"
+                        x-text="depclean.running ? 'Running…' : depclean.dcStep === 'idle' ? 'Check' : 'Re-check'"></button>
+              </div>
+            </div>
+            <div class="terminal" x-ref="dcTerm" x-show="depclean.expanded">
+              <template x-for="(line, i) in depclean.lines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+              <div class="line cursor" x-show="depclean.running">▊</div>
+              <div class="line muted-line" x-show="depclean.lines.length === 0 && !depclean.running">Remove packages no longer needed.</div>
+              <div class="mv-confirm-row" x-show="depclean.dcStep === 'confirm' && !depclean.running">
+                <span class="mv-confirm-msg">⚠ The packages above will be removed.</span>
+                <button class="mv-btn-confirm-run" @click="startDepclean()">Remove</button>
+                <button class="mv-btn-confirm-cancel"
+                  @click="depclean.dcStep = 'idle'; depclean.lines = []">Cancel</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Background jobs -->
+      <div x-show="$store.router.view === 'jobs'" x-data="jobsViewComponent()">
+        <div class="jv-view">
+          <div class="jv-header">
+            <h2>Jobs</h2>
+            <button class="jv-btn-refresh" @click="_load()">Refresh</button>
+          </div>
+
+          <p class="muted"    x-show="loading">Loading…</p>
+          <p class="jv-err-msg" x-show="!loading && error" x-text="error"></p>
+          <p class="muted"    x-show="!loading && !error && jobList.length === 0">No jobs.</p>
+
+          <div class="jv-table" x-show="!loading && !error && jobList.length > 0">
+            <template x-for="job in jobList" :key="job.job_id">
+              <div class="jv-row" :class="{ expanded: expanded === job.job_id }">
+
+                <div class="jv-row-main">
+                  <span class="jv-atom" x-text="job.atom"></span>
+                  <span class="jv-badge" :class="statusClass(job)" x-text="statusLabel(job)"></span>
+                  <span class="jv-ago"  x-text="ago(job.created_at)"></span>
+                  <div class="jv-actions">
+                    <button class="jv-btn-output" @click="toggle(job.job_id)"
+                      x-text="expanded === job.job_id ? '▲ output' : '▼ output'"></button>
+                    <template x-if="job.status === 'running'">
+                      <span>
+                        <button class="jv-btn-open" @click="openPanel(job, $event)">Open</button>
+                        <button class="jv-btn-kill" @click="kill(job.job_id, $event)">Kill</button>
+                      </span>
+                    </template>
+                  </div>
+                </div>
+
+                <template x-if="expanded === job.job_id">
+                  <div class="terminal" :id="'jv-terminal-' + job.job_id">
+                    <template x-for="(line, i) in activeLines" :key="i">
+                      <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                    </template>
+                    <div class="line cursor" x-show="job.status === 'running' && termWs">▊</div>
+                    <div class="line muted-line"
+                      x-show="activeLines.length === 0 && !termWs">No output available.</div>
+                  </div>
+                </template>
+
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+
+</body>
+</html>
