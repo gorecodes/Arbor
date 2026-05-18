@@ -13,7 +13,7 @@ Designed for Gentoo systems on a local/LAN network. Not intended to be exposed t
 - **Install / Uninstall** — live emerge output streamed to the browser, with emerge option flags
 - **Maintenance** — world update, depclean, preserved-rebuild, sync, all with pretend mode
 - **Jobs** — active running jobs with live output; completed jobs are automatically archived to **History**
-- **History** — searchable log of all past emerge operations, filterable by kind, with per-entry log viewer and purge
+- **History** — searchable log of all past emerge operations, filterable by kind, with per-entry log viewer and purge (persisted in SQLite at `/var/lib/arbor/history.db`)
 
 ## Screenshots
 
