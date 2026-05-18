@@ -19,17 +19,6 @@ python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" 2>/dev
   echo "ERROR: Python 3.11+ required (found $(python3 --version 2>&1))" >&2; exit 1
 }
 
-# --- frontend ---
-if [[ ! -d "$REPO/frontend/dist" ]]; then
-  echo "==> Building frontend"
-  need node
-  need npm
-  npm --prefix "$REPO/frontend" ci --silent
-  npm --prefix "$REPO/frontend" run build
-else
-  echo "==> Using existing frontend build"
-fi
-
 # --- backend ---
 echo "==> Installing backend to /usr/lib/arbor"
 mkdir -p /usr/lib/arbor
@@ -39,12 +28,16 @@ echo "==> Setting up Python venv (with system site-packages for portage access)"
 python3 -m venv --system-site-packages /usr/lib/arbor/.venv
 /usr/lib/arbor/.venv/bin/pip install --quiet /usr/lib/arbor/
 
+echo "==> Creating entry point symlinks in /usr/local/bin"
+ln -sf /usr/lib/arbor/.venv/bin/arbor        /usr/local/bin/arbor
+ln -sf /usr/lib/arbor/.venv/bin/arbor-daemon /usr/local/bin/arbor-daemon
+
 # --- frontend ---
 echo "==> Installing frontend"
+rm -rf /usr/lib/arbor/frontend
 mkdir -p /usr/lib/arbor/frontend
-rm -rf /usr/lib/arbor/frontend/dist
-cp -r "$REPO/frontend/dist" /usr/lib/arbor/frontend/dist
-chown -R root:arbor /usr/lib/arbor/frontend/dist 2>/dev/null || true
+cp -r "$REPO/frontend/alpine/." /usr/lib/arbor/frontend/
+chown -R root:arbor /usr/lib/arbor/frontend 2>/dev/null || true
 
 # --- OpenRC ---
 echo "==> Installing OpenRC services"
