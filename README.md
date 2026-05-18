@@ -29,9 +29,20 @@ Two processes run as separate privileges:
 
 ## Install
 
+### Via Portage overlay (recommended for Gentoo)
+
 ```bash
-git clone https://github.com/yourname/arbor
-cd arbor
+eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
+emaint sync -r arbor-overlay
+ACCEPT_KEYWORDS="**" emerge 'app-admin/arbor'
+bash /usr/share/arbor/setup.sh
+```
+
+### Via install script
+
+```bash
+git clone https://github.com/gorecodes/Arbor
+cd Arbor
 sudo bash install.sh
 ```
 
@@ -60,6 +71,16 @@ rc-update add arbor default
 ```
 
 ## Update
+
+### Via Portage overlay
+
+```bash
+emaint sync -r arbor-overlay
+emerge 'app-admin/arbor'
+rc-service arbor restart; rc-service arbor-daemon restart
+```
+
+### Via install script
 
 ```bash
 git pull
