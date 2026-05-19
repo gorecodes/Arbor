@@ -25,6 +25,8 @@ ALLOWED_COMMANDS = {
     "package_search",
     "system_status",
     "use_flags",
+    "global_use_flags_audit",
+    "use_flag_origins",
     "package_deps",
     "dep_graph",
     "emerge_pretend",
@@ -644,11 +646,41 @@ def _use_flags(atom: str):
             return [{"cpv": cpv, "flags": []}]
         active_set = set()  # not installed, no active USE
 
+    descriptions = {}
+    forced_flags = frozenset()
+    masked_flags = frozenset()
+    try:
+        from .use_origin import _flag_descriptions, _forced_and_masked_flags
+
+        descriptions = _flag_descriptions(cpv)
+        forced_flags, masked_flags = _forced_and_masked_flags(cpv)
+    except Exception:
+        pass
+
     flags = []
     for flag in iuse_raw.split():
         default_on = flag.startswith("+")
         flag_name = flag.lstrip("+-")
-        flags.append({"name": flag_name, "enabled": flag_name in active_set, "default_on": default_on})
+        enabled = flag_name in active_set
+        source = "profile"
+        if flag_name in forced_flags:
+            enabled = True
+            source = "forced"
+        elif flag_name in masked_flags:
+            enabled = False
+            source = "masked"
+
+        flags.append(
+            {
+                "name": flag_name,
+                "description": descriptions.get(flag_name, ""),
+                "enabled": enabled,
+                "default_on": default_on,
+                "source": source,
+                "forced": flag_name in forced_flags,
+                "masked": flag_name in masked_flags,
+            }
+        )
     return [{"cpv": cpv, "flags": flags, "installed": bool(installed)}]
 
 
@@ -741,6 +773,51 @@ async def cmd_use_flags(args):
         return
     for item in await in_thread(_use_flags, atom):
         yield item
+
+
+async def cmd_use_flag_origins(args):
+    atom = str(args.get("atom", "")).strip()
+    category = str(args.get("category", "")).strip()
+    package_name = str(args.get("package_name", "")).strip()
+    if atom:
+        try:
+            from portage.dep import Atom
+            from portage.versions import cpv_getkey
+            cp = cpv_getkey(atom) or atom
+            Atom(cp, allow_wildcard=False, allow_repo=False)
+            category, package_name = cp.split("/", 1)
+        except Exception:
+            yield {"error": "invalid atom"}
+            return
+    elif not category or not package_name:
+        yield {"error": "category and package_name are required"}
+        return
+    try:
+        from portage.dep import Atom
+        Atom(f"{category}/{package_name}", allow_wildcard=False, allow_repo=False)
+    except Exception:
+        yield {"error": "invalid package"}
+        return
+    try:
+        from .use_origin import trace_use_flag_origins
+        yield await in_thread(trace_use_flag_origins, category, package_name)
+    except ModuleNotFoundError:
+        yield {"error": "use origin support not installed"}
+    except LookupError:
+        yield {"error": "not found"}
+    except Exception as e:
+        yield {"error": str(e)}
+
+
+async def cmd_global_use_flags_audit(_args):
+    try:
+        from .use_origin import trace_package_overrides_audit
+        yield await in_thread(trace_package_overrides_audit)
+    except ModuleNotFoundError:
+        yield {"error": "use origin support not installed"}
+    except Exception as e:
+        yield {"error": str(e)}
+
 
 async def cmd_package_deps(args):
     atom = args.get("atom", "")
@@ -1551,6 +1628,8 @@ HANDLERS = {
     "package_search":     cmd_package_search,
     "world_updates":      cmd_world_updates,
     "use_flags":          cmd_use_flags,
+    "global_use_flags_audit": cmd_global_use_flags_audit,
+    "use_flag_origins":   cmd_use_flag_origins,
     "package_deps":       cmd_package_deps,
     "dep_graph":          cmd_dep_graph,
     "emerge_pretend":            cmd_emerge_pretend,

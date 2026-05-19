@@ -44,6 +44,8 @@
     packageInfo: (atom)      => _get('/package?atom=' + encodeURIComponent(atom)),
     search:      (q)         => _get('/search?q=' + encodeURIComponent(q)),
     useFlags:    (atom)      => _get('/package/use-flags?atom=' + encodeURIComponent(atom)),
+    useFlagOrigins: (atom)   => _get('/package/use-flag-origins?atom=' + encodeURIComponent(atom)),
+    globalUseFlagsAudit: ()  => _get('/use-flags-audit'),
     deps:        (atom)      => _get('/package/deps?atom=' + encodeURIComponent(atom)),
     depGraph:    (atom, d=2) => _get('/package/dep-graph?atom=' + encodeURIComponent(atom) + '&depth=' + d),
     stats:       ()          => _get('/stats'),
@@ -132,27 +134,177 @@
       : '/' + view
   }
 
+  function scrollMainToTop() {
+    const apply = () => {
+      const el = document.querySelector('.app-main') || document.querySelector('main')
+      if (el) {
+        el.scrollTop = 0
+        el.scrollTo({ top: 0, behavior: 'auto' })
+      }
+      document.documentElement.scrollTop = 0
+      document.body.scrollTop = 0
+    }
+    requestAnimationFrame(() => {
+      apply()
+      requestAnimationFrame(apply)
+    })
+  }
+
   function navigateTo(cpv) { navigate('packages', cpv) }
+  function navigateToUse(cpv) { navigate('use-flags', cpv) }
   function navigateBack()  { history.back() }
+  function invalidatePackageState(atom = null) {
+    const router = Alpine.store('router')
+    router.packageStateVersion = (router.packageStateVersion || 0) + 1
+    router.lastChangedPackage = atom
+  }
 
   function _applyRoute() {
     const hash = location.hash.replace(/^#/, '')
     const r    = Alpine.store('router')
     const pkg  = hash.match(/^\/packages\/(.+)$/)
+    const use  = hash.match(/^\/use-flags\/(.+)$/)
     const inst = hash.match(/^\/install\/(.+)$/)
     const uni  = hash.match(/^\/uninstall\/(.+)$/)
     const sim  = hash.match(/^\/([^/]+)$/)
-    if      (pkg)  { r.selectedPackage = decodeURIComponent(pkg[1]);  r.view = 'packages'  }
+    if      (pkg)  { r.selectedPackage = decodeURIComponent(pkg[1]);  r.selectedUseFlag = null; r.view = 'packages'  }
+    else if (use)  { r.selectedPackage = null; r.selectedUseFlag = decodeURIComponent(use[1]); r.view = 'use-flags' }
     else if (inst) { r.installAtom     = decodeURIComponent(inst[1]); r.view = 'install'   }
     else if (uni)  { r.uninstallAtom   = decodeURIComponent(uni[1]);  r.view = 'uninstall' }
-    else if (sim)  { r.view = sim[1]; r.selectedPackage = null }
-    else           { r.view = 'dashboard'; r.selectedPackage = null }
+    else if (sim)  { r.view = sim[1]; r.selectedPackage = null; r.selectedUseFlag = null }
+    else           {
+      r.view = 'dashboard'
+      r.selectedPackage = null
+      r.selectedUseFlag = null
+    }
   }
 
   function _initRouter() {
     window.addEventListener('hashchange', _applyRoute)
     if (!location.hash || location.hash === '#' || location.hash === '#/') location.hash = '/dashboard'
     _applyRoute()
+  }
+
+  function normalizePayload(payload) {
+    if (!payload) return null
+    if (Array.isArray(payload)) return payload[0] || null
+    return payload
+  }
+
+  function useFlagDescription(flag) {
+    return flag?.description || 'No description available.'
+  }
+
+  function useFlagSourceLabel(flag) {
+    const source = flag?.source ?? flag?.configured_source
+    if (source === 'forced') return 'forced'
+    if (source === 'masked') return 'masked'
+    if (source === 'package.use') return 'package.use'
+    if (source === 'make.conf') return 'make.conf'
+    if (source === 'default') return 'IUSE default'
+    if (source === 'profile') return 'profile'
+
+    const origin = flag?.origin_type ?? flag?.configured_origin_type
+    if (origin === 'profile_package.use' || origin === 'user_package.use') return 'package.use'
+    if (origin === 'make_conf') return 'make.conf'
+    if (origin === 'profile_defaults') return 'profile'
+    return 'unknown'
+  }
+
+  function useFlagSourceTone(flag) {
+    const source = flag?.source ?? flag?.configured_source
+    if (source === 'forced') return 'forced'
+    if (source === 'masked') return 'masked'
+    if (source === 'package.use') return 'package-use'
+    if (source === 'make.conf') return 'make-conf'
+    if (source === 'default') return 'profile'
+
+    const origin = flag?.origin_type ?? flag?.configured_origin_type
+    if (origin === 'profile_package.use' || origin === 'user_package.use') return 'package-use'
+    if (origin === 'make_conf') return 'make-conf'
+    return 'profile'
+  }
+
+  function useFlagOriginDetail(flag) {
+    const source = flag?.source ?? flag?.configured_source
+    const originFile = flag?.origin_file ?? flag?.configured_origin_file
+    if (source === 'forced') return 'Active profile or repository forces this flag on; no direct file path is available.'
+    if (source === 'masked') return 'Active profile or repository masks this flag off; no direct file path is available.'
+    if (source === 'default') return flag?.default_on ? 'Enabled by the ebuild IUSE default.' : 'Disabled by the ebuild IUSE default.'
+    if (originFile) return originFile
+    return flag?.default_on ? 'Enabled by the package defaults.' : 'Disabled by the package defaults.'
+  }
+
+  const CHART_COLORS = {
+    grid: 'var(--chart-grid, #303944)',
+    track: 'var(--chart-track, #28303a)',
+    text: 'var(--text, #d7dde4)',
+    textMuted: 'var(--text-muted, #98a4af)',
+    primary: 'var(--chart-1, #88a784)',
+    success: 'var(--success, #92af84)',
+    warning: 'var(--warning, #b59a67)',
+    danger: 'var(--danger, #ba7f7d)',
+    info: 'var(--chart-2, #708da8)',
+    muted: 'var(--chart-4, #8794a1)',
+    accent: 'var(--chart-5, #8f7c73)',
+  }
+
+  const CHART_PALETTES = {
+    primary: ['var(--chart-1, #88a784)', '#809d7b', '#779272', '#6d8769', '#647c61', 'var(--chart-4, #8794a1)'],
+    info: ['var(--chart-2, #708da8)', '#69849d', '#617b92', '#597187', '#51687d', 'var(--chart-4, #8794a1)'],
+    warm: ['var(--chart-3, #b59a67)', '#aa9165', '#9c8761', '#8f7d5d', '#82745a', 'var(--chart-4, #8794a1)'],
+  }
+
+  function paletteColor(name, index) {
+    const palette = CHART_PALETTES[name] || CHART_PALETTES.primary
+    return palette[Math.min(index, palette.length - 1)]
+  }
+
+  function fmtIecParts(b) {
+    if (!b) return { value: '0', unit: 'B' }
+    if (b >= 1024 ** 3) return { value: (b / 1024 ** 3).toFixed(1), unit: 'GiB' }
+    if (b >= 1024 ** 2) return { value: (b / 1024 ** 2).toFixed(0), unit: 'MiB' }
+    if (b >= 1024) return { value: (b / 1024).toFixed(0), unit: 'KiB' }
+    return { value: String(Math.round(b)), unit: 'B' }
+  }
+
+  function buildPortageDiskRows(pkgStats) {
+    const disk = pkgStats?.portage_disk
+    if (!disk) return []
+    const order = ['repos', 'distfiles', 'binpkgs', 'vartree']
+    const LABELS = {
+      repos: '/var/db/repos',
+      distfiles: '/var/cache/distfiles',
+      binpkgs: '/var/cache/binpkgs',
+      vartree: '/var/db/pkg',
+    }
+    const TONES = {
+      repos: 'tone-blue',
+      distfiles: 'tone-amber',
+      binpkgs: 'tone-green',
+      vartree: 'tone-purple',
+    }
+    const entries = order
+      .map(key => [key, disk[key]])
+      .filter(([, bytes]) => typeof bytes === 'number' && bytes >= 0)
+    const total = entries.reduce((sum, [, bytes]) => sum + bytes, 0)
+    return entries.map(([key, bytes]) => {
+      const size = fmtIecParts(bytes)
+      return {
+        key,
+        bytes,
+        label: LABELS[key] || key,
+        sizeValue: size.value,
+        sizeUnit: size.unit,
+        pct: total ? Math.round((bytes / total) * 100) : 0,
+        tone: TONES[key] || 'tone-blue',
+      }
+    })
+  }
+
+  function portageDiskHint(pkgStats) {
+    const distfiles = pkgStats?.portage_disk?.distfiles || 0
+    return distfiles > 5 * 1024 ** 3 ? 'Large distfiles cache' : ''
   }
 
   // ── COMPONENT FACTORIES ───────────────────────────────────────────────────
@@ -176,22 +328,179 @@
     }
   }
 
+  const PRIMARY_NAV_ITEMS = [
+    { id: 'dashboard', label: 'Dashboard'   },
+    { id: 'packages',  label: 'Installed packages'   },
+    { id: 'search',    label: 'Search Packages' },
+    { id: 'use-flags', label: 'USE Flags'   },
+    { id: 'updates',   label: 'Maintenance' },
+    { id: 'overlays',  label: 'Overlays'    },
+    { id: 'jobs',      label: 'Jobs'        },
+  ]
+
+  function isPrimaryRouteActive(id) {
+    const view = Alpine.store('router').view
+    if (id === 'packages') return ['packages', 'install', 'uninstall'].includes(view)
+    return view === id
+  }
+
   function navComponent() {
     return {
-      items: [
-        { id: 'dashboard', label: 'Dashboard'    },
-        { id: 'packages',  label: 'Installed'    },
-        { id: 'search',    label: 'Search'        },
-        { id: 'updates',   label: 'Maintenance'  },
-        { id: 'overlays',  label: 'Overlays'     },
-        { id: 'jobs',      label: 'Jobs'          },
-      ],
-      isActive(id) {
-        const r = Alpine.store('router')
-        return r.view === id && !r.selectedPackage
-      },
+      items: PRIMARY_NAV_ITEMS,
+      isActive(id) { return isPrimaryRouteActive(id) },
       nav(id) { navigate(id) },
       logout() { Alpine.store('auth').logout() }
+    }
+  }
+
+  function appShellComponent() {
+    return {
+      items: PRIMARY_NAV_ITEMS,
+      status: null,
+      activeJobs: [],
+      _timer: null,
+      init() {
+        this._loadSummary()
+        this._timer = setInterval(() => {
+          if (!Alpine.store('auth').isLoggedIn) return
+          this._loadSummary()
+        }, 15000)
+        this.$watch('$store.auth.token', token => {
+          if (token) this._loadSummary()
+        })
+      },
+      isActive(id) { return isPrimaryRouteActive(id) },
+      nav(id) { navigate(id) },
+      logout() { Alpine.store('auth').logout() },
+      async _loadSummary() {
+        try {
+          const [status, activeJobs] = await Promise.all([
+            api.status(),
+            jobs.list().catch(() => []),
+          ])
+          this.status = status
+          this.activeJobs = Array.isArray(activeJobs) ? activeJobs : []
+        } catch (_) {}
+      },
+      runningJobCount() {
+        return this.activeJobs.filter(job => job?.status === 'running').length
+      },
+      memoryPct() {
+        const used = this.status?.mem_used
+        const total = this.status?.mem_total
+        if (!total || isNaN(used) || isNaN(total)) return null
+        return Math.max(0, Math.min(100, Math.round((used / total) * 100)))
+      },
+      syncLabel() {
+        const stamp = this.status?.last_sync
+        if (!stamp) return 'sync —'
+        const text = String(stamp).trim()
+        return 'sync ' + (text.length > 10 ? text.slice(0, 10) : text)
+      },
+      statusPills() {
+        const pills = [
+          { key: 'jobs', text: this.runningJobCount() > 0 ? this.runningJobCount() + ' job' + (this.runningJobCount() === 1 ? '' : 's') : 'jobs idle', tone: this.runningJobCount() > 0 ? 'info' : 'muted' },
+        ]
+        if (this.status) {
+          pills.push({ key: 'cpu', text: 'cpu ' + Math.round(this.status?.cpu_pct || 0) + '%', tone: 'muted' })
+          if (this.memoryPct() !== null) pills.push({ key: 'mem', text: 'mem ' + this.memoryPct() + '%', tone: 'muted' })
+          pills.push({ key: 'sync', text: this.syncLabel(), tone: 'muted' })
+        }
+        return pills
+      },
+      currentMeta() {
+        const r = Alpine.store('router')
+        if (r.view === 'dashboard') {
+          return {
+            section: 'Overview',
+            title: 'Dashboard',
+            detail: '',
+          }
+        }
+        if (r.view === 'packages' && r.selectedPackage) {
+          return {
+            section: 'Packages',
+            title: r.selectedPackage,
+            detail: 'Installed package metadata, USE state, and dependency inspection.',
+          }
+        }
+        if (r.view === 'packages') {
+          return {
+            section: 'Packages',
+            title: 'Installed packages',
+            detail: 'Browse the current system set and open package details quickly.',
+          }
+        }
+        if (r.view === 'use-flags') {
+          return {
+            section: 'Configuration',
+            title: r.selectedUseFlag || 'USE flags',
+            detail: 'Inspect global state, package overrides, and installed package usage for each USE flag.',
+          }
+        }
+        if (r.view === 'search') {
+          return {
+            section: 'Portage tree',
+            title: 'Search packages',
+            detail: 'Query package names across the tree and jump straight to the best match.',
+          }
+        }
+        if (r.view === 'updates') {
+          return {
+            section: 'Maintenance',
+            title: 'System maintenance',
+            detail: 'Sync the tree, check @world, rebuild preserved libs, and run depclean.',
+          }
+        }
+        if (r.view === 'jobs') {
+          return {
+            section: 'Operations',
+            title: 'Jobs',
+            detail: 'Follow active work, reopen output, and review retained job history.',
+          }
+        }
+        if (r.view === 'overlays') {
+          return {
+            section: 'Repositories',
+            title: 'Overlays',
+            detail: 'Inspect configured overlays and sync additional repositories.',
+          }
+        }
+        if (r.view === 'install') {
+          return {
+            section: 'Packages',
+            title: 'Install ' + (r.installAtom || 'package'),
+            detail: 'Run pretend, resolve autounmask steps, and execute the install flow.',
+          }
+        }
+        if (r.view === 'uninstall') {
+          return {
+            section: 'Packages',
+            title: 'Uninstall ' + (r.uninstallAtom || 'package'),
+            detail: 'Preview removals before starting the uninstall job.',
+          }
+        }
+        return { section: 'Arbor', title: 'Dashboard', detail: '' }
+      },
+      contextItems() {
+        const view = Alpine.store('router').view
+        if (view === 'dashboard') return []
+        if (view === 'updates') {
+          return [
+            { id: 'updates-sync', label: 'Sync' },
+            { id: 'updates-check', label: 'Check' },
+            { id: 'updates-world', label: '@world' },
+            { id: 'updates-preserved', label: 'Preserved' },
+            { id: 'updates-depclean', label: 'Depclean' },
+          ]
+        }
+        return []
+      },
+      scrollToSection(id) {
+        const section = document.getElementById(id)
+        if (!section) return
+        section.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      },
     }
   }
 
@@ -201,10 +510,10 @@
       stats: null,
       pkgStats: null,
       compileCats: null,
+      runningJobs: [],
+      recentHistory: [],
       error: null,
       _timer: null,
-      sections: { system: true, jobs: true, packages: true },
-      toggleSection(s) { this.sections[s] = !this.sections[s] },
       init() {
         this._load()
         this.$watch('$store.router.view', v => {
@@ -219,10 +528,22 @@
       },
       async _load() {
         try {
-          this.status = await api.status()
-          api.stats().then(s => { this.stats = s }).catch(() => {})
-          api.pkgStats().then(s => { this.pkgStats = s }).catch(() => {})
-          api.compileCats().then(s => { this.compileCats = s }).catch(() => {})
+          this.error = null
+          const [statusRes, statsRes, pkgStatsRes, compileCatsRes, jobsRes, historyRes] = await Promise.allSettled([
+            api.status(),
+            api.stats(),
+            api.pkgStats(),
+            api.compileCats(),
+            jobs.list(),
+            jobHistory.list(12, 0, ''),
+          ])
+          if (statusRes.status !== 'fulfilled') throw statusRes.reason
+          this.status = statusRes.value
+          this.stats = statsRes.status === 'fulfilled' ? statsRes.value : null
+          this.pkgStats = pkgStatsRes.status === 'fulfilled' ? pkgStatsRes.value : null
+          this.compileCats = compileCatsRes.status === 'fulfilled' ? compileCatsRes.value : null
+          this.runningJobs = jobsRes.status === 'fulfilled' && Array.isArray(jobsRes.value) ? jobsRes.value : []
+          this.recentHistory = historyRes.status === 'fulfilled' && Array.isArray(historyRes.value?.items) ? historyRes.value.items : []
         } catch(e) { this.error = e.message }
       },
       fmtBytes(b) {
@@ -237,14 +558,458 @@
       diskPct() { return this.status ? this._safePct(this.status.disk_used, this.status.disk_total) : 0 },
       memPct()  { return this.status ? this._safePct(this.status.mem_used,  this.status.mem_total)  : 0 },
       cpuPct()  { return this.status ? Math.round(this.status.cpu_pct || 0) : 0 },
-      gaugeStyle(pct) {
-        const p = isNaN(pct) || !isFinite(pct) ? 0 : Math.max(0, Math.min(100, pct))
-        const color = p >= 85 ? '#f85149' : p >= 60 ? '#d29922' : '#3fb950'
-        const deg = (p / 100) * 180
-        return `background:conic-gradient(from 270deg,${color} 0deg ${deg}deg,#21262d ${deg}deg 180deg,transparent 180deg 360deg)`
+      maxSystemPct() {
+        return Math.max(this.cpuPct(), this.memPct(), this.diskPct())
+      },
+      activeJobCount() {
+        return this.runningJobs.length
+      },
+      hasActiveJobs() {
+        return this.activeJobCount() > 0
       },
       hasStats() {
-        return this.stats && (this.stats.total > 0)
+        return !!(this.stats && this.stats.total > 0)
+      },
+      hasActivity() {
+        return this.hasStats() || this.recentHistory.length > 0
+      },
+      hasComposition() {
+        return !!(this.compileCats || (this.pkgStats && (
+          this.pkgStats?.top_use_flags?.length ||
+          this.pkgStats?.keyword_dist ||
+          this.pkgStats?.src_vs_bin ||
+          this.pkgStats?.slotted?.length
+        )))
+      },
+      hasPortageDisk() {
+        return !!this.pkgStats?.portage_disk
+      },
+      hasPkgStats() {
+        return !!(this.pkgStats && (
+          this.pkgStats?.top_use_flags?.length ||
+          this.pkgStats?.keyword_dist ||
+          this.pkgStats?.src_vs_bin ||
+          this.pkgStats?.slotted?.length
+        ))
+      },
+      meterFillCount(pct, total = 24) {
+        const p = isNaN(pct) || !isFinite(pct) ? 0 : Math.max(0, Math.min(100, pct))
+        if (p === 0) return 0
+        return Math.max(1, Math.round((p / 100) * total))
+      },
+      meterTone(pct) {
+        if (pct >= 85) return 'is-hot'
+        if (pct >= 60) return 'is-warn'
+        return 'is-ok'
+      },
+      systemMeters() {
+        if (!this.status) return []
+        return [
+          {
+            key: 'cpu',
+            label: 'CPU',
+            pct: this.cpuPct(),
+            detail: 'load ' + (this.status?.cpu_load1 ?? 0),
+          },
+          {
+            key: 'ram',
+            label: 'RAM',
+            pct: this.memPct(),
+            detail: this.fmtBytes(this.status?.mem_used ?? 0) + ' / ' + this.fmtBytes(this.status?.mem_total ?? 0),
+          },
+          {
+            key: 'disk',
+            label: 'DISK /',
+            pct: this.diskPct(),
+            detail: this.fmtBytes(this.status?.disk_used ?? 0) + ' / ' + this.fmtBytes(this.status?.disk_total ?? 0),
+          },
+        ].map(metric => ({ ...metric, tone: this.meterTone(metric.pct) }))
+      },
+      _plural(n, word) {
+        return n + ' ' + word + (n === 1 ? '' : 's')
+      },
+      _shortAtom(atom) {
+        if (!atom) return 'system task'
+        return String(atom).replace(/^=/, '').replace(/^uninstall:/, '')
+      },
+      _kindLabel(kind) {
+        return String(kind || 'job').replace(/_/g, ' ')
+      },
+      _fmtRelativeMs(ms) {
+        if (!Number.isFinite(ms) || ms < 0) return 'unknown'
+        const s = Math.round(ms / 1000)
+        if (s < 60) return s + 's ago'
+        if (s < 3600) return Math.floor(s / 60) + 'm ago'
+        if (s < 86400) return Math.floor(s / 3600) + 'h ago'
+        return Math.floor(s / 86400) + 'd ago'
+      },
+      _timestampMs(value) {
+        if (!value || value === 'unknown') return null
+        const ms = Date.parse(value)
+        return Number.isFinite(ms) ? ms : null
+      },
+      syncAgeMs() {
+        const ts = this._timestampMs(this.status?.last_sync)
+        return ts === null ? null : Math.max(0, Date.now() - ts)
+      },
+      syncFreshnessLabel() {
+        const age = this.syncAgeMs()
+        return age === null ? 'unknown' : this._fmtRelativeMs(age)
+      },
+      syncFreshnessTone() {
+        const age = this.syncAgeMs()
+        if (age === null) return 'muted'
+        if (age > 14 * 86400000) return 'danger'
+        if (age > 7 * 86400000) return 'warning'
+        return 'success'
+      },
+      syncFreshnessNote() {
+        const age = this.syncAgeMs()
+        if (age === null) return 'No Gentoo sync timestamp was available.'
+        if (age > 14 * 86400000) return 'The tree looks stale for a Portage UI.'
+        if (age > 7 * 86400000) return 'A fresh sync is probably worth scheduling.'
+        return 'The Gentoo tree timestamp looks recent.'
+      },
+      recentWindow(limit = 12) {
+        return this.recentHistory.slice(0, limit)
+      },
+      recentFailureCount(limit = 12) {
+        return this.recentWindow(limit).filter(job => job.status !== 'done').length
+      },
+      lastFailure() {
+        return this.recentHistory.find(job => job.status !== 'done') || null
+      },
+      recentHistoryStatusLabel(job) {
+        if (!job) return 'unknown'
+        if (job.status === 'done') return 'done'
+        if (job.status === 'cancelled') return 'cancelled'
+        return 'failed'
+      },
+      recentHistoryTone(job) {
+        if (!job) return 'muted'
+        if (job.status === 'done') return 'success'
+        if (job.status === 'cancelled') return 'warning'
+        return 'danger'
+      },
+      recentHistoryDuration(job) {
+        if (!job?.created_at || !job?.finished_at) return '—'
+        const seconds = Math.max(0, Math.round(job.finished_at - job.created_at))
+        return this._fmtDur(seconds)
+      },
+      runningKindsText() {
+        if (!this.runningJobs.length) return 'no active emerge jobs'
+        const counts = {}
+        this.runningJobs.forEach(job => {
+          const key = this._kindLabel(job.kind)
+          counts[key] = (counts[key] || 0) + 1
+        })
+        return Object.entries(counts)
+          .map(([kind, count]) => count > 1 ? `${kind} x${count}` : kind)
+          .slice(0, 3)
+          .join(' · ')
+      },
+      systemLoadState() {
+        const maxPct = this.maxSystemPct()
+        if (maxPct >= 85) return 'high'
+        if (maxPct >= 60) return 'normal'
+        return 'low'
+      },
+      portageOverviewCards() {
+        const source = this.pkgStats?.src_vs_bin?.source || 0
+        const binary = this.pkgStats?.src_vs_bin?.binary || 0
+        const totalMix = source + binary
+        const sourcePct = totalMix ? Math.round((source / totalMix) * 100) : null
+        const keywords = this.pkgStats?.keyword_dist || {}
+        const keywordTotal = (keywords.stable || 0) + (keywords.testing || 0) + (keywords.live || 0) + (keywords.unknown || 0)
+        const stablePct = keywordTotal ? Math.round(((keywords.stable || 0) / keywordTotal) * 100) : null
+        return [
+          {
+            key: 'packages',
+            label: 'installed packages',
+            value: this.status?.pkg_count ?? '—',
+            detail: 'currently in /var/db/pkg',
+          },
+          {
+            key: 'mix',
+            label: 'source-built mix',
+            value: sourcePct === null ? '—' : sourcePct + '%',
+            detail: totalMix ? `${source} source / ${binary} binary` : 'package mix unavailable',
+          },
+          {
+            key: 'keywords',
+            label: 'keyword posture',
+            value: stablePct === null ? '—' : stablePct + '% stable',
+            detail: keywordTotal ? `${keywords.testing || 0} testing / ${keywords.live || 0} live / ${keywords.unknown || 0} other` : 'keyword mix unavailable',
+          },
+        ]
+      },
+      portageFootprintSummary() {
+        const rows = this.portageDiskRows()
+        if (!rows.length) {
+          return {
+            value: '—',
+            detail: 'tracked Portage storage unavailable',
+            tone: 'muted',
+          }
+        }
+        const total = rows.reduce((sum, row) => sum + row.bytes, 0)
+        const largest = rows.reduce((current, row) => row.bytes > current.bytes ? row : current, rows[0])
+        const totalSize = this._fmtIecParts(total)
+        return {
+          value: totalSize.value + ' ' + totalSize.unit,
+          detail: `${largest.label} is ${largest.pct}% of tracked Portage storage`,
+          tone: this.portageHint() ? 'warning' : 'info',
+        }
+      },
+      topSummaryCards() {
+        const recentFailures = this.recentFailureCount()
+        const recentCount = this.recentWindow().length
+        return [
+          {
+            key: 'jobs',
+            label: 'job state',
+            value: this.hasActiveJobs() ? this._plural(this.activeJobCount(), 'active') : 'idle',
+            detail: this.runningKindsText(),
+            tone: this.hasActiveJobs() ? 'info' : 'success',
+          },
+          {
+            key: 'sync',
+            label: 'last sync',
+            value: this.syncFreshnessLabel(),
+            detail: this.status?.last_sync || 'sync timestamp unavailable',
+            tone: this.syncFreshnessTone(),
+          },
+          {
+            key: 'issues',
+            label: 'recent job issues',
+            value: recentCount ? (recentFailures ? String(recentFailures) : 'none') : '—',
+            detail: recentCount ? `failed or cancelled in last ${recentCount} jobs` : 'no recent job history',
+            tone: !recentCount ? 'muted' : recentFailures > 0 ? 'danger' : 'success',
+          },
+          {
+            key: 'packages',
+            label: 'installed packages',
+            value: this.status?.pkg_count ?? '—',
+            detail: 'current package count in /var/db/pkg',
+            tone: 'muted',
+          },
+        ]
+      },
+      activitySummaryCards() {
+        const counts = this.stats?.status_counts || {}
+        const done = counts.done || 0
+        const failed = counts.failed || 0
+        const cancelled = counts.cancelled || 0
+        const total = done + failed + cancelled
+        const successPct = total ? Math.round((done / total) * 100) : null
+        return [
+          {
+            key: 'running',
+            label: 'current state',
+            value: this.hasActiveJobs() ? this._plural(this.activeJobCount(), 'job') : 'idle',
+            detail: this.hasActiveJobs() ? this.runningKindsText() : 'No emerge work is running right now.',
+            tone: this.hasActiveJobs() ? 'info' : 'success',
+          },
+          {
+            key: 'outcomes',
+            label: 'job outcomes',
+            value: successPct === null ? '—' : successPct + '% done',
+            detail: total ? `${done} done · ${failed} failed · ${cancelled} cancelled` : 'No completed job history yet.',
+            tone: !total ? 'muted' : failed > 0 ? 'danger' : cancelled > 0 ? 'warning' : 'success',
+          },
+        ]
+      },
+      sourceBinaryMeter() {
+        const svb = this.pkgStats?.src_vs_bin
+        const source = svb?.source || 0
+        const binary = svb?.binary || 0
+        const total = source + binary
+        if (!total) {
+          return {
+            value: '—',
+            detail: 'Current source/binary mix is unavailable.',
+            segments: [],
+          }
+        }
+        const sourcePct = Math.round((source / total) * 100)
+        const binaryPct = Math.max(0, 100 - sourcePct)
+        return {
+          value: `${sourcePct}% source`,
+          detail: `${source} source · ${binary} binary`,
+          segments: [
+            { key: 'source', pct: sourcePct, tone: 'tone-green' },
+            { key: 'binary', pct: binaryPct, tone: 'tone-blue' },
+          ].filter(segment => segment.pct > 0),
+        }
+      },
+      keywordPostureMeter() {
+        const keywords = this.pkgStats?.keyword_dist || {}
+        const stable = keywords.stable || 0
+        const testing = keywords.testing || 0
+        const live = keywords.live || 0
+        const unknown = keywords.unknown || 0
+        const total = stable + testing + live + unknown
+        if (!total) {
+          return {
+            value: '—',
+            detail: 'Installed keyword mix is unavailable.',
+            segments: [],
+          }
+        }
+        const stablePct = Math.round((stable / total) * 100)
+        return {
+          value: `${stablePct}% stable`,
+          detail: `${testing} testing · ${live} live · ${unknown} other`,
+          segments: [
+            { key: 'stable', pct: Math.round((stable / total) * 100), tone: 'tone-green' },
+            { key: 'testing', pct: Math.round((testing / total) * 100), tone: 'tone-amber' },
+            { key: 'live', pct: Math.round((live / total) * 100), tone: 'tone-blue' },
+            { key: 'other', pct: Math.max(0, 100 - Math.round((stable / total) * 100) - Math.round((testing / total) * 100) - Math.round((live / total) * 100)), tone: 'tone-muted' },
+          ].filter(segment => segment.pct > 0),
+        }
+      },
+      compositionSummaryCard(key) {
+        return this.compositionSummaryCards().find(card => card.key === key) || {
+          key,
+          label: '',
+          value: '—',
+          detail: 'Unavailable',
+        }
+      },
+      compositionSummaryCards() {
+        const svb = this.pkgStats?.src_vs_bin
+        const source = svb?.source || 0
+        const binary = svb?.binary || 0
+        const mixTotal = source + binary
+        const sourcePct = mixTotal ? Math.round((source / mixTotal) * 100) : null
+        const keywords = this.pkgStats?.keyword_dist || {}
+        const keywordTotal = (keywords.stable || 0) + (keywords.testing || 0) + (keywords.live || 0) + (keywords.unknown || 0)
+        const stablePct = keywordTotal ? Math.round(((keywords.stable || 0) / keywordTotal) * 100) : null
+        return [
+          {
+            key: 'source-binary',
+            label: 'source / binary mix',
+            value: sourcePct === null ? '—' : sourcePct + '% source',
+            detail: mixTotal ? `${source} source · ${binary} binary` : 'Current source/binary mix is unavailable.',
+          },
+          {
+            key: 'keywords',
+            label: 'keyword posture',
+            value: stablePct === null ? '—' : stablePct + '% stable',
+            detail: keywordTotal ? `${keywords.testing || 0} testing · ${keywords.live || 0} live · ${keywords.unknown || 0} other` : 'Installed keyword mix is unavailable.',
+          },
+        ]
+      },
+      longestBuildRows(limit = 4) {
+        if (!this.stats?.top_slow?.length) return []
+        return this.stats.top_slow.slice(0, limit).map(item => ({
+          key: item.atom,
+          label: this._shortAtom(item.atom),
+          value: this._fmtDur(item.duration),
+        }))
+      },
+      recentJobRows(limit = 5) {
+        return this.recentHistory.slice(0, limit).map(job => ({
+          key: job.job_id,
+          label: this._shortAtom(job.atom),
+          value: this.recentHistoryStatusLabel(job),
+          meta: `${this._kindLabel(job.kind)} · ${this._fmtRelativeMs(Math.max(0, Date.now() - (job.created_at * 1000)))}`,
+          tone: this.recentHistoryTone(job),
+        }))
+      },
+      topUseFlagRows(limit = 5) {
+        if (!this.pkgStats?.top_use_flags?.length) return []
+        return this.pkgStats.top_use_flags.slice(0, limit).map(item => ({
+          key: item.flag,
+          label: item.flag,
+          value: String(item.cnt),
+        }))
+      },
+      slottedRows(limit = 5) {
+        if (!this.pkgStats?.slotted?.length) return []
+        return this.pkgStats.slotted.slice(0, limit).map(item => ({
+          key: item.cp,
+          label: item.cp,
+          value: item.count + ' slots',
+        }))
+      },
+      attentionItems() {
+        const items = []
+        if (this.hasActiveJobs()) {
+          items.push({
+            key: 'running',
+            title: this._plural(this.activeJobCount(), 'active job'),
+            detail: this.runningKindsText(),
+            tone: 'info',
+          })
+        }
+        const recentFailures = this.recentFailureCount()
+        if (recentFailures > 0) {
+          const lastFailure = this.lastFailure()
+          items.push({
+            key: 'failures',
+            title: this._plural(recentFailures, 'recent failed or cancelled job'),
+            detail: lastFailure ? `${this._shortAtom(lastFailure.atom)} ${this._fmtRelativeMs(Math.max(0, Date.now() - (lastFailure.created_at * 1000)))}` : 'Recent history contains non-successful jobs.',
+            tone: 'danger',
+          })
+        }
+        const syncTone = this.syncFreshnessTone()
+        if (syncTone === 'warning' || syncTone === 'danger') {
+          items.push({
+            key: 'sync',
+            title: 'Portage tree sync is aging',
+            detail: this.syncFreshnessNote(),
+            tone: syncTone,
+          })
+        }
+        const maxPct = this.maxSystemPct()
+        if (maxPct >= 85) {
+          const resource = this.cpuPct() >= maxPct ? 'CPU' : (this.memPct() >= maxPct ? 'RAM' : 'disk')
+          items.push({
+            key: 'load',
+            title: `${resource} utilization is high`,
+            detail: `cpu ${this.cpuPct()} · ram ${this.memPct()} · disk ${this.diskPct()}`,
+            tone: 'danger',
+          })
+        } else if (maxPct >= 60) {
+          items.push({
+            key: 'load-watch',
+            title: 'System resources are worth watching',
+            detail: `cpu ${this.cpuPct()} · ram ${this.memPct()} · disk ${this.diskPct()}`,
+            tone: 'warning',
+          })
+        }
+        if (this.portageHint()) {
+          items.push({
+            key: 'distfiles',
+            title: 'Distfiles cache is large',
+            detail: this.portageHint().replace(/^hint:\s*/, ''),
+            tone: 'warning',
+          })
+        }
+        return items
+      },
+      heroTone() {
+        if (this.attentionItems().some(item => item.tone === 'danger')) return 'danger'
+        if (this.attentionItems().some(item => item.tone === 'warning')) return 'warning'
+        if (this.hasActiveJobs()) return 'info'
+        return 'success'
+      },
+      heroHeadline() {
+        if (this.hasActiveJobs()) return `${this._plural(this.activeJobCount(), 'job')} running`
+        if (this.attentionItems().length) return 'Attention recommended'
+        return 'No immediate issues seen'
+      },
+      heroCopy() {
+        const recentCount = this.recentWindow().length
+        const failureText = recentCount ? `${this.recentFailureCount()} failed or cancelled in the last ${recentCount} jobs` : 'job history is still empty'
+        if (this.hasActiveJobs()) {
+          return `Portage work is active. Last sync is ${this.syncFreshnessLabel()}, and ${failureText}.`
+        }
+        if (this.attentionItems().length) {
+          return `The system is idle, but current metrics suggest a quick review. Last sync is ${this.syncFreshnessLabel()}, and ${failureText}.`
+        }
+        return `The system is idle, the tree sync looks ${this.syncFreshnessLabel()}, and CPU, memory, and root disk usage are within normal operating range.`
       },
       _esc(s) {
         return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
@@ -266,36 +1031,33 @@
           days.push({ day: key, cnt: found ? found.cnt : 0 })
         }
         const max = Math.max(1, ...days.map(d => d.cnt))
-        // Layout: Y-axis label area on the left, bars area on the right
-        const Y_LABEL_W = 28, BAR_W = 11, GAP = 3, CHART_H = 60, LABEL_H = 16, TOP_PAD = 4
+        const Y_LABEL_W = 28, BAR_W = 11, GAP = 3, CHART_H = 60, LABEL_H = 16, TOP_PAD = 12, AXIS_LABEL_H = 9
         const barsW = days.length * (BAR_W + GAP) - GAP
         const totalW = Y_LABEL_W + barsW
-        const totalH = TOP_PAD + CHART_H + LABEL_H
+        const chartTop = AXIS_LABEL_H + TOP_PAD
+        const totalH = chartTop + CHART_H + LABEL_H
 
-        // Y-axis grid lines and labels (0, mid, max)
         const yTicks = [0, Math.round(max / 2), max].filter((v, i, a) => a.indexOf(v) === i)
         const grid = yTicks.map(v => {
-          const y = TOP_PAD + CHART_H - Math.round((v / max) * CHART_H)
-          return `<line x1="${Y_LABEL_W}" y1="${y}" x2="${totalW}" y2="${y}" stroke="#21262d" stroke-width="1"/>
-<text x="${Y_LABEL_W - 4}" y="${y + 3}" fill="#6e7681" font-size="8" text-anchor="end">${v}</text>`
+          const y = chartTop + CHART_H - Math.round((v / max) * CHART_H)
+          return `<line x1="${Y_LABEL_W}" y1="${y}" x2="${totalW}" y2="${y}" stroke="${CHART_COLORS.grid}" stroke-width="0.75" stroke-dasharray="2 3"/>
+<text x="${Y_LABEL_W - 4}" y="${y + 3}" fill="${CHART_COLORS.textMuted}" font-size="8" text-anchor="end">${v}</text>`
         }).join('')
 
-        // Bars + x-axis date ticks
         const bars = days.map((d, i) => {
           const h = d.cnt === 0 ? 2 : Math.max(4, Math.round((d.cnt / max) * CHART_H))
           const x = Y_LABEL_W + i * (BAR_W + GAP)
-          const y = TOP_PAD + CHART_H - h
-          const color = d.cnt === 0 ? '#21262d' : '#3fb950'
-          const label = d.day.slice(5) // MM-DD
+          const y = chartTop + CHART_H - h
+          const color = d.cnt === 0 ? CHART_COLORS.track : CHART_COLORS.primary
+          const label = d.day.slice(5)
           const tick = (i === 0 || i === 6 || i === 13 || i === 20 || i === 29)
-            ? `<text x="${x + BAR_W / 2}" y="${TOP_PAD + CHART_H + LABEL_H - 1}" fill="#6e7681" font-size="8" text-anchor="middle">${this._esc(label)}</text>` : ''
-          return `<rect x="${x}" y="${y}" width="${BAR_W}" height="${h}" rx="2" fill="${color}"><title>${this._esc(d.day)}: ${d.cnt} job${d.cnt !== 1 ? 's' : ''}</title></rect>${tick}`
+            ? `<text x="${x + BAR_W / 2}" y="${chartTop + CHART_H + LABEL_H - 1}" fill="${CHART_COLORS.textMuted}" font-size="8" text-anchor="middle">${this._esc(label)}</text>` : ''
+          return `<rect x="${x}" y="${y}" width="${BAR_W}" height="${h}" fill="${color}"><title>${this._esc(d.day)}: ${d.cnt} job${d.cnt !== 1 ? 's' : ''}</title></rect>${tick}`
         }).join('')
 
-        // Y-axis title (rotated)
-        const yTitle = `<text transform="rotate(-90)" x="${-(TOP_PAD + CHART_H / 2)}" y="9" fill="#6e7681" font-size="8" text-anchor="middle">jobs/day</text>`
+        const yTitle = `<text x="0" y="8" fill="${CHART_COLORS.textMuted}" font-size="8">jobs/day</text>`
 
-        return `<svg viewBox="0 0 ${totalW} ${totalH}" width="100%" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible">${yTitle}${grid}${bars}</svg>`
+        return `<svg viewBox="0 0 ${totalW} ${totalH}" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="JetBrains Mono, Fira Code, monospace" style="display:block;overflow:visible">${yTitle}${grid}${bars}</svg>`
       },
       donutSvg() {
         if (!this.stats) return ''
@@ -305,78 +1067,93 @@
         const cancelled = sc.cancelled || 0
         const total = done + failed + cancelled
         if (total === 0) return `<p class="dash-chart-empty">No data yet</p>`
-        return this._donutSvgHelper([
-          { val: done,      color: '#3fb950', label: 'Done' },
-          { val: failed,    color: '#f85149', label: 'Failed' },
-          { val: cancelled, color: '#d29922', label: 'Cancelled' },
-        ].filter(s => s.val > 0), total)
+        return this._percentBarSvg([
+          { val: done,      color: CHART_COLORS.success, label: 'Done' },
+          { val: failed,    color: CHART_COLORS.danger, label: 'Failed' },
+          { val: cancelled, color: CHART_COLORS.warning, label: 'Cancelled' },
+        ].filter(s => s.val > 0), total, 120, 126, 62, 312)
       },
       kindSvg() {
         if (!this.stats?.kind_counts?.length) return ''
-        const COLORS = { install: '#3fb950', uninstall: '#f85149', world_update: '#58a6ff', depclean: '#bc8cff', sync: '#d29922', preserved_rebuild: '#79c0ff' }
-        const rows = this.stats.kind_counts.slice(0, 10).map(it => ({
-          label: it.kind.replace(/_/g, ' '), val: it.cnt, color: COLORS[it.kind] || '#8b949e'
+        const COLORS = {
+          install: CHART_COLORS.primary,
+          uninstall: CHART_COLORS.danger,
+          world_update: CHART_COLORS.info,
+          depclean: CHART_COLORS.accent,
+          sync: CHART_COLORS.warning,
+          preserved_rebuild: CHART_COLORS.muted,
+        }
+        const rows = this.stats.kind_counts.slice(0, 8).map(it => ({
+          label: it.kind.replace(/_/g, ' '), val: it.cnt, color: COLORS[it.kind] || CHART_COLORS.muted
         }))
-        return this._hBarSvg(rows, v => String(v), 120, 140, 300)
+        return this._hBarSvg(rows, v => String(v), 120, 126, 62, 312)
       },
       topSlowSvg() {
         if (!this.stats?.top_slow?.length) return `<p class="dash-chart-empty">No completed builds yet</p>`
-        const items = this.stats.top_slow.slice(0, 10)
-        const maxDur = items[0]?.duration || 1
-        const ROW_H = 26
-        const rows = items.map((item, i) => {
-          const barW = Math.max(4, Math.round((item.duration / maxDur) * 150))
-          const name = item.atom.replace(/^=/, '').split('/').pop() || item.atom
-          const y = i * ROW_H
-          return `<text x="0" y="${y + 13}" fill="#8b949e" font-size="11" dominant-baseline="middle">${this._esc(name.slice(0, 26))}</text>
-<rect x="165" y="${y + 5}" width="${barW}" height="13" rx="3" fill="#58a6ff"/>
-<text x="${165 + barW + 6}" y="${y + 13}" fill="#58a6ff" font-size="11" dominant-baseline="middle">${this._esc(this._fmtDur(item.duration))}</text>`
-        }).join('')
-        const h = items.length * ROW_H
-        return `<svg viewBox="0 0 380 ${h}" width="100%" height="${h}" xmlns="http://www.w3.org/2000/svg" style="display:block">${rows}</svg>`
+        const rows = this.stats.top_slow.slice(0, 6).map(item => ({
+          label: (item.atom.replace(/^=/, '').split('/').pop() || item.atom).slice(0, 26),
+          val: item.duration,
+          color: CHART_COLORS.info,
+        }))
+        return this._hBarSvg(rows, v => this._fmtDur(v), 150, 108, 84, 346)
       },
       compileTrendSvg() {
         if (!this.stats?.compile_by_day?.length) return `<p class="dash-chart-empty">No data yet — future compilations will be tracked here</p>`
         const data = this.stats.compile_by_day
         const max = Math.max(1, ...data.map(d => d.secs))
-        const BAR_W = Math.max(6, Math.floor(280 / data.length) - 3)
-        const GAP = 3, Y_LABEL_W = 32, CHART_H = 60, LABEL_H = 16, TOP_PAD = 4
-        const barsW = data.length * (BAR_W + GAP) - GAP
-        const totalW = Y_LABEL_W + barsW
-        const maxMin = Math.round(max / 60)
-        const yTicks = [0, Math.round(maxMin / 2), maxMin].filter((v, i, a) => a.indexOf(v) === i)
+        const W = 360, H = 124, PAD_L = 34, PAD_R = 8, PAD_T = 12, PAD_B = 20
+        const innerW = W - PAD_L - PAD_R
+        const innerH = H - PAD_T - PAD_B
+        const fmtAxis = secs => {
+          const mins = Math.round(secs / 60)
+          if (mins >= 60) return Math.floor(mins / 60) + 'h' + (mins % 60 ? (mins % 60) + 'm' : '')
+          return mins + 'm'
+        }
+        const points = data.map((d, i) => {
+          const x = PAD_L + (data.length === 1 ? innerW / 2 : (i / (data.length - 1)) * innerW)
+          const y = PAD_T + innerH - Math.round((d.secs / max) * innerH)
+          return { ...d, x, y }
+        })
+        const line = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
+        const area = `${line} L ${points[points.length - 1].x} ${PAD_T + innerH} L ${points[0].x} ${PAD_T + innerH} Z`
+        const yTicks = [0, max / 2, max]
         const grid = yTicks.map(v => {
-          const y = TOP_PAD + CHART_H - Math.round(((v * 60) / max) * CHART_H)
-          const label = v >= 60 ? Math.floor(v / 60) + 'h' + (v % 60 ? (v % 60) + 'm' : '') : v + 'm'
-          return `<line x1="${Y_LABEL_W}" y1="${y}" x2="${totalW}" y2="${y}" stroke="#21262d" stroke-width="1"/>
-<text x="${Y_LABEL_W - 4}" y="${y + 3}" fill="#6e7681" font-size="8" text-anchor="end">${label}</text>`
+          const y = PAD_T + innerH - Math.round((v / max) * innerH)
+          return `<line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="${CHART_COLORS.grid}" stroke-width="0.75" stroke-dasharray="2 3"/>
+<text x="${PAD_L - 4}" y="${y + 3}" fill="${CHART_COLORS.textMuted}" font-size="8" text-anchor="end">${this._esc(fmtAxis(v))}</text>`
         }).join('')
-        const bars = data.map((d, i) => {
-          const h = Math.max(3, Math.round((d.secs / max) * CHART_H))
-          const x = Y_LABEL_W + i * (BAR_W + GAP)
-          const y = TOP_PAD + CHART_H - h
-          const showLabel = i === 0 || i === data.length - 1 || i % Math.ceil(data.length / 6) === 0
-          const tick = showLabel ? `<text x="${x + BAR_W / 2}" y="${TOP_PAD + CHART_H + LABEL_H - 1}" fill="#6e7681" font-size="8" text-anchor="middle">${this._esc(d.day.slice(5))}</text>` : ''
-          const mins = Math.round(d.secs / 60)
-          const hh = Math.floor(mins / 60), mm = mins % 60
-          const dur = hh ? hh + 'h ' + (mm ? mm + 'm' : '') : mm + 'm'
-          return `<rect x="${x}" y="${y}" width="${BAR_W}" height="${h}" rx="2" fill="#ffa657"><title>${this._esc(d.day)}: ${dur}</title></rect>${tick}`
+        const labels = points.map((p, i) => {
+          const show = i === 0 || i === points.length - 1 || i % Math.max(1, Math.ceil(points.length / 5)) === 0
+          if (!show) return ''
+          return `<text x="${p.x}" y="${H - 4}" fill="${CHART_COLORS.textMuted}" font-size="8" text-anchor="middle">${this._esc(p.day.slice(5))}</text>`
         }).join('')
-        const yTitle = `<text transform="rotate(-90)" x="${-(TOP_PAD + CHART_H / 2)}" y="9" fill="#6e7681" font-size="8" text-anchor="middle">compile</text>`
-        return `<svg viewBox="0 0 ${totalW} ${TOP_PAD + CHART_H + LABEL_H}" width="100%" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible">${yTitle}${grid}${bars}</svg>`
+        const markers = points.map(p => {
+          const dur = fmtAxis(p.secs)
+          return `<circle cx="${p.x}" cy="${p.y}" r="2.5" fill="${CHART_COLORS.warning}"><title>${this._esc(p.day)}: ${dur}</title></circle>`
+        }).join('')
+        return `<svg viewBox="0 0 ${W} ${H}" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="JetBrains Mono, Fira Code, monospace" style="display:block;overflow:visible">
+<text x="0" y="8" fill="${CHART_COLORS.textMuted}" font-size="8">build time</text>
+${grid}
+<path d="${area}" fill="rgba(181, 154, 103, 0.14)" stroke="none"/>
+<path d="${line}" fill="none" stroke="${CHART_COLORS.warning}" stroke-width="2"/>
+${markers}
+${labels}
+</svg>`
       },
-      hasPkgStats() { return !!(this.pkgStats?.top_use_flags?.length) },
-      _fmtSize(b) {
-        if (!b) return '0 B'
-        if (b > 1024 ** 3) return (b / 1024 ** 3).toFixed(1) + ' GB'
-        if (b > 1024 ** 2) return (b / 1024 ** 2).toFixed(0) + ' MB'
-        return (b / 1024).toFixed(0) + ' KB'
+      _fmtIecParts(b) {
+        return fmtIecParts(b)
+      },
+      portageDiskRows() {
+        return buildPortageDiskRows(this.pkgStats)
+      },
+      portageHint() {
+        return portageDiskHint(this.pkgStats)
       },
       useFlagsSvg() {
         if (!this.pkgStats?.top_use_flags?.length) return ''
         const all = this.pkgStats.top_use_flags.map(it => [it.flag, it.cnt])
-        const colorFn = (i, n) => `hsl(${130 - (i/n)*50},55%,${Math.round(55 - (i/n)*12)}%)`
-        return this._hBarSvg(this._topNOther(all, 10, colorFn), v => String(v), 90, 160, 300)
+        const colorFn = i => paletteColor('primary', i)
+        return this._hBarSvg(this._topNOther(all, 10, colorFn), v => String(v), 90, 152, 56, 304)
       },
       compileCatsSvg() {
         if (!this.compileCats) return `<p class="dash-chart-empty">Loading from emerge.log…</p>`
@@ -386,61 +1163,49 @@
           const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60)
           return h ? `${h}h ${m}m` : `${m}m`
         }
-        const colorFn = (i, n) => `hsl(${210 + (i/n)*60},60%,${Math.round(60 - (i/n)*15)}%)`
-        return this._hBarSvg(this._topNOther(all, 10, colorFn), fmtH, 100, 160, 310)
+        const rows = this._topNOther(all, 10, i => paletteColor('info', i))
+        const maxVal = Math.max(1, ...rows.map(row => row.val))
+        const items = rows.map(row => {
+          const width = Math.max(4, Math.round((row.val / maxVal) * 100))
+          return `<div class="dash-compile-row">
+  <div class="dash-compile-row-head">
+    <span class="dash-compile-label">${this._esc(row.label)}</span>
+    <span class="dash-compile-value">${this._esc(fmtH(row.val))}</span>
+  </div>
+  <div class="dash-compile-bar">
+    <span class="dash-compile-bar-fill" style="width:${width}%;background:${row.color}"></span>
+  </div>
+</div>`
+        }).join('')
+        return `<div class="dash-compile-list">${items}</div>`
       },
       keywordDistSvg() {
         if (!this.pkgStats?.keyword_dist) return ''
         const kd = this.pkgStats.keyword_dist
         const total = (kd.stable || 0) + (kd.testing || 0) + (kd.live || 0) + (kd.unknown || 0)
         if (total === 0) return `<p class="dash-chart-empty">No data</p>`
-        return this._donutSvgHelper([
-          { val: kd.stable,  color: '#3fb950', label: 'Stable' },
-          { val: kd.testing, color: '#d29922', label: 'Testing (~)' },
-          { val: kd.live,    color: '#bc8cff', label: 'Live (9999)' },
-          { val: kd.unknown, color: '#6e7681', label: 'Other' },
-        ].filter(s => s.val > 0), total)
+        return this._percentBarSvg([
+          { val: kd.stable,  color: CHART_COLORS.success, label: 'Stable' },
+          { val: kd.testing, color: CHART_COLORS.warning, label: 'Testing' },
+          { val: kd.live,    color: CHART_COLORS.info, label: 'Live' },
+          { val: kd.unknown, color: CHART_COLORS.muted, label: 'Other' },
+        ].filter(s => s.val > 0), total, 68, 72, 50, 190)
       },
-      portageSpaceSvg() {
-        const disk = this.pkgStats?.portage_disk
-        if (!disk) return ''
-        const COLORS = { repos: '#58a6ff', distfiles: '#d29922', binpkgs: '#3fb950', vartree: '#bc8cff' }
-        const LABELS = { repos: '/var/db/repos (tree)', distfiles: '/var/cache/distfiles', binpkgs: '/var/cache/binpkgs', vartree: '/var/db/pkg' }
-        const entries = Object.entries(disk).filter(([, v]) => v >= 0)
-        const maxVal = Math.max(1, ...entries.map(([, v]) => v))
-        const ROW_H = 26
-        const rows = entries.map(([key, bytes], i) => {
-          const barW = bytes === 0 ? 2 : Math.max(4, Math.round((bytes / maxVal) * 160))
-          const color = COLORS[key] || '#8b949e'
-          const label = LABELS[key] || key
-          const size = this._fmtSize(bytes)
-          const y = i * ROW_H
-          return `<text x="0" y="${y + 14}" fill="#8b949e" font-size="11" dominant-baseline="middle">${this._esc(label)}</text>
-<rect x="175" y="${y + 5}" width="${barW}" height="13" rx="3" fill="${color}"/>
-<text x="${175 + barW + 6}" y="${y + 14}" fill="${color}" font-size="11" dominant-baseline="middle">${this._esc(size)}</text>`
-        }).join('')
-        const h = entries.length * ROW_H
-        const hint = (disk.distfiles || 0) > 5 * 1024 ** 3
-          ? `<text x="0" y="${h + 16}" fill="#d29922" font-size="10">💡 Consider running eclean-dist to free up distfiles space</text>` : ''
-        return `<svg viewBox="0 0 420 ${h + (hint ? 22 : 0)}" width="100%" height="${h + (hint ? 22 : 0)}" xmlns="http://www.w3.org/2000/svg" style="display:block">${rows}${hint}</svg>`
-      },
-      // Horizontal bar chart helper — fixed label column, bar, value label.
-      // rows: [{label, val, color}], fmtVal: val→string
-      _hBarSvg(rows, fmtVal = v => String(v), labelW = 105, barMax = 160, viewW = 320) {
+      _hBarSvg(rows, fmtVal = v => String(v), labelW = 105, barW = 160, valueW = 52, viewW = 320) {
         const maxVal = Math.max(1, ...rows.map(r => r.val))
         const ROW_H = 22, PAD_T = 2
         const items = rows.map((r, i) => {
-          const barW = r.val === 0 ? 2 : Math.max(4, Math.round((r.val / maxVal) * barMax))
+          const fillW = r.val === 0 ? 0 : Math.max(1, Math.round((r.val / maxVal) * barW))
           const y = PAD_T + i * ROW_H
-          return `<text x="0" y="${y + 11}" fill="#8b949e" font-size="11" dominant-baseline="middle">${this._esc(r.label)}</text>` +
-                 `<rect x="${labelW}" y="${y + 4}" width="${barW}" height="12" rx="3" fill="${r.color}"/>` +
-                 `<text x="${labelW + barW + 5}" y="${y + 11}" fill="#6e7681" font-size="10" dominant-baseline="middle">${this._esc(fmtVal(r.val))}</text>`
+          return `<text x="0" y="${y + 11}" fill="${CHART_COLORS.text}" font-size="11" dominant-baseline="middle">${this._esc(r.label)}</text>` +
+                 `<rect x="${labelW}" y="${y + 4}" width="${barW}" height="12" fill="${CHART_COLORS.track}"/>` +
+                 (fillW > 0 ? `<rect x="${labelW}" y="${y + 4}" width="${fillW}" height="12" fill="${r.color}"/>` : '') +
+                 `<text x="${labelW + barW + valueW - 4}" y="${y + 11}" fill="${CHART_COLORS.textMuted}" font-size="10" text-anchor="end" dominant-baseline="middle">${this._esc(fmtVal(r.val))}</text>`
         }).join('')
         const h = PAD_T + rows.length * ROW_H
-        return `<svg viewBox="0 0 ${viewW} ${h}" width="100%" height="${h}" xmlns="http://www.w3.org/2000/svg" style="display:block">${items}</svg>`
+        return `<svg viewBox="0 0 ${viewW} ${h}" width="100%" height="${h}" xmlns="http://www.w3.org/2000/svg" font-family="JetBrains Mono, Fira Code, monospace" style="display:block">${items}</svg>`
       },
-      // Top-N + Other bucket: takes [[label,val]] sorted desc, returns [{label,val,color}]
-      _topNOther(entries, n, colorFn, otherColor = '#6e7681') {
+      _topNOther(entries, n, colorFn, otherColor = CHART_COLORS.muted) {
         const top = entries.slice(0, n)
         const rest = entries.slice(n)
         const rows = top.map(([label, val], i) => ({ label, val, color: colorFn(i, top.length) }))
@@ -450,44 +1215,35 @@
         }
         return rows
       },
-      _donutSvgHelper(segments, total, viewW = 340, viewH = 100) {
-        const R = 38, r = 24, cx = 50, cy = 50
-        let startAngle = -Math.PI / 2
-        const paths = segments.map(seg => {
-          const angle = (seg.val / total) * 2 * Math.PI
-          const endAngle = startAngle + angle
-          const x1 = cx + R * Math.cos(startAngle), y1 = cy + R * Math.sin(startAngle)
-          const x2 = cx + R * Math.cos(endAngle),   y2 = cy + R * Math.sin(endAngle)
-          const x3 = cx + r * Math.cos(endAngle),   y3 = cy + r * Math.sin(endAngle)
-          const x4 = cx + r * Math.cos(startAngle), y4 = cy + r * Math.sin(startAngle)
-          const large = angle > Math.PI ? 1 : 0
-          const d = `M${x1.toFixed(2)} ${y1.toFixed(2)} A${R} ${R} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} L${x3.toFixed(2)} ${y3.toFixed(2)} A${r} ${r} 0 ${large} 0 ${x4.toFixed(2)} ${y4.toFixed(2)} Z`
-          startAngle = endAngle
-          return `<path d="${d}" fill="${seg.color}"><title>${this._esc(seg.label)}: ${seg.val}</title></path>`
+      _percentBarSvg(rows, total, labelW = 150, barW = 110, valueW = 78, viewW = 340) {
+        const ROW_H = 22, PAD_T = 2
+        const items = rows.map((row, i) => {
+          const pct = total ? Math.round((row.val / total) * 100) : 0
+          const fillW = pct === 0 ? 0 : Math.max(1, Math.round((pct / 100) * barW))
+          const y = PAD_T + i * ROW_H
+          return `<text x="0" y="${y + 11}" fill="${CHART_COLORS.text}" font-size="11" dominant-baseline="middle">${this._esc(row.label)}</text>` +
+                 `<rect x="${labelW}" y="${y + 4}" width="${barW}" height="12" fill="${CHART_COLORS.track}"/>` +
+                 (fillW > 0 ? `<rect x="${labelW}" y="${y + 4}" width="${fillW}" height="12" fill="${row.color}"/>` : '') +
+                 `<text x="${labelW + barW + valueW - 4}" y="${y + 11}" fill="${CHART_COLORS.textMuted}" font-size="10" text-anchor="end" dominant-baseline="middle">${pct}% ${this._esc(String(row.val))}</text>`
         }).join('')
-        const legend = segments.map((seg, i) => {
-          const pct = Math.round((seg.val / total) * 100)
-          const y = 20 + i * 22
-          return `<rect x="108" y="${y - 9}" width="10" height="10" rx="2" fill="${seg.color}"/>
-<text x="122" y="${y}" fill="#c9d1d9" font-size="11">${this._esc(seg.label)}: ${seg.val} (${pct}%)</text>`
-        }).join('')
-        return `<svg viewBox="0 0 ${viewW} ${viewH}" width="100%" xmlns="http://www.w3.org/2000/svg" style="display:block">${paths}${legend}</svg>`
+        const h = PAD_T + rows.length * ROW_H
+        return `<svg viewBox="0 0 ${viewW} ${h}" width="100%" height="${h}" xmlns="http://www.w3.org/2000/svg" font-family="JetBrains Mono, Fira Code, monospace" style="display:block">${items}</svg>`
       },
       slottedSvg() {
         if (!this.pkgStats?.slotted?.length) return `<p class="dash-chart-empty">No multi-version packages found — clean system!</p>`
         const all = this.pkgStats.slotted.map(it => [it.cp.split('/')[1] || it.cp, it.count])
-        const colorFn = () => '#ffa657'
-        return this._hBarSvg(this._topNOther(all, 10, colorFn), v => `${v} slots`, 120, 140, 310)
+        const colorFn = i => paletteColor('warm', i)
+        return this._hBarSvg(this._topNOther(all, 10, colorFn), v => `${v} slots`, 120, 142, 64, 326)
       },
       srcVsBinSvg() {
         const svb = this.pkgStats?.src_vs_bin
         if (!svb) return ''
         const total = (svb.source || 0) + (svb.binary || 0)
         if (total === 0) return `<p class="dash-chart-empty">No data</p>`
-        return this._donutSvgHelper([
-          { val: svb.source || 0, color: '#3fb950', label: 'Source-compiled' },
-          { val: svb.binary || 0, color: '#58a6ff', label: 'Binary package' },
-        ].filter(s => s.val > 0), total)
+        return this._percentBarSvg([
+          { val: svb.source || 0, color: CHART_COLORS.primary, label: 'Source' },
+          { val: svb.binary || 0, color: CHART_COLORS.info, label: 'Binary' },
+        ].filter(s => s.val > 0), total, 64, 78, 46, 188)
       },
       licenseSvg() {
         const ld = this.pkgStats?.license_dist
@@ -495,36 +1251,59 @@
         const total = Object.values(ld).reduce((a, b) => a + b, 0)
         if (total === 0) return `<p class="dash-chart-empty">No data</p>`
         const segments = [
-          { key: 'copyleft',    color: '#3fb950', label: 'Copyleft (GPL…)' },
-          { key: 'permissive',  color: '#58a6ff', label: 'Permissive (MIT, Apache…)' },
-          { key: 'proprietary', color: '#f85149', label: 'Proprietary' },
-          { key: 'other',       color: '#6e7681', label: 'Other / Unknown' },
+          { key: 'copyleft',    color: CHART_COLORS.primary, label: 'Copyleft (GPL…)' },
+          { key: 'permissive',  color: CHART_COLORS.info, label: 'Permissive (MIT, Apache…)' },
+          { key: 'proprietary', color: CHART_COLORS.danger, label: 'Proprietary' },
+          { key: 'other',       color: CHART_COLORS.muted, label: 'Other / Unknown' },
         ].filter(s => ld[s.key] > 0).map(s => ({ ...s, val: ld[s.key] }))
-        const legendH = segments.length * 22 + 10
-        const viewH = Math.max(110, legendH)
-        return this._donutSvgHelper(segments, total, 380, viewH)
+        return this._percentBarSvg(segments, total, 156, 108, 88, 352)
       },
     }
   }
 
-  function packageListComponent() {
+  function packageListComponent(mode = 'packages') {
     return {
       packages: [], loading: true, _timer: null,
       search: Alpine.store('router').packageListSearch,
+      mode,
       init() {
         this._load()
         // reload when navigating (back) to the packages list
         this.$watch('$store.router.view', v => {
-          if (v === 'packages' && !Alpine.store('router').selectedPackage) this._load()
+          if (v === this.mode && !Alpine.store('router').selectedPackage) this._load()
         })
         this.$watch('$store.router.selectedPackage', v => {
-          if (!v && Alpine.store('router').view === 'packages') this._load()
+          if (!v && Alpine.store('router').view === this.mode) this._load()
+        })
+        this.$watch('$store.router.packageStateVersion', () => {
+          if (Alpine.store('router').view === this.mode) this._load()
         })
       },
       async _load() {
         this.loading = true
         try { this.packages = await api.packages(this.search) }
         finally { this.loading = false }
+      },
+      openPackage(cpv) {
+        if (this.mode === 'use-flags') navigateToUse(cpv)
+        else navigateTo(cpv)
+      },
+      title() {
+        return this.mode === 'use-flags' ? 'USE Flags' : 'Installed Packages'
+      },
+      placeholder() {
+        return this.mode === 'use-flags' ? 'Filter packages for USE inspection…' : 'Filter…'
+      },
+      visibleCountText() {
+        if (this.loading) return 'Loading packages…'
+        const count = this.packages.length
+        return count + ' package' + (count === 1 ? '' : 's')
+      },
+      searchStateText() {
+        const query = this.search.trim()
+        return query
+          ? 'Filtered by "' + query + '". Select a package to inspect metadata, USE state, and dependencies.'
+          : 'Select a package to inspect metadata, USE state, and dependencies.'
       },
       onInput() {
         Alpine.store('router').packageListSearch = this.search
@@ -538,12 +1317,345 @@
     }
   }
 
+  function useFlagsExplorerComponent() {
+    return {
+      search: Alpine.store('router').useFlagsQuery,
+      activeFilters: [],
+      audit: null,
+      loading: true,
+      error: null,
+      _timer: null,
+      _sectionLimit: 8,
+      _expandedSections: {},
+      init() {
+        if (Alpine.store('router').view === 'use-flags') {
+          this._load()
+        }
+        this.$watch('$store.router.view', view => {
+          if (view !== 'use-flags') return
+          this._load()
+        })
+        this.$watch('$store.router.selectedUseFlag', flag => {
+          if (!flag || Alpine.store('router').view !== 'use-flags') return
+          this.$nextTick(() => scrollMainToTop())
+        })
+      },
+      async _load() {
+        this.loading = true
+        this.error = null
+        try {
+          this.audit = await api.globalUseFlagsAudit()
+          this._ensureSelection()
+        } catch (e) {
+          this.audit = null
+          this.error = e.message
+        } finally {
+          this.loading = false
+        }
+      },
+      _allFlags() {
+        return Array.isArray(this.audit?.flags) ? this.audit.flags : []
+      },
+      _ensureSelection() {
+        const selected = Alpine.store('router').selectedUseFlag
+        if (!selected) return
+        if (this._allFlags().some(flag => flag.name === selected)) return
+        Alpine.store('router').selectedUseFlag = null
+      },
+      selectedFlagName() {
+        return Alpine.store('router').selectedUseFlag
+      },
+      selectedFlag() {
+        const name = this.selectedFlagName()
+        return this._allFlags().find(flag => flag.name === name) || null
+      },
+      onSearchInput() {
+        Alpine.store('router').useFlagsQuery = this.search
+        clearTimeout(this._timer)
+        this._timer = setTimeout(() => this._ensureSelection(), 120)
+      },
+      toggleStateFilter(value) {
+        if (value === 'all') {
+          this.activeFilters = []
+          this._ensureSelection()
+          return
+        }
+        const active = new Set(this.activeFilters)
+        if (active.has(value)) active.delete(value)
+        else active.add(value)
+        this.activeFilters = [...active]
+        this._ensureSelection()
+      },
+      stateFilters() {
+        return [
+          { value: 'all', label: 'All' },
+          { value: 'has-overrides', label: 'Has overrides' },
+          { value: 'mismatch', label: 'Mismatch' },
+          { value: 'installed-only', label: 'Installed only' },
+          { value: 'forced', label: 'Forced' },
+          { value: 'masked', label: 'Masked' },
+          { value: 'global-on', label: 'Global on' },
+          { value: 'global-off', label: 'Global off' },
+        ]
+      },
+      isFilterActive(value) {
+        return value === 'all' ? this.activeFilters.length === 0 : this.activeFilters.includes(value)
+      },
+      matchesStateFilter(flag, filterValue) {
+        if (filterValue === 'has-overrides') return !!this.packageOverrideCount(flag)
+        if (filterValue === 'mismatch') return !!this.mismatchCount(flag)
+        if (filterValue === 'installed-only') return !!this.installedSupportCount(flag)
+        if (filterValue === 'forced') return !!flag?.forced_count
+        if (filterValue === 'masked') return !!flag?.masked_count
+        if (filterValue === 'global-on') return flag?.has_global && flag?.global_enabled === true
+        if (filterValue === 'global-off') return flag?.has_global && flag?.global_enabled === false
+        return true
+      },
+      filteredFlags() {
+        const query = this.search.trim().toLowerCase()
+        return this._allFlags().filter(flag => {
+          if (this.activeFilters.length && !this.activeFilters.every(filterValue => this.matchesStateFilter(flag, filterValue))) return false
+          if (!query) return true
+          return (
+            flag.name.toLowerCase().includes(query) ||
+            useFlagDescription(flag).toLowerCase().includes(query)
+          )
+        })
+      },
+      visibleCountText() {
+        if (this.loading) return 'Loading USE flags…'
+        const shown = this.filteredFlags().length
+        const total = this._allFlags().length
+        if (!total) return 'No USE flags'
+        return shown === total ? total + ' USE flags' : shown + ' of ' + total + ' USE flags'
+      },
+      packageOverrideCount(flag) {
+        return flag?.package_override_count || flag?.local_count || 0
+      },
+      packageOverrideEnabledCount(flag) {
+        return flag?.package_override_enabled_count || flag?.enabled_count || 0
+      },
+      packageOverrideDisabledCount(flag) {
+        return flag?.package_override_disabled_count || flag?.disabled_count || 0
+      },
+      installedSupportCount(flag) {
+        return flag?.installed_support_count || flag?.installed_usage_count || 0
+      },
+      installedEnabledCount(flag) {
+        return flag?.installed_enabled_count || 0
+      },
+      installedDisabledCount(flag) {
+        return flag?.installed_disabled_count || 0
+      },
+      mismatchCount(flag) {
+        return flag?.mismatch_count || 0
+      },
+      overridePackagesEnabled(flag) {
+        return Array.isArray(flag?.override_packages_enabled) ? flag.override_packages_enabled : (Array.isArray(flag?.packages_enabled) ? flag.packages_enabled : [])
+      },
+      overridePackagesDisabled(flag) {
+        return Array.isArray(flag?.override_packages_disabled) ? flag.override_packages_disabled : (Array.isArray(flag?.packages_disabled) ? flag.packages_disabled : [])
+      },
+      installedPackagesEnabled(flag) {
+        return Array.isArray(flag?.installed_packages_enabled) ? flag.installed_packages_enabled : []
+      },
+      installedPackagesDisabled(flag) {
+        return Array.isArray(flag?.installed_packages_disabled) ? flag.installed_packages_disabled : []
+      },
+      summaryCountLabel(count, noun) {
+        return count + ' ' + noun + (count === 1 ? '' : 's')
+      },
+      summaryText(flag) {
+        const parts = []
+        if (flag?.has_global) parts.push('global ' + (flag.global_enabled ? 'on' : 'off'))
+        if (this.packageOverrideCount(flag)) parts.push(this.summaryCountLabel(this.packageOverrideCount(flag), 'override'))
+        if (this.installedSupportCount(flag)) parts.push(this.installedSupportCount(flag) + ' installed supporting packages')
+        if (this.mismatchCount(flag)) parts.push(this.summaryCountLabel(this.mismatchCount(flag), 'mismatch'))
+        return parts.join(' · ') || 'No summary available'
+      },
+      selectFlag(flag) {
+        if (!flag?.name) return
+        navigateToUse(flag.name)
+      },
+      backToList() {
+        navigate('use-flags')
+      },
+      isSelected(flag) {
+        return flag?.name === this.selectedFlagName()
+      },
+      globalStateLabel(flag) {
+        if (!flag?.has_global) return 'Unset'
+        return flag.global_enabled ? 'Enabled' : 'Disabled'
+      },
+      globalSourceLabel(flag) {
+        if (!flag?.has_global) return 'none'
+        return useFlagSourceLabel({ source: flag.global_source, origin_type: flag.global_origin_type })
+      },
+      globalOriginDetail(flag) {
+        if (!flag?.has_global) return 'No explicit global source recorded for this flag.'
+        return useFlagOriginDetail({
+          source: flag.global_source,
+          origin_type: flag.global_origin_type,
+          origin_file: flag.global_origin_file,
+          default_on: false,
+        })
+      },
+      detailBadges(flag) {
+        const badges = []
+        if (flag?.has_global) {
+          badges.push({ tone: flag.global_enabled ? 'on' : 'off', text: 'Global ' + (flag.global_enabled ? 'on' : 'off') })
+        }
+        if (this.packageOverrideCount(flag)) badges.push({ tone: 'local', text: this.summaryCountLabel(this.packageOverrideCount(flag), 'override') })
+        if (this.installedSupportCount(flag)) badges.push({ tone: 'info', text: this.installedSupportCount(flag) + ' supporting' })
+        if (this.mismatchCount(flag)) badges.push({ tone: 'warn', text: this.summaryCountLabel(this.mismatchCount(flag), 'mismatch') })
+        if (flag?.forced_count) badges.push({ tone: 'forced', text: flag.forced_count + ' forced' })
+        if (flag?.masked_count) badges.push({ tone: 'masked', text: flag.masked_count + ' masked' })
+        return badges
+      },
+      listBadges(flag) {
+        const badges = []
+        if (flag?.has_global) badges.push({ tone: flag.global_enabled ? 'on' : 'off', text: flag.global_enabled ? 'Global on' : 'Global off' })
+        if (this.packageOverrideCount(flag)) badges.push({ tone: 'local', text: 'Overrides' })
+        if (this.installedSupportCount(flag)) badges.push({ tone: 'info', text: 'Supporting' })
+        if (this.mismatchCount(flag)) badges.push({ tone: 'warn', text: 'Mismatch' })
+        if (flag?.forced_count) badges.push({ tone: 'forced', text: 'Forced' })
+        if (flag?.masked_count) badges.push({ tone: 'masked', text: 'Masked' })
+        return badges
+      },
+      packageStateLabel(pkg) {
+        if (pkg?.forced) return 'Forced enabled'
+        if (pkg?.masked) return 'Masked disabled'
+        return pkg?.enabled ? 'Override enabled' : 'Override disabled'
+      },
+      packageSourceLabel(pkg) {
+        return useFlagSourceLabel(pkg)
+      },
+      packageSourceTone(pkg) {
+        return useFlagSourceTone(pkg)
+      },
+      packageStateTone(pkg) {
+        if (pkg?.forced) return 'forced'
+        if (pkg?.masked) return 'masked'
+        return pkg?.enabled ? 'on' : 'off'
+      },
+      packageOriginDetail(pkg) {
+        return useFlagOriginDetail(pkg)
+      },
+      installedPackageStateLabel(pkg) {
+        return pkg?.enabled ? 'Built enabled' : 'Built disabled'
+      },
+      installedPackageStateTone(pkg) {
+        return pkg?.enabled ? 'on' : 'off'
+      },
+      configuredPackageStateLabel(pkg) {
+        return pkg?.configured_enabled ? 'Configured enabled' : 'Configured disabled'
+      },
+      configuredPackageStateTone(pkg) {
+        return pkg?.configured_enabled ? 'on' : 'off'
+      },
+      configuredPackageSourceLabel(pkg) {
+        return useFlagSourceLabel({
+          configured_source: pkg?.configured_source,
+          configured_origin_type: pkg?.configured_origin_type,
+        })
+      },
+      configuredPackageSourceTone(pkg) {
+        return useFlagSourceTone({
+          configured_source: pkg?.configured_source,
+          configured_origin_type: pkg?.configured_origin_type,
+        })
+      },
+      configuredPackageOriginDetail(pkg) {
+        return useFlagOriginDetail({
+          configured_source: pkg?.configured_source,
+          configured_origin_type: pkg?.configured_origin_type,
+          configured_origin_file: pkg?.configured_origin_file,
+          default_on: pkg?.default_on,
+        })
+      },
+      sourceLabel(item) {
+        return useFlagSourceLabel(item)
+      },
+      mismatchLabel(pkg) {
+        return pkg?.mismatch ? 'Mismatch' : ''
+      },
+      mismatchText(flag) {
+        const count = this.mismatchCount(flag)
+        if (!count) return ''
+        return count === 1
+          ? '1 installed package differs between configured state and built state.'
+          : count + ' installed packages differ between configured state and built state.'
+      },
+      termHelp(term) {
+        const help = {
+          override: 'Explicit package-specific state from package.use for this flag.',
+          'supporting-package': 'Installed package whose IUSE advertises this flag.',
+          'built-enabled': 'Installed package was built with this flag enabled.',
+          'built-disabled': 'Installed package supports the flag but was built without it.',
+          forced: 'The profile or repository forces this flag on for the package.',
+          masked: 'The profile or repository masks this flag off for the package.',
+          mismatch: 'Configured state differs from the installed build state.',
+        }
+        return help[term] || ''
+      },
+      summaryValueClass(flag, key) {
+        if (key === 'global') return this.globalStateLabel(flag) === 'Enabled' ? 'is-on' : (this.globalStateLabel(flag) === 'Disabled' ? 'is-off' : '')
+        if (key === 'mismatch' && this.mismatchCount(flag)) return 'is-warn'
+        return ''
+      },
+      hasAdvancedDetails(flag) {
+        return !!(flag?.global_history?.length || flag?.global_origin_file || flag?.global_source)
+      },
+      sectionKey(flag, key) {
+        return (flag?.name || 'flag') + ':' + key
+      },
+      visiblePackages(flag, key, items) {
+        if (!Array.isArray(items)) return []
+        return this._expandedSections[this.sectionKey(flag, key)] ? items : items.slice(0, this._sectionLimit)
+      },
+      remainingPackages(flag, key, items) {
+        if (!Array.isArray(items)) return 0
+        return Math.max(0, items.length - this.visiblePackages(flag, key, items).length)
+      },
+      togglePackageSection(flag, key) {
+        const sectionKey = this.sectionKey(flag, key)
+        this._expandedSections = {
+          ...this._expandedSections,
+          [sectionKey]: !this._expandedSections[sectionKey],
+        }
+      },
+      emptyStateText() {
+        return this.search.trim() ? 'No USE flags match the current search and filters.' : 'No USE flags available.'
+      },
+      packageOverrideSectionTitle(flag, enabled) {
+        const count = enabled ? this.packageOverrideEnabledCount(flag) : this.packageOverrideDisabledCount(flag)
+        return (enabled ? 'Overrides enabling this flag' : 'Overrides disabling this flag') + ' (' + count + ')'
+      },
+      installedSectionTitle(flag, enabled) {
+        const count = enabled ? this.installedEnabledCount(flag) : this.installedDisabledCount(flag)
+        return (enabled ? 'Installed packages built with this flag enabled' : 'Installed packages supporting this flag but built without it') + ' (' + count + ')'
+      },
+    }
+  }
+
   function searchComponent() {
     return {
       query: Alpine.store('router').searchViewQuery,
       results: [], loading: false, searched: false, _timer: null,
       init() {
         if (this.query.length >= 2) this._search()
+        this.$watch('$store.router.searchViewQuery', value => {
+          const next = value || ''
+          if (next === this.query) return
+          this.query = next
+          clearTimeout(this._timer)
+          if (this.query.length < 2) {
+            this.results = []
+            this.searched = false
+            return
+          }
+          if (Alpine.store('router').view === 'search') this._search()
+        })
         this.$watch('$store.router.view', v => {
           if (v === 'search' && this.query.length >= 2 && !this.searched) this._search()
         })
@@ -633,7 +1745,7 @@
         const atom = Alpine.store('router').selectedPackage
         if (atom) this._load(atom)
         this.$watch('$store.router.selectedPackage', atom => {
-          if (atom && Alpine.store('router').view === 'packages') this._load(atom)
+          if (atom && ['packages', 'use-flags'].includes(Alpine.store('router').view)) this._load(atom)
         })
       },
       async _load(atom) {
@@ -767,32 +1879,74 @@
     return {
       info: null, flags: null, deps: null,
       tab: 'info',
-      error: null, flagsError: null, depsError: null,
+      error: null, flagsError: null, flagsNotice: null, depsError: null,
       init() {
         const atom = Alpine.store('router').selectedPackage
         if (atom) this._load(atom)
+        else this._reset()
         this.$watch('$store.router.selectedPackage', atom => {
-          if (atom && Alpine.store('router').view === 'packages') this._load(atom)
+          if (atom && ['packages', 'use-flags'].includes(Alpine.store('router').view)) this._load(atom)
+          else this._reset()
+        })
+        this.$watch('$store.router.view', view => {
+          if (view === 'use-flags') this.tab = 'use flags'
+          else if (view === 'packages') this.tab = 'info'
+          const atom = Alpine.store('router').selectedPackage
+          if (atom && ['packages', 'use-flags'].includes(view)) this._load(atom)
+        })
+        this.$watch('$store.router.packageStateVersion', () => {
+          const atom = Alpine.store('router').selectedPackage
+          const view = Alpine.store('router').view
+          if (atom && ['packages', 'use-flags'].includes(view)) this._load(atom)
         })
       },
-      async _load(atom) {
+      _reset() {
         this.info = null; this.flags = null; this.deps = null
-        this.error = null; this.flagsError = null; this.depsError = null
-        this.tab = 'info'
-        const [infoRes, flagsRes, depsRes] = await Promise.allSettled([
+        this.error = null; this.flagsError = null; this.flagsNotice = null; this.depsError = null
+        this.tab = Alpine.store('router').view === 'use-flags' ? 'use flags' : 'info'
+      },
+      async _load(atom) {
+        this._reset()
+        const [infoRes, plainFlagsRes, originFlagsRes, depsRes] = await Promise.allSettled([
           api.packageInfo(atom),
           api.useFlags(atom),
+          api.useFlagOrigins(atom),
           api.deps(atom),
         ])
         if (infoRes.status === 'fulfilled') {
-          this.info = Array.isArray(infoRes.value) ? infoRes.value[0] : infoRes.value
+          this.info = normalizePayload(infoRes.value)
         } else {
           this.error = infoRes.reason?.message ?? 'Failed to load package info'
         }
-        this.flags = flagsRes.status === 'fulfilled' ? flagsRes.value : null
-        if (flagsRes.status === 'rejected') this.flagsError = flagsRes.reason?.message ?? 'Failed to load use flags'
+        const originFlags = originFlagsRes.status === 'fulfilled' ? normalizePayload(originFlagsRes.value) : null
+        const plainFlags = plainFlagsRes.status === 'fulfilled' ? normalizePayload(plainFlagsRes.value) : null
+        if (originFlags?.flags?.length) {
+          this.flags = originFlags
+        } else if (plainFlagsRes.status === 'fulfilled') {
+          this.flags = plainFlags
+          if (originFlagsRes.status === 'rejected') {
+            this.flagsNotice = 'USE provenance unavailable; showing effective flags only.'
+          }
+        } else {
+          this.flags = null
+          this.flagsError = plainFlagsRes.reason?.message ?? originFlagsRes.reason?.message ?? 'Failed to load use flags'
+        }
         this.deps = depsRes.status === 'fulfilled' ? depsRes.value : null
         if (depsRes.status === 'rejected') this.depsError = depsRes.reason?.message ?? 'Failed to load deps'
+      },
+      hasFlagHistory(flag) {
+        return !!(flag && Array.isArray(flag.history) && flag.history.length)
+      },
+      flagOriginText(flag) {
+        return useFlagSourceLabel(flag)
+      },
+      flagFileName(path) {
+        if (!path) return '—'
+        const parts = String(path).split('/')
+        return parts[parts.length - 1] || path
+      },
+      flagHistoryState(step) {
+        return step?.enabled ? 'enabled' : 'disabled'
       },
       validHomepage() { return this.info?.HOMEPAGE && /^https?:\/\//.test(this.info.HOMEPAGE) },
       fmtSize(b) {
@@ -1043,7 +2197,10 @@
           if (msg.done) {
             this._flushLines(); this.running = false; this.returncode = msg.returncode ?? null; this.ws = null
             localStorage.removeItem('arbor_uninstall_' + atom)
-            if (this.returncode === 0) this.step = 'done'
+            if (this.returncode === 0) {
+              invalidatePackageState(atom)
+              this.step = 'done'
+            }
           }
         })
       },
@@ -1059,6 +2216,7 @@
             if (msg.connectionLost || (this.returncode !== 0 && !gotLines)) {
               this.returncode = null; this.runUninstall()
             } else if (this.returncode === 0) {
+              invalidatePackageState(atom)
               this.step = 'done'
             }
           }
@@ -1192,6 +2350,7 @@
               this.step = 'etcupdate'; return
             }
           } catch (_) {}
+          invalidatePackageState(Alpine.store('router').installAtom)
           this.step = 'done'
         }
       },
@@ -1232,7 +2391,10 @@
         try {
           await emerge.etcUpdateResolve(file.cfg_file, action)
           this.etcFiles = this.etcFiles.map(f => f.cfg_file === file.cfg_file ? { ...f, resolved: true, action } : f)
-          if (this.etcFiles.every(f => f.resolved)) this.step = 'done'
+          if (this.etcFiles.every(f => f.resolved)) {
+            invalidatePackageState(Alpine.store('router').installAtom)
+            this.step = 'done'
+          }
         } catch(e) { alert('etc-update error: ' + e.message) }
       },
       retry() { this.step === 'install' ? this.runInstall() : this.runAutounmask() },
@@ -1279,6 +2441,55 @@
     depcleanPretend: { storage: 'arbor_job_@depclean-pretend',  atom: '@depclean-pretend',  attachOnDone: true  },
   }
 
+  const MAINTENANCE_ACTIONS = {
+    sync: {
+      id: 'sync',
+      title: 'Sync',
+      summary: 'Refresh repository metadata before any world resolution.',
+      risk: 'Low impact. Updates local Portage repository state only.',
+      notes: [
+        'Run this when the tree may be stale.',
+        'A fresh sync makes update checks and depclean previews more trustworthy.',
+      ],
+    },
+    worldPretend: {
+      id: 'worldPretend',
+      title: 'Check updates',
+      summary: 'Resolve the pending @world plan without modifying the system.',
+      risk: 'Read-only preview. Use it to inspect blockers, rebuild size, and keyword changes.',
+      notes: [
+        'Pretend output is the safest place to spot conflicts before a real update.',
+      ],
+    },
+    worldUpdate: {
+      id: 'worldUpdate',
+      title: 'Update @world',
+      summary: 'Apply the selected world-update plan with the current emerge options.',
+      risk: 'High impact. Can rebuild a large part of the system and keep jobs running for a while.',
+      notes: [
+        'Review the preview first, then run the real update with only the flags you actually need.',
+      ],
+    },
+    preserved: {
+      id: 'preserved',
+      title: 'Preserved rebuild',
+      summary: 'Rebuild packages that still rely on preserved libraries after upgrades.',
+      risk: 'Moderate impact. Usually safe and targeted, but it can still trigger multiple rebuilds.',
+      notes: [
+        'This is typically follow-up work after updates changed linked libraries.',
+      ],
+    },
+    depclean: {
+      id: 'depclean',
+      title: 'Depclean',
+      summary: 'Preview and remove packages that are no longer required by the current world set.',
+      risk: 'High risk if skipped straight to removal. Always inspect the pretend set first.',
+      notes: [
+        'Use the pretend phase to confirm nothing important will be removed unexpectedly.',
+      ],
+    },
+  }
+
   function updatesComponent() {
     const MAX_LINES = 5000
     const mkOp = (expanded) => ({ lines: [], running: false, rc: null, ws: null, expanded })
@@ -1289,10 +2500,18 @@
       worldUpdate:  mkOp(false),
       depclean:     { ...mkOp(false), dcStep: 'idle' },
       preserved:    mkOp(false),
+      pkgStats: null,
+      selectedAction: 'worldPretend',
       init() {
         this.eoLoad()
-        this.$watch('$store.router.view', v => { if (v === 'updates') this._resumeAll() })
+        this.$watch('$store.router.view', v => { if (v === 'updates') { this._resumeAll(); this._loadSidebar() } })
+        this._loadSidebar()
         this._resumeAll()
+      },
+      async _loadSidebar() {
+        try {
+          this.pkgStats = await api.pkgStats()
+        } catch (_) {}
       },
       async _resumeAll() {
         await Promise.all([
@@ -1304,6 +2523,115 @@
           this._resumeIfRunning('sync',         id => this._attachSync(id)),
           this._resumeIfRunning('worldPretend', id => this._attachWorldPretend(id)),
         ])
+        this._syncSelectedAction()
+      },
+      maintenanceActions() {
+        return Object.values(MAINTENANCE_ACTIONS)
+      },
+      hasPortageDisk() {
+        return this.portageDiskRows().length > 0
+      },
+      portageDiskRows() {
+        return buildPortageDiskRows(this.pkgStats)
+      },
+      portageHint() {
+        return portageDiskHint(this.pkgStats)
+      },
+      selectAction(id) {
+        if (MAINTENANCE_ACTIONS[id]) this.selectedAction = id
+      },
+      _syncSelectedAction() {
+        const active = this.maintenanceActions().find(action => this.isActionAttentionWorthy(action.id))
+        if (active) this.selectedAction = active.id
+        else if (!MAINTENANCE_ACTIONS[this.selectedAction]) this.selectedAction = 'worldPretend'
+      },
+      isActionAttentionWorthy(id) {
+        const op = this.opFor(id)
+        if (!op) return false
+        if (op.running) return true
+        return id === 'depclean' && this.depclean.dcStep === 'confirm'
+      },
+      opFor(id) {
+        return this[id] || null
+      },
+      actionSummary(id) {
+        return MAINTENANCE_ACTIONS[id]?.summary || ''
+      },
+      selectedActionMeta() {
+        return MAINTENANCE_ACTIONS[this.selectedAction] || MAINTENANCE_ACTIONS.worldPretend
+      },
+      selectedOp() {
+        return this.opFor(this.selectedActionMeta().id)
+      },
+      commandText(id = this.selectedActionMeta().id) {
+        if (id === 'worldUpdate') {
+          return [this._eoCommand, ...this._eoBaseFlags, ...this.eoUserFlags(), '@world'].join(' ')
+        }
+        if (id === 'worldPretend') return 'emerge -uDN --pretend @world'
+        if (id === 'sync') return 'emaint sync -a'
+        if (id === 'preserved') return 'emerge @preserved-rebuild'
+        if (id === 'depclean') return 'emerge --depclean'
+        return ''
+      },
+      optionSummary() {
+        const flags = this.eoUserFlags()
+        return flags.length ? flags.join(' ') : 'Using Arbor default world-update flags only.'
+      },
+      lastOutputLine(id = this.selectedActionMeta().id) {
+        const op = this.opFor(id)
+        if (!op?.lines?.length) return ''
+        for (let i = op.lines.length - 1; i >= 0; i -= 1) {
+          const line = String(op.lines[i] || '').trim()
+          if (line) return line
+        }
+        return ''
+      },
+      activityStatus(id = this.selectedActionMeta().id) {
+        const op = this.opFor(id)
+        if (!op) return { tone: 'muted', label: 'Idle', detail: 'No active job.' }
+        if (id === 'depclean' && this.depclean.dcStep === 'confirm' && !op.running) {
+          return { tone: 'warn', label: 'Awaiting confirmation', detail: 'Pretend completed. Review the removal set before starting depclean.' }
+        }
+        if (op.running) {
+          return { tone: 'info', label: 'Running', detail: this.lastOutputLine(id) || 'Streaming output from the active job.' }
+        }
+        if (op.rc === 0) {
+          return { tone: 'ok', label: 'Completed', detail: 'No active job. Last run exited cleanly.' }
+        }
+        if (op.rc !== null) {
+          return { tone: 'err', label: 'Stopped on error', detail: 'No active job. Last run exited with status ' + op.rc + '.' }
+        }
+        return { tone: 'muted', label: 'Idle', detail: 'No active job.' }
+      },
+      lastResultText(id = this.selectedActionMeta().id) {
+        const op = this.opFor(id)
+        if (!op) return 'No completed run yet.'
+        if (id === 'depclean' && this.depclean.dcStep === 'confirm' && !op.running) {
+          return this.lastOutputLine(id) || 'Pretend finished successfully; removal has not started yet.'
+        }
+        if (op.running) return this.lastOutputLine(id) || 'Job is still running.'
+        if (op.rc === 0) return this.lastOutputLine(id) || 'Completed successfully.'
+        if (op.rc !== null) return this.lastOutputLine(id) || 'Exited with status ' + op.rc + '.'
+        return 'No completed run yet.'
+      },
+      riskNotes(id = this.selectedActionMeta().id) {
+        const meta = MAINTENANCE_ACTIONS[id]
+        if (!meta) return []
+        const notes = [meta.risk, ...meta.notes]
+        if (id === 'worldUpdate') notes.push(this.optionSummary())
+        if (id === 'depclean' && this.depclean.dcStep === 'confirm') {
+          notes.push('Removal is armed from a clean pretend pass. Start it only after reviewing the pretend output in the main pane.')
+        }
+        return notes
+      },
+      cardState(id) {
+        const op = this.opFor(id)
+        if (!op) return { tone: 'muted', text: 'idle' }
+        if (id === 'depclean' && this.depclean.dcStep === 'confirm' && !op.running) return { tone: 'warn', text: 'review' }
+        if (op.running) return { tone: 'info', text: 'running' }
+        if (op.rc === 0) return { tone: 'ok', text: 'done' }
+        if (op.rc !== null) return { tone: 'err', text: 'exit ' + op.rc }
+        return { tone: 'muted', text: 'idle' }
       },
       async _resumeIfRunning(name, attach) {
         const meta = _JOB_META[name]
@@ -1344,6 +2672,7 @@
       },
       statusClass(rc) { return rc === null ? '' : rc === 0 ? 'ok' : 'err' },
       startSync() {
+        this.selectAction('sync')
         this.sync.lines = []; this.sync.rc = null; this.sync.running = true; this.sync.expanded = true
         this.sync.ws = wsGlobalEmerge('sync', (msg) => {
           if (msg.job_id) { localStorage.setItem(_JOB_META.sync.storage, msg.job_id); return }
@@ -1352,6 +2681,7 @@
         })
       },
       _attachSync(id) {
+        this.selectAction('sync')
         this.sync.running = true; this.sync.expanded = true; this.sync.lines = []; this.sync.rc = null
         this.sync.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.sync, 'syncTerm', msg.line)
@@ -1359,6 +2689,7 @@
         })
       },
       startWorldPretend() {
+        this.selectAction('worldPretend')
         this.worldPretend.lines = []; this.worldPretend.rc = null; this.worldPretend.running = true; this.worldPretend.expanded = true
         this.worldPretend.ws = wsGlobalEmerge('world-pretend', (msg) => {
           if (msg.job_id) { localStorage.setItem(_JOB_META.worldPretend.storage, msg.job_id); return }
@@ -1367,6 +2698,7 @@
         })
       },
       _attachWorldPretend(id) {
+        this.selectAction('worldPretend')
         this.worldPretend.running = true; this.worldPretend.expanded = true; this.worldPretend.lines = []; this.worldPretend.rc = null
         this.worldPretend.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.worldPretend, 'wpTerm', msg.line)
@@ -1374,6 +2706,7 @@
         })
       },
       startWorldUpdate() {
+        this.selectAction('worldUpdate')
         this.worldUpdate.lines = []; this.worldUpdate.rc = null; this.worldUpdate.running = true; this.worldUpdate.expanded = true
         this.worldUpdate.ws = wsGlobalEmerge('world-update', (msg) => {
           if (msg.job_id) { localStorage.setItem(_JOB_META.worldUpdate.storage, msg.job_id); return }
@@ -1382,6 +2715,7 @@
         }, { opts: this.eoOpts() })
       },
       _attachWorldUpdate(id) {
+        this.selectAction('worldUpdate')
         this.worldUpdate.running = true; this.worldUpdate.expanded = true; this.worldUpdate.lines = []; this.worldUpdate.rc = null
         this.worldUpdate.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.worldUpdate, 'wuTerm', msg.line)
@@ -1389,6 +2723,7 @@
         })
       },
       startDepcleanPretend() {
+        this.selectAction('depclean')
         localStorage.removeItem('arbor_depclean_ran')
         this.depclean.lines = []; this.depclean.rc = null; this.depclean.running = true; this.depclean.expanded = true; this.depclean.dcStep = 'pretend'
         this.depclean.ws = wsGlobalEmerge('depclean-pretend', (msg) => {
@@ -1402,6 +2737,7 @@
         })
       },
       _attachDepcleanPretend(id) {
+        this.selectAction('depclean')
         this.depclean.running = true; this.depclean.expanded = true; this.depclean.dcStep = 'pretend'; this.depclean.lines = []; this.depclean.rc = null
         this.depclean.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.depclean, 'dcTerm', msg.line)
@@ -1413,6 +2749,7 @@
         })
       },
       startDepclean() {
+        this.selectAction('depclean')
         localStorage.setItem('arbor_depclean_ran', '1')
         this.depclean.lines = []; this.depclean.rc = null; this.depclean.running = true; this.depclean.expanded = true; this.depclean.dcStep = 'running'
         this.depclean.ws = wsGlobalEmerge('depclean', (msg) => {
@@ -1422,6 +2759,7 @@
         })
       },
       _attachDepclean(id) {
+        this.selectAction('depclean')
         this.depclean.running = true; this.depclean.expanded = true; this.depclean.dcStep = 'running'; this.depclean.lines = []; this.depclean.rc = null
         this.depclean.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.depclean, 'dcTerm', msg.line)
@@ -1429,6 +2767,7 @@
         })
       },
       startPreserved() {
+        this.selectAction('preserved')
         this.preserved.lines = []; this.preserved.rc = null; this.preserved.running = true; this.preserved.expanded = true
         this.preserved.ws = wsGlobalEmerge('preserved-rebuild', (msg) => {
           if (msg.job_id) { localStorage.setItem(_JOB_META.preserved.storage, msg.job_id); return }
@@ -1437,6 +2776,7 @@
         })
       },
       _attachPreserved(id) {
+        this.selectAction('preserved')
         this.preserved.running = true; this.preserved.expanded = true; this.preserved.lines = []; this.preserved.rc = null
         this.preserved.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.preserved, 'psTerm', msg.line)
@@ -1463,10 +2803,14 @@
     Alpine.store('router', {
       view: 'dashboard',
       selectedPackage: null,
+      selectedUseFlag: null,
       installAtom:     null,
       uninstallAtom:   null,
+      packageStateVersion: 0,
+      lastChangedPackage: null,
       packageListSearch: '',
       searchViewQuery:   '',
+      useFlagsQuery:     '',
     })
   })
 
@@ -1569,13 +2913,15 @@
   // Expose to window for Alpine x-data expressions and inline event handlers.
   // Component factories must be on window so Alpine can resolve them by name.
   Object.assign(window, {
-    navigate, navigateTo, navigateBack,
+    navigate, navigateTo, navigateToUse, navigateBack,
     api, emerge, jobs, jobHistory, overlays,
     wsEmerge, wsGlobalEmerge, wsJobAttach, wsOverlaySync, detachWs,
     loginComponent,
+    appShellComponent,
     navComponent,
     dashboardComponent,
     packageListComponent,
+    useFlagsExplorerComponent,
     searchComponent,
     packageDetailComponent,
     depGraphComponent,

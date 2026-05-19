@@ -1,107 +1,97 @@
 # Arbor
 
-> Arbor is a hobby project built to scratch a very specific itch.
-> The architecture and overall design are mine, while AI tools (Claude/Copilot) helped speed up boilerplate and implementation.
-> The code has been reviewed and tested on my own machine, but this is still an early release — issues and PRs are very welcome.
+> This is a hobby project built to scratch my own itch. While I designed the architecture and heavily used AI (Claude) to speed up the boilerplate and implementation, the code has been thoroughly reviewed and tested on my own machine. It works for my workflow, but it is still an early release.
 
-Arbor is a local web UI for managing Portage on Gentoo.
-It lets you browse packages, inspect dependency trees, review USE flags, install or remove packages, and follow running jobs from the browser.
+A local web UI for managing Portage from a browser on the same machine.
 
-The goal is **not** to hide Portage’s complexity.
-The goal is to make it easier to visualize and manage that complexity without losing low-level control.
-
-Arbor is designed for **local or LAN use only**.
-It is **not intended to be exposed to the public internet**.
+Designed for Gentoo systems in a local environment. Not intended to be exposed to the internet.
 
 ## Features
 
-- **Dashboard** — system gauges (CPU, RAM, disk), live load average, and a full analytics section (see below)
-- **Package browser** — search packages, view details, dependency tree, installed files
-- **Install / Uninstall** — live emerge output streamed to the browser, with emerge option flags
-- **Maintenance** — world update, depclean, preserved-rebuild, sync, all with pretend mode
-- **Jobs** — active running jobs with live output; completed jobs are automatically archived to **History**
-- **History** — searchable log of all past emerge operations, filterable by kind, with per-entry log viewer and purge (persisted in SQLite at `/var/lib/arbor/history.db`)
-- **Overlays** — list all configured repositories, add new overlays via `eselect repository`, and sync individual overlays with live output
+- **Dashboard** — summary cards, recent job activity, compile time by category, source/binary mix, keyword posture, top enabled USE flags, and multi-slot package summaries
+- **Installed packages** — filter installed packages, open package details, inspect metadata, USE state, and runtime dependencies
+- **Search packages** — search the Portage tree and jump to the selected package
+- **USE flags** — inspect global USE state, package-specific overrides, installed build state, and mismatch indicators
+- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and launch install or uninstall from package details
+- **Autounmask flow** — for masked install targets, Arbor can write accepted keywords to `/etc/portage/package.accept_keywords`
+- **etc-update review** — after successful installs, pending `._cfg*` files can be reviewed and resolved in the UI
+- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with a separate pretend/confirm flow
+- **Overlays** — list configured overlays, add new ones, sync them, and remove them
+- **Jobs** — view active jobs, reopen live output, and browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`)
 
-> **Known issues:**
-> - Overlay removal is not yet working — under investigation.
-> - History entries with very large logs return HTTP 500 when opened — under investigation.
+## Dashboard
 
-## Dashboard Analytics
+The current dashboard is centered on two main areas plus a top summary strip:
 
-The dashboard is divided into three collapsible sections:
+### Recent activity
 
-### 🖥️ System & Portage Status
-Live system gauges (CPU, RAM, disk /) and summary cards (installed packages, last sync, total jobs).  
-Includes a **Portage disk usage** breakdown: repos tree, distfiles cache, binpkgs cache, and installed package DB — with a hint when `eclean-dist` could free significant space.
+- Recent job list
+- Activity snapshot
+- Longest completed builds
 
-### 🔬 System Analytics
-Gentoo-centric statistics computed from the live Portage database and `/var/log/emerge.log`:
+### Gentoo composition
 
-| Chart | What it shows |
-|---|---|
-| **Compile time by category** | Top 10 Portage categories by total CPU time (hours/min), parsed from `emerge.log` — remaining categories grouped as *Other* |
-| **Top 10 enabled USE flags** | Most-used active USE flags across all installed packages |
-| **Package stability** | Donut: Stable / Testing (`~arch`) / Live (`-9999`) / Other |
-| **Source vs Binary** | How much of your system was compiled from source vs installed via binpkg |
-| **License distribution** | Copyleft (GPL…) / Permissive (MIT, Apache…) / Proprietary / Other |
-| **Multi-slot packages** | Top 10 packages with the most concurrent slots installed (toolchains, runtimes…) |
-
-> Compile time data is read directly from `/var/log/emerge.log` with in-memory caching — the cache is invalidated automatically when the file changes.
-
-### 📊 Job History
-Charts derived from Arbor's own SQLite job log:
-
-| Chart | What it shows |
-|---|---|
-| **Job activity** | Daily bar chart over the last 30 days |
-| **Compile time trend** | Wall-clock compile time per day over the last 90 days |
-| **Job outcomes** | Success / failed / cancelled donut |
-| **By type** | Jobs broken down by kind (install, uninstall, world update…) |
-| **Top 10 slowest builds** | Longest single-package builds ever recorded |
+- Compile time by category from `/var/log/emerge.log`
+- Source / binary mix
+- Keyword posture
+- Top enabled USE flags
+- Multi-slot packages
 
 ## Screenshots
 
-![Package browser and dependency tree](https://i.imgur.com/ww2S5zU.png)
+### Dashboard
 
-![Install flow with live emerge output](https://i.imgur.com/aZqroc4.png)
+<img src="https://i.imgur.com/n2h8c4B.png" alt="Arbor dashboard" width="900">
 
-![Maintenance — world update, depclean, sync](https://i.imgur.com/AllJcX6.png)
+### Installed packages
 
-![Dashboard — System & Portage Status](https://i.imgur.com/X8EXcc8.png)
+<img src="https://i.imgur.com/67lOVIN.png" alt="Arbor installed packages list" width="900">
 
-![Dashboard — System Analytics](https://i.imgur.com/Gf1ufa7.png)
+<img src="https://i.imgur.com/yS2qw6s.png" alt="Arbor package dependency view" width="900">
 
-![Dashboard — Job History](https://i.imgur.com/TuHPWUf.png)
+### USE flags
+
+<img src="https://i.imgur.com/YbyPToC.png" alt="Arbor USE flags view" width="900">
+
+### Install / Uninstall
+
+<img src="https://i.imgur.com/H5ix75g.png" alt="Arbor install flow" width="900">
+
+### Maintenance
+
+<img src="https://i.imgur.com/De6G4ng.png" alt="Arbor maintenance view" width="900">
 
 ## Architecture
 
-Arbor runs as two separate processes with different privilege levels:
+Two processes run with separate privileges:
 
-- **`arbor-daemon`** runs as root and is responsible for spawning `emerge` and streaming output over a Unix socket
-- **`arbor`** runs as the unprivileged `arbor` system user and serves the FastAPI/uvicorn HTTPS web app on port 8443, proxying allowed commands to the daemon
+- **`arbor-daemon`** (root) — performs Portage operations, tracks long-running jobs, and listens on `/run/arbor/daemon.sock`
+- **`arbor`** (unprivileged `arbor` user) — FastAPI/uvicorn web server, serves the frontend, and proxies requests to the daemon
+
+The frontend is a no-build Alpine.js app in `frontend/alpine/`.
 
 This separation is intentional: the web UI stays unprivileged, while only the package-management backend requires root access.
 
-## Requirements
-- Gentoo Linux with OpenRC or systemd
+- Gentoo Linux
 - Python 3.11+
-- `openssl` (used for certificate generation)
+- `openssl`
+- OpenRC or systemd
 
 ## Install
 
-### Portage overlay (recommended)
+### Via Portage overlay
 
 ```bash
 eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
 emaint sync -r arbor-overlay
-# choose your init system via USE flag:
 echo 'app-admin/arbor systemd' >> /etc/portage/package.use/arbor   # or: openrc
 ACCEPT_KEYWORDS="**" emerge app-admin/arbor
 bash /usr/share/arbor/setup.sh
 ```
 
-### Install script
+Choose your init system via USE flag before installing, then start the services as shown below.
+
+### Via install script
 
 ```bash
 git clone https://github.com/gorecodes/Arbor
@@ -109,13 +99,17 @@ cd Arbor
 sudo bash install.sh
 ```
 
-The installer automatically detects your init system (OpenRC or systemd) and will:
+The installer will:
 
-1. Install the backend to `/usr/lib/arbor/` with a Python venv
-2. Install the appropriate service files
-3. Create the `arbor` system user
-4. Generate a self-signed TLS certificate in `/etc/arbor/`
-5. Generate a random access token, printed once and stored in `/etc/arbor/token`
+1. Install the backend to `/usr/lib/arbor/`
+2. Create a Python virtual environment with Arbor installed into it
+3. Install the Alpine frontend to `/usr/lib/arbor/frontend/`
+4. Create `/usr/local/bin/arbor` and `/usr/local/bin/arbor-daemon`
+5. Install OpenRC or systemd service files, depending on the detected init system
+6. Create the `arbor` system user
+7. Generate a self-signed TLS certificate in `/etc/arbor/` if one does not already exist
+8. Generate an access token in `/etc/arbor/token` if one does not already exist
+9. Create `/etc/arbor/arbor.env` if it does not already exist
 
 ## First start
 
@@ -130,7 +124,7 @@ rc-service arbor start
 systemctl start arbor-daemon arbor
 ```
 
-Open `https://localhost:8443` in your browser. Accept the self-signed certificate warning, then enter the token shown during install (or read it with `sudo cat /etc/arbor/token`).
+Open `https://localhost:8443` in your browser, accept the self-signed certificate warning, and enter the token from `/etc/arbor/token`.
 
 ## Enable at boot
 
@@ -145,6 +139,28 @@ rc-update add arbor default
 systemctl enable arbor-daemon arbor
 ```
 
+## Development
+
+Backend setup:
+
+```bash
+cd backend
+python3 -m venv .venv
+.venv/bin/pip install -e .
+```
+
+Run the web server without TLS for local development:
+
+```bash
+ARBOR_ALLOW_PLAINTEXT=1 .venv/bin/arbor
+```
+
+The frontend does not need a build step; it is served directly from `frontend/alpine/`.
+
+The daemon still requires root privileges and a working Portage environment.
+
+If `/etc/arbor/token` is missing, the web service generates an ephemeral token and prints it on startup.
+
 ## Update
 
 ### Via Portage overlay
@@ -154,7 +170,10 @@ emaint sync -r arbor-overlay
 emerge app-admin/arbor
 ```
 
-Then restart the services (OpenRC: `rc-service arbor restart; rc-service arbor-daemon restart` / systemd: `systemctl restart arbor-daemon arbor`).
+Then restart the services:
+
+- **OpenRC:** `rc-service arbor-daemon restart && rc-service arbor restart`
+- **systemd:** `systemctl restart arbor-daemon arbor`
 
 ### Via install script
 
@@ -163,7 +182,10 @@ git pull
 sudo bash install.sh
 ```
 
-If `/etc/arbor/cert.pem` and `/etc/arbor/token` already exist, the installer will keep them and skip regeneration.
+Then restart the services:
+
+- **OpenRC:** `rc-service arbor-daemon restart && rc-service arbor restart`
+- **systemd:** `systemctl restart arbor-daemon arbor`
 
 ## Uninstall
 
@@ -173,21 +195,23 @@ If `/etc/arbor/cert.pem` and `/etc/arbor/token` already exist, the installer wil
 emerge --unmerge app-admin/arbor
 ```
 
-**OpenRC:** `rc-update del arbor; rc-update del arbor-daemon`  
-**systemd:** `systemctl disable arbor-daemon arbor`
+Then disable the services:
+
+- **OpenRC:** `rc-update del arbor default && rc-update del arbor-daemon default`
+- **systemd:** `systemctl disable arbor-daemon arbor`
 
 ```bash
 userdel arbor
 ```
 
-### Via install script
+### If installed with `install.sh`
 
 **OpenRC:**
 ```bash
 rc-service arbor stop
 rc-service arbor-daemon stop
-rc-update del arbor
-rc-update del arbor-daemon
+rc-update del arbor default
+rc-update del arbor-daemon default
 rm -f /etc/init.d/arbor /etc/init.d/arbor-daemon
 ```
 
@@ -205,30 +229,32 @@ rm -rf /usr/lib/arbor
 userdel arbor
 ```
 
-Configuration files and logs are **not** removed automatically:
+Configuration, runtime state, logs, and the persisted SQLite job history are not removed automatically:
 
 ```bash
-rm -rf /etc/arbor /var/log/arbor /run/arbor
+rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 ```
 
-> **Note:** `/etc/arbor/` contains your TLS certificate and access token. Keep it if you plan to reinstall and want to preserve the current setup.
+## Logs
+
+```
+/var/log/arbor/daemon.log   # arbor-daemon output
+/var/log/arbor/web.log      # arbor web server output
+```
 
 ## Configuration
 
-Web server settings live in:
+`/etc/arbor/arbor.env` controls the web server:
 
-```text
-/etc/arbor/arbor.env
-```
-
-Example:
-
-```env
-ARBOR_HOST=0.0.0.0
-ARBOR_PORT=8443
-ARBOR_CERT=/etc/arbor/cert.pem
-ARBOR_KEY=/etc/arbor/key.pem
-```
+| Variable | Default | Purpose |
+|---|---|---|
+| `ARBOR_HOST` | `0.0.0.0` | Bind address |
+| `ARBOR_PORT` | `8443` | Web server port |
+| `ARBOR_CERT` | `/etc/arbor/cert.pem` | TLS certificate path |
+| `ARBOR_KEY` | `/etc/arbor/key.pem` | TLS key path |
+| `ARBOR_ALLOW_PLAINTEXT` | unset | Set to `1` to allow plain HTTP when cert/key are missing |
+| `ARBOR_CORS_ORIGINS` | `https://localhost:8443,http://localhost:5173` | Comma-separated allowed origins |
+| `ARBOR_STATIC_DIR` | auto-detected | Override the frontend static directory |
 
 ## Logs
 
@@ -239,56 +265,16 @@ ARBOR_KEY=/etc/arbor/key.pem
 
 ## LAN access
 
-The self-signed certificate includes your hostname as a SAN.
-To access Arbor from another machine on your LAN, open:
+LAN access exists, but for now it is not the recommended deployment mode. Until the planned security-hardening work lands in upcoming releases, prefer using Arbor only from the same machine. If you still need to access it from another machine on the LAN, the generated self-signed certificate includes `localhost` and the system hostname, so you can use:
 
-```text
+```bash
 https://<hostname>:8443
 ```
 
-You will need to either accept the browser warning or import `cert.pem` into that browser’s trust store.
+You will need to accept the certificate warning unless you import the certificate into your browser trust store.
 
-To read the access token remotely:
+To read the token remotely:
 
 ```bash
 ssh yourbox sudo cat /etc/arbor/token
 ```
-
-## Security notes
-
-Arbor is meant for trusted local or LAN environments only.
-
-- Do **not** expose it directly to the internet
-- Anyone with a valid token can access the web UI
-- The token is stored locally in `/etc/arbor/token`
-- The HTTPS certificate is self-signed by default
-
-If you are deploying Arbor on a shared or semi-trusted network, review permissions carefully and treat the token as a secret.
-
-## Troubleshooting
-
-A few things to check first if something does not work:
-
-- Verify both services are running:
-  ```bash
-  rc-service arbor status
-  rc-service arbor-daemon status
-  ```
-- Check logs:
-  ```bash
-  tail -f /var/log/arbor/web.log /var/log/arbor/daemon.log
-  ```
-- If the browser refuses the connection, confirm the certificate files exist in `/etc/arbor/`
-- If LAN access fails, verify that your hostname resolves correctly from the client machine
-
-## Contributing
-
-Issues and PRs are welcome.
-
-Useful areas for contribution include:
-
-- bug fixes
-- UI improvements
-- Gentoo/OpenRC polish
-- systemd support and testing
-- documentation and install flow improvements

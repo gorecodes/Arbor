@@ -82,6 +82,31 @@ async def use_flags(auth: Auth, atom: str = Query(min_length=1)):
     return data
 
 
+@app.get("/api/package/use-flag-origins")
+async def use_flag_origins(
+    auth: Auth,
+    atom: str = Query(default=""),
+    category: str = Query(default=""),
+    package_name: str = Query(default=""),
+):
+    data = await query_one(
+        "use_flag_origins",
+        {"atom": atom, "category": category, "package_name": package_name},
+    )
+    if "error" in data:
+        status = 404 if data["error"] == "not found" else 400
+        return JSONResponse(status_code=status, content=data)
+    return data
+
+
+@app.get("/api/use-flags-audit")
+async def global_use_flags_audit(auth: Auth):
+    data = await query_one("global_use_flags_audit", {})
+    if "error" in data:
+        return JSONResponse(status_code=400, content=data)
+    return data
+
+
 @app.get("/api/package/deps")
 async def package_deps(auth: Auth, atom: str = Query(min_length=1)):
     data = await query_one("package_deps", {"atom": atom})
