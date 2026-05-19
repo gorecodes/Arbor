@@ -4,9 +4,6 @@
 
 A local web UI for managing Portage from a browser on the same machine.
 
-> [!WARNING]
-> Until the next updates, Arbor should be treated as local-only software. For now it is recommended to use it only on the same machine (`https://localhost:8443`) while additional security hardening is prepared for upcoming releases.
-
 Designed for Gentoo systems in a local environment. Not intended to be exposed to the internet.
 
 ## Features
@@ -81,6 +78,18 @@ The frontend is a no-build Alpine.js app in `frontend/alpine/`.
 - OpenRC or systemd
 
 ## Install
+
+### Via Portage overlay
+
+```bash
+eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
+emaint sync -r arbor-overlay
+echo 'app-admin/arbor systemd' >> /etc/portage/package.use/arbor   # or: openrc
+ACCEPT_KEYWORDS="**" emerge app-admin/arbor
+bash /usr/share/arbor/setup.sh
+```
+
+Choose your init system via USE flag before installing, then start the services as shown below.
 
 ### Via install script
 
