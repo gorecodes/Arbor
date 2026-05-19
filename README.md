@@ -85,7 +85,15 @@ This separation is intentional: the web UI stays unprivileged, while only the pa
 eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
 emaint sync -r arbor-overlay
 echo 'app-admin/arbor systemd' >> /etc/portage/package.use/arbor   # or: openrc
-ACCEPT_KEYWORDS="**" emerge app-admin/arbor
+emerge app-admin/arbor
+bash /usr/share/arbor/setup.sh
+```
+
+By default this installs the stable overlay version. If you want the live ebuild that tracks `main`:
+
+```bash
+echo '=app-admin/arbor-9999 **' >> /etc/portage/package.accept_keywords/arbor
+emerge =app-admin/arbor-9999
 bash /usr/share/arbor/setup.sh
 ```
 
@@ -170,6 +178,13 @@ emaint sync -r arbor-overlay
 emerge app-admin/arbor
 ```
 
+For the live ebuild instead:
+
+```bash
+emaint sync -r arbor-overlay
+emerge =app-admin/arbor-9999
+```
+
 Then restart the services:
 
 - **OpenRC:** `rc-service arbor-daemon restart && rc-service arbor restart`
@@ -195,10 +210,10 @@ Then restart the services:
 emerge --unmerge app-admin/arbor
 ```
 
-Then disable the services:
+Then stop and disable the services:
 
-- **OpenRC:** `rc-update del arbor default && rc-update del arbor-daemon default`
-- **systemd:** `systemctl disable arbor-daemon arbor`
+- **OpenRC:** `rc-service arbor stop && rc-service arbor-daemon stop && rc-update del arbor default && rc-update del arbor-daemon default`
+- **systemd:** `systemctl stop arbor arbor-daemon && systemctl disable arbor-daemon arbor`
 
 ```bash
 userdel arbor
