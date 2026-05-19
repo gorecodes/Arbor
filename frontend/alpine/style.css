@@ -1342,9 +1342,17 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
 
 /* ── Shared emerge-view layout (Install + Uninstall) ─────────────────────── */
 
+.ev-route-shell {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .ev-view-page {
   display: flex; flex-direction: column;
-  height: calc(100vh - 4rem); width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
 }
 
 .ev-page-header { margin-bottom: 1.5rem; }
@@ -1365,11 +1373,15 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
 }
 
 .ev-terminal {
-  flex: 1; overflow-y: auto;
+  flex: 1 1 auto;
   background: #0d1117;
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 0.78rem; line-height: 1.5;
   padding: 0.75rem 1rem; min-height: 0;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
 }
 
 .ev-done-msg {
@@ -1490,7 +1502,9 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
   font-family: 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 0.76rem;
   line-height: 1.5;
-  max-height: 320px;
+  height: 12rem;
+  min-height: 12rem;
+  max-height: 12rem;
   overflow-y: auto;
   padding: 0.6rem 1rem;
 }
@@ -4031,7 +4045,9 @@ input:focus,
 .layout.app-shell {
   display: flex;
   flex-direction: column;
+  height: 100dvh;
   min-height: 100vh;
+  overflow: hidden;
 }
 
 .app-bar {
@@ -4272,6 +4288,8 @@ input:focus,
 
 .app-main {
   flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
   padding: 1.35rem 1.5rem 1.75rem;
   overflow-y: auto;
 }
@@ -4279,6 +4297,10 @@ input:focus,
 .app-content {
   width: min(100%, 1720px);
   margin: 0 auto;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .dash-section[id],
@@ -4336,6 +4358,10 @@ input:focus,
 
   .app-main {
     padding: 1rem 0.9rem 1.25rem;
+  }
+
+  .ev-terminal {
+    min-height: 0;
   }
 
   .app-status-strip {

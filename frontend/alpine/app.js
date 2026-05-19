@@ -153,6 +153,11 @@
   function navigateTo(cpv) { navigate('packages', cpv) }
   function navigateToUse(cpv) { navigate('use-flags', cpv) }
   function navigateBack()  { history.back() }
+  function invalidatePackageState(atom = null) {
+    const router = Alpine.store('router')
+    router.packageStateVersion = (router.packageStateVersion || 0) + 1
+    router.lastChangedPackage = atom
+  }
 
   function _applyRoute() {
     const hash = location.hash.replace(/^#/, '')
@@ -1270,6 +1275,9 @@ ${labels}
         this.$watch('$store.router.selectedPackage', v => {
           if (!v && Alpine.store('router').view === this.mode) this._load()
         })
+        this.$watch('$store.router.packageStateVersion', () => {
+          if (Alpine.store('router').view === this.mode) this._load()
+        })
       },
       async _load() {
         this.loading = true
@@ -1883,6 +1891,13 @@ ${labels}
         this.$watch('$store.router.view', view => {
           if (view === 'use-flags') this.tab = 'use flags'
           else if (view === 'packages') this.tab = 'info'
+          const atom = Alpine.store('router').selectedPackage
+          if (atom && ['packages', 'use-flags'].includes(view)) this._load(atom)
+        })
+        this.$watch('$store.router.packageStateVersion', () => {
+          const atom = Alpine.store('router').selectedPackage
+          const view = Alpine.store('router').view
+          if (atom && ['packages', 'use-flags'].includes(view)) this._load(atom)
         })
       },
       _reset() {
@@ -2182,7 +2197,10 @@ ${labels}
           if (msg.done) {
             this._flushLines(); this.running = false; this.returncode = msg.returncode ?? null; this.ws = null
             localStorage.removeItem('arbor_uninstall_' + atom)
-            if (this.returncode === 0) this.step = 'done'
+            if (this.returncode === 0) {
+              invalidatePackageState(atom)
+              this.step = 'done'
+            }
           }
         })
       },
@@ -2198,6 +2216,7 @@ ${labels}
             if (msg.connectionLost || (this.returncode !== 0 && !gotLines)) {
               this.returncode = null; this.runUninstall()
             } else if (this.returncode === 0) {
+              invalidatePackageState(atom)
               this.step = 'done'
             }
           }
@@ -2331,6 +2350,7 @@ ${labels}
               this.step = 'etcupdate'; return
             }
           } catch (_) {}
+          invalidatePackageState(Alpine.store('router').installAtom)
           this.step = 'done'
         }
       },
@@ -2371,7 +2391,10 @@ ${labels}
         try {
           await emerge.etcUpdateResolve(file.cfg_file, action)
           this.etcFiles = this.etcFiles.map(f => f.cfg_file === file.cfg_file ? { ...f, resolved: true, action } : f)
-          if (this.etcFiles.every(f => f.resolved)) this.step = 'done'
+          if (this.etcFiles.every(f => f.resolved)) {
+            invalidatePackageState(Alpine.store('router').installAtom)
+            this.step = 'done'
+          }
         } catch(e) { alert('etc-update error: ' + e.message) }
       },
       retry() { this.step === 'install' ? this.runInstall() : this.runAutounmask() },
@@ -2783,6 +2806,8 @@ ${labels}
       selectedUseFlag: null,
       installAtom:     null,
       uninstallAtom:   null,
+      packageStateVersion: 0,
+      lastChangedPackage: null,
       packageListSearch: '',
       searchViewQuery:   '',
       useFlagsQuery:     '',

@@ -2,9 +2,12 @@
 
 > This is a hobby project built to scratch my own itch. While I designed the architecture and heavily used AI (Claude) to speed up the boilerplate and implementation, the code has been thoroughly reviewed and tested on my own machine. It works for my workflow, but it is still an early release.
 
-A local web UI for managing Portage from a browser on the same machine or LAN.
+A local web UI for managing Portage from a browser on the same machine.
 
-Designed for Gentoo systems on a local/LAN network. Not intended to be exposed to the internet.
+> [!WARNING]
+> Until the next updates, Arbor should be treated as local-only software. For now it is recommended to use it only on the same machine (`https://localhost:8443`) while additional security hardening is prepared for upcoming releases.
+
+Designed for Gentoo systems in a local environment. Not intended to be exposed to the internet.
 
 ## Features
 
@@ -39,7 +42,27 @@ The current dashboard is centered on two main areas plus a top summary strip:
 
 ## Screenshots
 
-Current screenshots are not included here. The checked-in code reflects the Alpine.js UI under `frontend/alpine/`.
+### Dashboard
+
+<img src="https://i.imgur.com/n2h8c4B.png" alt="Arbor dashboard" width="900">
+
+### Installed packages
+
+<img src="https://i.imgur.com/67lOVIN.png" alt="Arbor installed packages list" width="900">
+
+<img src="https://i.imgur.com/yS2qw6s.png" alt="Arbor package dependency view" width="900">
+
+### USE flags
+
+<img src="https://i.imgur.com/YbyPToC.png" alt="Arbor USE flags view" width="900">
+
+### Install / Uninstall
+
+<img src="https://i.imgur.com/H5ix75g.png" alt="Arbor install flow" width="900">
+
+### Maintenance
+
+<img src="https://i.imgur.com/De6G4ng.png" alt="Arbor maintenance view" width="900">
 
 ## Architecture
 
@@ -195,7 +218,7 @@ rm -rf /etc/arbor /var/log/arbor /run/arbor
 
 ## LAN access
 
-The generated self-signed certificate includes `localhost` and the system hostname. For access from another machine on the LAN, use:
+LAN access exists, but for now it is not the recommended deployment mode. Until the planned security-hardening work lands in upcoming releases, prefer using Arbor only from the same machine. If you still need to access it from another machine on the LAN, the generated self-signed certificate includes `localhost` and the system hostname, so you can use:
 
 ```bash
 https://<hostname>:8443

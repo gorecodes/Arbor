@@ -103,7 +103,7 @@
       <div class="app-content">
 
       <!-- Install flow -->
-      <div x-show="$store.router.view === 'install'" x-data="installComponent()">
+      <div x-show="$store.router.view === 'install'" x-data="installComponent()" class="ev-route-shell">
         <div class="ev-view-page">
           <div class="ev-page-header">
             <button class="ev-back" @click="goBack()">← <span x-text="$store.router.installAtom"></span></button>
@@ -214,7 +214,7 @@
       </div>
 
       <!-- Uninstall flow -->
-      <div x-show="$store.router.view === 'uninstall'" x-data="uninstallComponent()">
+      <div x-show="$store.router.view === 'uninstall'" x-data="uninstallComponent()" class="ev-route-shell">
         <div class="ev-view-page">
           <div class="ev-page-header">
             <button class="ev-back" @click="goBack()">← <span x-text="$store.router.uninstallAtom"></span></button>
