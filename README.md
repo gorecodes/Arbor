@@ -1,10 +1,17 @@
 # Arbor
 
-> This is a hobby project built to scratch my own itch. While I designed the architecture and heavily used AI (Claude) to speed up the boilerplate and implementation, the code has been thoroughly reviewed and tested on my own machine. It works perfectly for my workflow, but it's an early release — issues and PRs are highly welcome.
+> Arbor is a hobby project built to scratch a very specific itch.
+> The architecture and overall design are mine, while AI tools (Claude/Copilot) helped speed up boilerplate and implementation.
+> The code has been reviewed and tested on my own machine, but this is still an early release — issues and PRs are very welcome.
 
-A local web UI for managing Portage — browse packages, install, uninstall, and track running jobs from your browser.
+Arbor is a local web UI for managing Portage on Gentoo.
+It lets you browse packages, inspect dependency trees, review USE flags, install or remove packages, and follow running jobs from the browser.
 
-Designed for Gentoo systems on a local/LAN network. Not intended to be exposed to the internet.
+The goal is **not** to hide Portage’s complexity.
+The goal is to make it easier to visualize and manage that complexity without losing low-level control.
+
+Arbor is designed for **local or LAN use only**.
+It is **not intended to be exposed to the public internet**.
 
 ## Features
 
@@ -69,20 +76,21 @@ Charts derived from Arbor's own SQLite job log:
 
 ## Architecture
 
-Two processes run as separate privileges:
+Arbor runs as two separate processes with different privilege levels:
 
-- **arbor-daemon** (root) — spawns emerge, streams output over a Unix socket
-- **arbor** (unprivileged `arbor` user) — FastAPI/uvicorn HTTPS server on port 8443, serves the frontend and proxies daemon commands
+- **`arbor-daemon`** runs as root and is responsible for spawning `emerge` and streaming output over a Unix socket
+- **`arbor`** runs as the unprivileged `arbor` system user and serves the FastAPI/uvicorn HTTPS web app on port 8443, proxying allowed commands to the daemon
 
-## Prerequisites
+This separation is intentional: the web UI stays unprivileged, while only the package-management backend requires root access.
 
+## Requirements
 - Gentoo Linux with OpenRC or systemd
 - Python 3.11+
-- `openssl` (for certificate generation)
+- `openssl` (used for certificate generation)
 
 ## Install
 
-### Via Portage overlay (recommended for Gentoo)
+### Portage overlay (recommended)
 
 ```bash
 eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
@@ -93,7 +101,7 @@ ACCEPT_KEYWORDS="**" emerge app-admin/arbor
 bash /usr/share/arbor/setup.sh
 ```
 
-### Via install script
+### Install script
 
 ```bash
 git clone https://github.com/gorecodes/Arbor
@@ -107,9 +115,9 @@ The installer automatically detects your init system (OpenRC or systemd) and wil
 2. Install the appropriate service files
 3. Create the `arbor` system user
 4. Generate a self-signed TLS certificate in `/etc/arbor/`
-5. Generate a random access token (printed once, also saved to `/etc/arbor/token`)
+5. Generate a random access token, printed once and stored in `/etc/arbor/token`
 
-## First run
+## First start
 
 **OpenRC:**
 ```bash
@@ -124,7 +132,7 @@ systemctl start arbor-daemon arbor
 
 Open `https://localhost:8443` in your browser. Accept the self-signed certificate warning, then enter the token shown during install (or read it with `sudo cat /etc/arbor/token`).
 
-## Start at boot
+## Enable at boot
 
 **OpenRC:**
 ```bash
@@ -155,7 +163,7 @@ git pull
 sudo bash install.sh
 ```
 
-The installer skips certificate and token generation if `/etc/arbor/cert.pem` and `/etc/arbor/token` already exist.
+If `/etc/arbor/cert.pem` and `/etc/arbor/token` already exist, the installer will keep them and skip regeneration.
 
 ## Uninstall
 
@@ -176,8 +184,10 @@ userdel arbor
 
 **OpenRC:**
 ```bash
-rc-service arbor stop; rc-service arbor-daemon stop
-rc-update del arbor; rc-update del arbor-daemon
+rc-service arbor stop
+rc-service arbor-daemon stop
+rc-update del arbor
+rc-update del arbor-daemon
 rm -f /etc/init.d/arbor /etc/init.d/arbor-daemon
 ```
 
@@ -195,34 +205,90 @@ rm -rf /usr/lib/arbor
 userdel arbor
 ```
 
-In both cases, configuration files (`/etc/arbor/`) and logs (`/var/log/arbor/`) are **not** removed automatically. Delete them manually if you want a full clean:
+Configuration files and logs are **not** removed automatically:
 
 ```bash
 rm -rf /etc/arbor /var/log/arbor /run/arbor
 ```
 
-> **Note:** `/etc/arbor/` contains your TLS certificate and access token. Skip this step if you plan to reinstall and want to keep them.
-
-## Logs
-
-```
-/var/log/arbor/daemon.log   # arbor-daemon output
-/var/log/arbor/web.log      # arbor web server output
-```
+> **Note:** `/etc/arbor/` contains your TLS certificate and access token. Keep it if you plan to reinstall and want to preserve the current setup.
 
 ## Configuration
 
-`/etc/arbor/arbor.env` — environment variables for the web server:
+Web server settings live in:
 
+```text
+/etc/arbor/arbor.env
 ```
+
+Example:
+
+```env
 ARBOR_HOST=0.0.0.0
 ARBOR_PORT=8443
 ARBOR_CERT=/etc/arbor/cert.pem
 ARBOR_KEY=/etc/arbor/key.pem
 ```
 
+## Logs
+
+```text
+/var/log/arbor/daemon.log   # arbor-daemon output
+/var/log/arbor/web.log      # web server output
+```
+
 ## LAN access
 
-The self-signed certificate includes your hostname as a SAN. To access from another machine on your LAN, open `https://<hostname>:8443`. You will need to accept the certificate warning or import `cert.pem` into your browser's trust store.
+The self-signed certificate includes your hostname as a SAN.
+To access Arbor from another machine on your LAN, open:
 
-To find the token from another machine: `ssh yourbox sudo cat /etc/arbor/token`.
+```text
+https://<hostname>:8443
+```
+
+You will need to either accept the browser warning or import `cert.pem` into that browser’s trust store.
+
+To read the access token remotely:
+
+```bash
+ssh yourbox sudo cat /etc/arbor/token
+```
+
+## Security notes
+
+Arbor is meant for trusted local or LAN environments only.
+
+- Do **not** expose it directly to the internet
+- Anyone with a valid token can access the web UI
+- The token is stored locally in `/etc/arbor/token`
+- The HTTPS certificate is self-signed by default
+
+If you are deploying Arbor on a shared or semi-trusted network, review permissions carefully and treat the token as a secret.
+
+## Troubleshooting
+
+A few things to check first if something does not work:
+
+- Verify both services are running:
+  ```bash
+  rc-service arbor status
+  rc-service arbor-daemon status
+  ```
+- Check logs:
+  ```bash
+  tail -f /var/log/arbor/web.log /var/log/arbor/daemon.log
+  ```
+- If the browser refuses the connection, confirm the certificate files exist in `/etc/arbor/`
+- If LAN access fails, verify that your hostname resolves correctly from the client machine
+
+## Contributing
+
+Issues and PRs are welcome.
+
+Useful areas for contribution include:
+
+- bug fixes
+- UI improvements
+- Gentoo/OpenRC polish
+- systemd support and testing
+- documentation and install flow improvements
