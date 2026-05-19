@@ -204,7 +204,7 @@ Then disable the services:
 userdel arbor
 ```
 
-### Via install script
+### If installed with `install.sh`
 
 **OpenRC:**
 ```bash
