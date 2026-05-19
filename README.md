@@ -31,6 +31,11 @@ It is **not intended to be exposed to the public internet**.
 - **Maintenance** — world update, depclean, preserved-rebuild, sync, all with pretend mode
 - **Jobs** — active running jobs with live output; completed jobs are automatically archived to **History**
 - **History** — searchable log of all past emerge operations, filterable by kind, with per-entry log viewer and purge (persisted in SQLite at `/var/lib/arbor/history.db`)
+- **Overlays** — list all configured repositories, add new overlays via `eselect repository`, and sync individual overlays with live output
+
+> **Known issues:**
+> - Overlay removal is not yet working — under investigation.
+> - History entries with very large logs return HTTP 500 when opened — under investigation.
 
 ## Screenshots
 

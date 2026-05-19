@@ -46,6 +46,10 @@ ALLOWED_COMMANDS = {
     "history_log",
     "history_delete",
     "history_purge",
+    "overlay_list",
+    "overlay_add",
+    "overlay_remove",
+    "overlay_sync",
 }
 
 # ---------------------------------------------------------------------------
@@ -89,6 +93,45 @@ _jobs: dict[str, _Job] = {}
 # clients clicking "install <atom>" can't both decide "no running job" and
 # spawn duplicate emerge processes.
 _jobs_lock: asyncio.Lock | None = None
+
+# ---------------------------------------------------------------------------
+# Portage reload — detect repos.conf changes and reinitialize portage.db
+# ---------------------------------------------------------------------------
+
+_REPOS_CONF_PATHS = [Path("/etc/portage/repos.conf"), Path("/etc/portage/repos.conf.d")]
+_repos_conf_mtime: float = 0.0
+_portage_reload_lock = threading.Lock()
+
+
+def _repos_conf_mtime_now() -> float:
+    """Return the latest mtime across all repos.conf files/dirs."""
+    t = 0.0
+    for p in _REPOS_CONF_PATHS:
+        try:
+            if p.is_dir():
+                t = max(t, p.stat().st_mtime, *(f.stat().st_mtime for f in p.iterdir()))
+            elif p.exists():
+                t = max(t, p.stat().st_mtime)
+        except OSError:
+            pass
+    return t
+
+
+def _maybe_reload_portage():
+    """Reload portage module if repos.conf has changed since last load."""
+    global _repos_conf_mtime
+    current = _repos_conf_mtime_now()
+    if current <= _repos_conf_mtime:
+        return
+    with _portage_reload_lock:
+        if current <= _repos_conf_mtime:
+            return
+        import importlib, sys
+        for key in [k for k in sys.modules if k == "portage" or k.startswith("portage.")]:
+            del sys.modules[key]
+        import portage  # noqa: F401  — re-populates sys.modules
+        _repos_conf_mtime = _repos_conf_mtime_now()
+        log.info("portage reloaded (repos.conf changed)")
 
 # ---------------------------------------------------------------------------
 # SQLite history store
@@ -353,6 +396,7 @@ def _installed_packages(search: str):
 
 
 def _package_info(atom: str):
+    _maybe_reload_portage()
     import portage
     from portage.versions import cpv_getkey
 
@@ -392,6 +436,7 @@ def _package_info(atom: str):
 
 
 def _package_search(query: str):
+    _maybe_reload_portage()
     import portage
     porttree = portage.db[portage.root]["porttree"].dbapi
     vartree  = portage.db[portage.root]["vartree"].dbapi
@@ -415,6 +460,7 @@ def _package_search(query: str):
 
 
 def _use_flags(atom: str):
+    _maybe_reload_portage()
     import portage
     from portage.versions import cpv_getkey
 
@@ -456,6 +502,7 @@ def _use_flags(atom: str):
 
 
 def _package_deps(atom: str):
+    _maybe_reload_portage()
     import portage
     from portage.versions import cpv_getkey
 
@@ -550,6 +597,7 @@ async def cmd_package_deps(args):
 
 
 def _dep_graph(atom: str, max_depth: int, max_nodes: int = 80):
+    _maybe_reload_portage()
     import portage
     from portage.dep import dep_getkey
     from portage.versions import cpv_getkey
@@ -1215,6 +1263,127 @@ async def cmd_history_purge(args):
     yield await in_thread(_history_purge, days)
 
 
+# ---------------------------------------------------------------------------
+# Overlay management
+# ---------------------------------------------------------------------------
+
+_OVERLAY_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+_OVERLAY_URL_RE  = re.compile(r'^(https?://|git://|git\+https://).+')
+
+
+def _overlay_list() -> list:
+    import portage
+    repos = []
+    for r in portage.portdb.repositories:
+        last_sync = ""
+        ts_file = Path(r.location) / "metadata" / "timestamp.chk"
+        try:
+            last_sync = ts_file.read_text().strip() if ts_file.exists() else ""
+        except OSError:
+            pass
+        ebuild_count = 0
+        try:
+            ebuild_count = sum(1 for _ in Path(r.location).rglob("*.ebuild"))
+        except OSError:
+            pass
+        repos.append({
+            "name":       r.name,
+            "location":   r.location,
+            "sync_type":  r.sync_type or "",
+            "sync_uri":   r.sync_uri  or "",
+            "last_sync":  last_sync,
+            "ebuilds":    ebuild_count,
+        })
+    # gentoo main repo first, then alphabetical
+    repos.sort(key=lambda r: (r["name"] != "gentoo", r["name"]))
+    return repos
+
+
+def _overlay_add(name: str, sync_type: str, sync_uri: str) -> dict:
+    import subprocess
+    if not _OVERLAY_NAME_RE.match(name):
+        return {"error": "invalid overlay name"}
+    if not _OVERLAY_URL_RE.match(sync_uri):
+        return {"error": "invalid sync URI — must start with https:// or git://"}
+    allowed_types = {"git", "rsync", "svn"}
+    if sync_type not in allowed_types:
+        return {"error": f"unsupported sync type — allowed: {', '.join(sorted(allowed_types))}"}
+    result = subprocess.run(
+        ["eselect", "repository", "add", name, sync_type, sync_uri],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return {"error": result.stderr.strip() or result.stdout.strip() or "eselect failed"}
+    return {"ok": True}
+
+
+def _overlay_remove(name: str, purge: bool) -> dict:
+    import subprocess
+    if not _OVERLAY_NAME_RE.match(name):
+        return {"error": "invalid overlay name"}
+    if name == "gentoo":
+        return {"error": "cannot remove the main gentoo repository"}
+    cmd = ["eselect", "repository", "remove"]
+    if purge:
+        cmd.append("--force")
+    cmd.append(name)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        return {"error": result.stderr.strip() or result.stdout.strip() or "eselect failed"}
+    return {"ok": True}
+
+
+async def cmd_overlay_list(_args):
+    _maybe_reload_portage()
+    items = await in_thread(_overlay_list)
+    for item in items:
+        yield item
+    yield {"done": True}
+
+
+async def cmd_overlay_add(args):
+    global _repos_conf_mtime
+    name      = args.get("name", "").strip()
+    sync_type = args.get("sync_type", "git").strip()
+    sync_uri  = args.get("sync_uri", "").strip()
+    result = await in_thread(_overlay_add, name, sync_type, sync_uri)
+    if "error" in result:
+        yield result
+        return
+    _repos_conf_mtime = 0.0  # force portage reload on next overlay_list
+    # kick off sync as a background job
+    async for item in _start_background_job(
+        f"@sync:{name}",
+        ["emaint", "sync", "-r", name],
+        kind="sync",
+    ):
+        yield item
+
+
+async def cmd_overlay_remove(args):
+    global _repos_conf_mtime
+    name  = args.get("name", "").strip()
+    purge = bool(args.get("purge", False))
+    result = await in_thread(_overlay_remove, name, purge)
+    yield result
+    if "ok" in result:
+        _repos_conf_mtime = 0.0  # force portage reload on next overlay_list
+        yield {"done": True}
+
+
+async def cmd_overlay_sync(args):
+    name = args.get("name", "").strip()
+    if not _OVERLAY_NAME_RE.match(name):
+        yield {"error": "invalid overlay name"}
+        return
+    async for item in _start_background_job(
+        f"@sync:{name}",
+        ["emaint", "sync", "-r", name],
+        kind="sync",
+    ):
+        yield item
+
+
 HANDLERS = {
     "system_status":      cmd_system_status,
     "installed_packages": cmd_installed_packages,
@@ -1244,6 +1413,10 @@ HANDLERS = {
     "history_log":        cmd_history_log,
     "history_delete":     cmd_history_delete,
     "history_purge":      cmd_history_purge,
+    "overlay_list":       cmd_overlay_list,
+    "overlay_add":        cmd_overlay_add,
+    "overlay_remove":     cmd_overlay_remove,
+    "overlay_sync":       cmd_overlay_sync,
 }
 
 

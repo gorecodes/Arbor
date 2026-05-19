@@ -8,9 +8,13 @@ from typing import AsyncIterator
 
 SOCKET_PATH = "/run/arbor/daemon.sock"
 
+# Default asyncio StreamReader limit is 64 KiB — far too small for large
+# emerge logs. Set to 64 MiB so long history entries don't cause read errors.
+_READER_LIMIT = 64 * 1024 * 1024
+
 
 async def query(cmd: str, args: dict = None) -> AsyncIterator[dict]:
-    reader, writer = await asyncio.open_unix_connection(SOCKET_PATH)
+    reader, writer = await asyncio.open_unix_connection(SOCKET_PATH, limit=_READER_LIMIT)
     try:
         request = json.dumps({"cmd": cmd, "args": args or {}}) + "\n"
         writer.write(request.encode())
