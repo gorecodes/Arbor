@@ -17,7 +17,7 @@ Designed for Gentoo systems in a local environment. Not intended to be exposed t
 - **etc-update review** — after successful installs, pending `._cfg*` files can be reviewed and resolved in the UI
 - **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with a separate pretend/confirm flow
 - **Overlays** — list configured overlays, add new ones, sync them, and remove them
-- **Jobs** — view active jobs, reopen live output, and browse persisted history with log viewing, delete, and purge actions
+- **Jobs** — view active jobs, reopen live output, and browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`)
 
 ## Dashboard
 
@@ -163,6 +163,20 @@ If `/etc/arbor/token` is missing, the web service generates an ephemeral token a
 
 ## Update
 
+### Via Portage overlay
+
+```bash
+emaint sync -r arbor-overlay
+emerge app-admin/arbor
+```
+
+Then restart the services:
+
+- **OpenRC:** `rc-service arbor-daemon restart && rc-service arbor restart`
+- **systemd:** `systemctl restart arbor-daemon arbor`
+
+### Via install script
+
 ```bash
 git pull
 sudo bash install.sh
@@ -174,6 +188,23 @@ Then restart the services:
 - **systemd:** `systemctl restart arbor-daemon arbor`
 
 ## Uninstall
+
+### Via Portage overlay
+
+```bash
+emerge --unmerge app-admin/arbor
+```
+
+Then disable the services:
+
+- **OpenRC:** `rc-update del arbor default && rc-update del arbor-daemon default`
+- **systemd:** `systemctl disable arbor-daemon arbor`
+
+```bash
+userdel arbor
+```
+
+### Via install script
 
 **OpenRC:**
 ```bash
@@ -198,10 +229,10 @@ rm -rf /usr/lib/arbor
 userdel arbor
 ```
 
-Configuration, runtime state, and logs are not removed automatically:
+Configuration, runtime state, logs, and the persisted SQLite job history are not removed automatically:
 
 ```bash
-rm -rf /etc/arbor /var/log/arbor /run/arbor
+rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 ```
 
 ## Logs
