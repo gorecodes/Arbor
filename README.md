@@ -61,10 +61,11 @@ Charts derived from Arbor's own SQLite job log:
 
 ![Maintenance — world update, depclean, sync](https://i.imgur.com/AllJcX6.png)
 
-<!-- Dashboard analytics screenshots — replace with your own imgur links -->
-<!-- ![Dashboard — System & Portage Status](https://i.imgur.com/XXXXXXX.png) -->
-<!-- ![Dashboard — System Analytics](https://i.imgur.com/XXXXXXX.png) -->
-<!-- ![Dashboard — Job History](https://i.imgur.com/XXXXXXX.png) -->
+![Dashboard — System & Portage Status](https://i.imgur.com/X8EXcc8.png)
+
+![Dashboard — System Analytics](https://i.imgur.com/Gf1ufa7.png)
+
+![Dashboard — Job History](https://i.imgur.com/TuHPWUf.png)
 
 ## Architecture
 
