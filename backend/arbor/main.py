@@ -320,6 +320,68 @@ async def etc_update_resolve(auth: Auth, request: Request):
 
 
 # ---------------------------------------------------------------------------
+# Overlay management
+# ---------------------------------------------------------------------------
+
+@app.get("/api/overlays")
+async def overlay_list(auth: Auth):
+    results = await query_all("overlay_list", {})
+    return [r for r in results if "name" in r]
+
+
+@app.post("/api/overlays")
+async def overlay_add(auth: Auth, request: Request):
+    body = await request.json()
+    name      = str(body.get("name", "")).strip()
+    sync_type = str(body.get("sync_type", "git")).strip()
+    sync_uri  = str(body.get("sync_uri", "")).strip()
+    data = await query_one("overlay_add", {"name": name, "sync_type": sync_type, "sync_uri": sync_uri})
+    if "error" in data:
+        return JSONResponse(status_code=400, content=data)
+    return data
+
+
+@app.delete("/api/overlays/{name}")
+async def overlay_remove(auth: Auth, name: str, purge: int = Query(default=0)):
+    data = await query_one("overlay_remove", {"name": name, "purge": bool(purge)})
+    if "error" in data:
+        return JSONResponse(status_code=400, content=data)
+    return data
+
+
+@app.websocket("/ws/overlays/sync/{name}")
+async def ws_overlay_sync(websocket: WebSocket, name: str, token: str = Query(default="")):
+    if not verify_token(token):
+        await websocket.close(code=4401)
+        return
+    await websocket.accept()
+    try:
+        job_id = None
+        async for chunk in query("overlay_sync", {"name": name}):
+            await websocket.send_text(json.dumps(chunk))
+            if "job_id" in chunk:
+                job_id = chunk["job_id"]
+            if chunk.get("done") or chunk.get("error"):
+                break
+        if not job_id:
+            await websocket.send_text(json.dumps({"error": "failed to start sync", "done": True}))
+            return
+        async for chunk in query("job_attach", {"job_id": job_id}):
+            await websocket.send_text(json.dumps(chunk))
+            if chunk.get("done") or chunk.get("error"):
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_text(json.dumps({"error": str(e), "done": True}))
+        except Exception:
+            pass
+    finally:
+        await websocket.close()
+
+
+# ---------------------------------------------------------------------------
 # WebSocket — streaming endpoints
 # ---------------------------------------------------------------------------
 

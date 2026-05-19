@@ -11,5 +11,6 @@ node_modules/
 # GitHub Copilot
 .claude/
 .copilot/
+.github/
 CODE_REVIEW.md
 EMERGE_OPTIONS.md

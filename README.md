@@ -14,6 +14,9 @@ Designed for Gentoo systems on a local/LAN network. Not intended to be exposed t
 - **Maintenance** — world update, depclean, preserved-rebuild, sync, all with pretend mode
 - **Jobs** — active running jobs with live output; completed jobs are automatically archived to **History**
 - **History** — searchable log of all past emerge operations, filterable by kind, with per-entry log viewer and purge (persisted in SQLite at `/var/lib/arbor/history.db`)
+- **Overlays** — list all configured repositories, add new overlays via `eselect repository`, and sync individual overlays with live output
+
+> **Known issue:** overlay removal is not yet working — under investigation.
 
 ## Screenshots
 

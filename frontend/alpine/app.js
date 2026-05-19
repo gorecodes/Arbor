@@ -68,6 +68,12 @@
     purge:  (days) => _post('/history/purge', { days }),
   }
 
+  const overlays = {
+    list:   ()                             => _get('/overlays'),
+    add:    (name, sync_type, sync_uri)    => _post('/overlays', { name, sync_type, sync_uri }),
+    remove: (name, purge = false)          => _del('/overlays/' + encodeURIComponent(name) + (purge ? '?purge=1' : '')),
+  }
+
   function _wsProto() { return location.protocol === 'https:' ? 'wss' : 'ws' }
 
   function wsEmerge(cmd, atom, onMsg, extra = {}) {
@@ -93,6 +99,16 @@
   function wsJobAttach(jobId, onMsg) {
     const p = new URLSearchParams({ token: _getToken() })
     const ws = new WebSocket(_wsProto() + '://' + location.host + '/ws/jobs/' + encodeURIComponent(jobId) + '?' + p)
+    let done = false
+    ws.onmessage = e => { const m = JSON.parse(e.data); if (m.done) done = true; onMsg(m) }
+    ws.onerror   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'WebSocket error' }) } }
+    ws.onclose   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'connection closed' }) } }
+    return ws
+  }
+
+  function wsOverlaySync(name, onMsg) {
+    const p = new URLSearchParams({ token: _getToken() })
+    const ws = new WebSocket(_wsProto() + '://' + location.host + '/ws/overlays/sync/' + encodeURIComponent(name) + '?' + p)
     let done = false
     ws.onmessage = e => { const m = JSON.parse(e.data); if (m.done) done = true; onMsg(m) }
     ws.onerror   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'WebSocket error' }) } }
@@ -164,6 +180,7 @@
         { id: 'packages',  label: 'Installed'    },
         { id: 'search',    label: 'Search'        },
         { id: 'updates',   label: 'Maintenance'  },
+        { id: 'overlays',  label: 'Overlays'     },
         { id: 'jobs',      label: 'Jobs'          },
       ],
       isActive(id) {
@@ -1183,14 +1200,108 @@
     })
   })
 
+  // ---------------------------------------------------------------------------
+  // Overlays view
+  // ---------------------------------------------------------------------------
+  function overlayViewComponent() {
+    const MAX_LINES = 2000
+    let _ws = null
+    return {
+      list: [], loading: true, error: null,
+      // add form
+      addShow: false, addName: '', addSyncType: 'git', addSyncUri: '', addBusy: false, addError: null,
+      expanded: null,
+      // flat top-level sync state (one active sync at a time)
+      syncName: null, syncRunning: false, syncLines: [], syncRc: null,
+
+      init() {
+        this._load()
+        this.$watch('$store.router.view', v => { if (v === 'overlays') this._load() })
+      },
+      async _load() {
+        this.loading = true; this.error = null
+        try { this.list = await overlays.list() }
+        catch(e) { this.error = e.message }
+        finally { this.loading = false }
+      },
+      toggleAdd() { this.addShow = !this.addShow; this.addError = null },
+      async add() {
+        this.addError = null
+        if (!this.addName.trim()) { this.addError = 'Name is required'; return }
+        if (!this.addSyncUri.trim()) { this.addError = 'Sync URI is required'; return }
+        this.addBusy = true
+        try {
+          const name = this.addName.trim()
+          await overlays.add(name, this.addSyncType, this.addSyncUri.trim())
+          this.addShow = false
+          this.addName = ''; this.addSyncUri = ''
+          await this._load()
+          this._startSync(name)
+        } catch(e) { this.addError = e.message }
+        finally { this.addBusy = false }
+      },
+      async remove(name, purge) {
+        if (!confirm('Remove overlay "' + name + '"?' + (purge ? '\n\nThis will also delete the local files.' : ''))) return
+        try {
+          await overlays.remove(name, purge)
+          if (this.expanded === name) this.expanded = null
+          if (this.syncName === name) {
+            if (_ws) { try { _ws.close() } catch(_) {} _ws = null }
+            this.syncRunning = false
+          }
+          await this._load()
+        } catch(e) { alert('Remove failed: ' + e.message) }
+      },
+      toggleExpand(name) {
+        this.expanded = this.expanded === name ? null : name
+      },
+      sync(name) {
+        if (this.syncRunning) return
+        if (_ws) { try { _ws.close() } catch(_) {} _ws = null }
+        this.syncName    = name
+        this.syncRunning = true
+        this.syncLines   = []
+        this.syncRc      = null
+        this.expanded    = name
+        _ws = wsOverlaySync(name, (msg) => {
+          if (msg.line !== undefined) {
+            this.syncLines = this.syncLines.length >= MAX_LINES
+              ? this.syncLines.slice(1).concat([msg.line])
+              : this.syncLines.concat([msg.line])
+            this.$nextTick(() => {
+              const el = document.getElementById('ov-term')
+              if (el) el.scrollTop = el.scrollHeight
+            })
+          }
+          if (msg.done) {
+            this.syncRunning = false
+            this.syncRc = msg.returncode ?? -1
+            _ws = null
+            this._load()
+          }
+        })
+      },
+      lineClass(l) {
+        if (/^\[ebuild/.test(l) || /^>>> /.test(l) || /Completed/.test(l)) return 'hi-ok'
+        if (/^!!!/.test(l) || /[Ee]rror/.test(l)) return 'hi-err'
+        if (/^ \* /.test(l) || /^NOTE:/.test(l)) return 'hi-warn'
+        return ''
+      },
+      fmtLastSync(ts) {
+        if (!ts) return '—'
+        try { return new Date(ts).toLocaleDateString() } catch(_) { return ts }
+      },
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', _initRouter)
 
   // Expose to window for Alpine x-data expressions and inline event handlers.
   // Component factories must be on window so Alpine can resolve them by name.
   Object.assign(window, {
     navigate, navigateTo, navigateBack,
-    api, emerge, jobs, jobHistory,
-    wsEmerge, wsGlobalEmerge, wsJobAttach, detachWs,
+    api, emerge, jobs, jobHistory, overlays,
+    wsEmerge, wsGlobalEmerge, wsJobAttach, wsOverlaySync, detachWs,
     loginComponent,
     navComponent,
     dashboardComponent,
@@ -1202,6 +1313,7 @@
     uninstallComponent,
     installComponent,
     updatesComponent,
+    overlayViewComponent,
   })
 
 }())

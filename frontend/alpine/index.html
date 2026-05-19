@@ -690,6 +690,79 @@
         </div>
       </div>
 
+      <!-- Overlays -->
+      <div x-show="$store.router.view === 'overlays'" x-data="overlayViewComponent()">
+        <div class="jv-view">
+          <div class="jv-header">
+            <h2>Overlays</h2>
+            <button class="jv-btn-refresh" @click="toggleAdd()" x-text="addShow ? '✕ Cancel' : '+ Add overlay'"></button>
+          </div>
+
+          <!-- Add form -->
+          <div class="ov-add-form" x-show="addShow">
+            <div class="ov-add-row">
+              <input class="ov-input" type="text" placeholder="Name (e.g. my-overlay)" x-model="addName">
+              <select class="ov-select" x-model="addSyncType">
+                <option value="git">git</option>
+                <option value="rsync">rsync</option>
+                <option value="svn">svn</option>
+              </select>
+              <input class="ov-input ov-input-wide" type="text" placeholder="Sync URI (https://...)" x-model="addSyncUri">
+              <button class="jv-btn-open" :disabled="addBusy" @click="add()">
+                <span x-show="!addBusy">Add &amp; Sync</span>
+                <span x-show="addBusy">Adding…</span>
+              </button>
+            </div>
+            <p class="jv-err-msg" x-show="addError" x-text="addError"></p>
+          </div>
+
+          <p class="muted" x-show="loading">Loading…</p>
+          <p class="jv-err-msg" x-show="!loading && error" x-text="error"></p>
+
+          <div class="jv-table" x-show="!loading && !error && list.length > 0">
+            <template x-for="repo in list" :key="repo.name">
+              <div class="jv-row" :class="{ expanded: expanded === repo.name }">
+
+                <div class="jv-row-main">
+                  <span class="jv-atom" x-text="repo.name"></span>
+                  <span class="jv-badge jv-kind" x-text="repo.sync_type || 'local'"></span>
+                  <span class="ov-uri muted" x-text="repo.sync_uri"></span>
+                  <span class="ov-meta muted" x-text="fmtLastSync(repo.last_sync)"></span>
+                  <span class="ov-meta muted" x-show="repo.ebuilds > 0" x-text="repo.ebuilds.toLocaleString() + ' ebuilds'"></span>
+                  <div class="jv-actions">
+                    <span class="jv-badge run"
+                      x-show="syncRunning && syncName === repo.name">syncing…</span>
+                    <span class="jv-badge"
+                      x-show="!syncRunning && syncName === repo.name && syncRc !== null"
+                      :class="syncRc === 0 ? 'ok' : 'fail'"
+                      x-text="syncRc === 0 ? 'synced' : 'sync failed'"></span>
+                    <button class="jv-btn-output"
+                      x-show="syncName === repo.name && syncLines.length > 0"
+                      @click="toggleExpand(repo.name)"
+                      x-text="expanded === repo.name ? '▲ log' : '▼ log'"></button>
+                    <button class="jv-btn-open" :disabled="syncRunning"
+                      @click="sync(repo.name)"
+                      x-text="syncRunning && syncName === repo.name ? 'Syncing…' : 'Sync'"></button>
+                    <!-- Remove temporarily hidden -->
+                    <!-- <button class="jv-btn-kill" x-show="repo.name !== 'gentoo'" @click="remove(repo.name, false)">Remove</button> -->
+                  </div>
+                </div>
+
+                <div class="terminal" id="ov-term"
+                  x-show="expanded === repo.name && syncName === repo.name && syncLines.length > 0">
+                  <template x-for="(line, i) in syncLines" :key="i">
+                    <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                  </template>
+                  <div class="line cursor" x-show="syncRunning">▊</div>
+                </div>
+
+              </div>
+            </template>
+          </div>
+          <p class="muted" x-show="!loading && !error && list.length === 0">No repositories found.</p>
+        </div>
+      </div>
+
     </main>
   </div>
 
