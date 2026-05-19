@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .auth import require_auth, verify_token
 from .daemon_client import query, query_all, query_one
+from .emerge_log import compile_time_by_category
 
 logging.basicConfig(
     level=logging.INFO,
@@ -308,6 +309,28 @@ async def history_purge(auth: Auth, request: Request):
     days = max(int(body.get("days", 30)), 1)
     data = await query_one("history_purge", {"days": days})
     return data
+
+
+@app.get("/api/stats")
+async def history_stats(auth: Auth):
+    data = await query_one("history_stats", {})
+    return data
+
+
+@app.get("/api/pkg-stats")
+async def pkg_stats(auth: Auth):
+    data = await query_one("pkg_stats", {})
+    return data
+
+
+@app.get("/api/analytics/compile-time-by-category")
+async def analytics_compile_time(auth: Auth):
+    """
+    Returns per-Portage-category total compile time (seconds) extracted from
+    /var/log/emerge.log, sorted descending. Result is cached in memory and
+    invalidated automatically when the log file changes.
+    """
+    return await compile_time_by_category()
 
 
 @app.post("/api/emerge/etc-update/resolve")

@@ -20,6 +20,7 @@ SOCKET_PATH = "/run/arbor/daemon.sock"
 ALLOWED_COMMANDS = {
     "world_updates",
     "installed_packages",
+    "pkg_stats",
     "package_info",
     "package_search",
     "system_status",
@@ -46,6 +47,7 @@ ALLOWED_COMMANDS = {
     "history_log",
     "history_delete",
     "history_purge",
+    "history_stats",
     "overlay_list",
     "overlay_add",
     "overlay_remove",
@@ -215,6 +217,59 @@ def _history_purge(days: int) -> dict:
         with sqlite3.connect(_DB_PATH) as conn:
             deleted = conn.execute("DELETE FROM job_history WHERE created_at < ?", (cutoff,)).rowcount
             return {"deleted": deleted}
+
+
+def _history_stats() -> dict:
+    cutoff_30d = time.time() - 30 * 86400
+    with _db_lock:
+        with sqlite3.connect(_DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+
+            rows = conn.execute(
+                "SELECT date(created_at, 'unixepoch') as day, COUNT(*) as cnt "
+                "FROM job_history WHERE created_at >= ? GROUP BY day ORDER BY day",
+                (cutoff_30d,),
+            ).fetchall()
+            activity_30d = [{"day": r["day"], "cnt": r["cnt"]} for r in rows]
+
+            rows = conn.execute(
+                "SELECT status, COUNT(*) as cnt FROM job_history GROUP BY status"
+            ).fetchall()
+            status_counts = {r["status"]: r["cnt"] for r in rows}
+
+            rows = conn.execute(
+                "SELECT kind, COUNT(*) as cnt FROM job_history GROUP BY kind ORDER BY cnt DESC"
+            ).fetchall()
+            kind_counts = [{"kind": r["kind"], "cnt": r["cnt"]} for r in rows]
+
+            rows = conn.execute(
+                "SELECT atom, (finished_at - created_at) as duration "
+                "FROM job_history "
+                "WHERE finished_at IS NOT NULL AND status = 'done' AND duration > 0 "
+                "ORDER BY duration DESC LIMIT 10"
+            ).fetchall()
+            top_slow = [{"atom": r["atom"], "duration": r["duration"]} for r in rows]
+
+            total = conn.execute("SELECT COUNT(*) FROM job_history").fetchone()[0]
+
+            cutoff_90d = time.time() - 90 * 86400
+            rows = conn.execute(
+                "SELECT date(created_at, 'unixepoch') as day, "
+                "SUM(finished_at - created_at) as total_secs "
+                "FROM job_history WHERE created_at >= ? AND status='done' "
+                "AND finished_at IS NOT NULL GROUP BY day ORDER BY day",
+                (cutoff_90d,),
+            ).fetchall()
+            compile_by_day = [{"day": r["day"], "secs": r["total_secs"]} for r in rows]
+
+            return {
+                "activity_30d": activity_30d,
+                "status_counts": status_counts,
+                "kind_counts": kind_counts,
+                "top_slow": top_slow,
+                "compile_by_day": compile_by_day,
+                "total": total,
+            }
 
 
 def _get_jobs_lock() -> asyncio.Lock:
@@ -395,6 +450,102 @@ def _installed_packages(search: str):
     return results
 
 
+def _pkg_stats():
+    import portage
+    import subprocess
+    from collections import Counter
+    from portage.versions import cpv_getversion, cpv_getkey
+    _maybe_reload_portage()
+    db = portage.db[portage.root]["vartree"].dbapi
+    arch = portage.settings.get("ARCH", "amd64")
+
+    use_counter: Counter = Counter()
+    kw_dist = {"stable": 0, "testing": 0, "live": 0, "unknown": 0}
+    src_vs_bin = {"source": 0, "binary": 0}
+    license_counter: Counter = Counter()
+    cp_count: dict = {}
+
+    def _cat_license(lic: str) -> str:
+        u = lic.upper()
+        PROPRIETARY = ("NVIDIA", "INTEL-", "AMD-GPU", "STEAM", "SKYPE",
+                       "ELASTIC", "SSPL", "BUSL", "COMMERCIAL", "NO-SOURCE",
+                       "GOOGLE-", "MICROSOFT-")
+        COPYLEFT    = ("GPL-", "LGPL-", "AGPL-", "MPL-", "CDDL",
+                       "CC-BY-SA", "EUPL", "EUPL-")
+        PERMISSIVE  = ("MIT", "APACHE-", "BSD", "ISC", "BOOST", "ZLIB",
+                       "CC0-", "PUBLIC-DOMAIN", "ARTISTIC", "PSF-",
+                       "UNLICENSE", "WTFPL", "OPENSSL")
+        if any(x in u for x in PROPRIETARY):  return "proprietary"
+        if any(x in u for x in COPYLEFT):     return "copyleft"
+        if any(x in u for x in PERMISSIVE):   return "permissive"
+        return "other"
+
+    for cpv in db.cpv_all():
+        try:
+            cp = cpv_getkey(cpv)
+            if cp:
+                cp_count[cp] = cp_count.get(cp, 0) + 1
+            use_str, keywords_str, build_id, license_str = db.aux_get(
+                cpv, ["USE", "KEYWORDS", "BUILD_ID", "LICENSE"]
+            )
+            for flag in use_str.split():
+                if flag and not flag.startswith("-"):
+                    use_counter[flag] += 1
+            try:
+                ver = cpv_getversion(cpv) or ""
+            except Exception:
+                ver = ""
+            if ver == "9999" or ver.endswith("-9999"):
+                kw_dist["live"] += 1
+            elif arch in keywords_str.split():
+                kw_dist["stable"] += 1
+            elif ("~" + arch) in keywords_str.split():
+                kw_dist["testing"] += 1
+            else:
+                kw_dist["unknown"] += 1
+            if build_id and build_id.strip():
+                src_vs_bin["binary"] += 1
+            else:
+                src_vs_bin["source"] += 1
+            license_counter[_cat_license(license_str)] += 1
+        except Exception:
+            pass
+
+    slotted = sorted(
+        [{"cp": cp, "count": c} for cp, c in cp_count.items() if c > 1],
+        key=lambda x: x["count"], reverse=True
+    )[:20]
+
+    def _du(path: str) -> int:
+        try:
+            r = subprocess.run(
+                ["du", "-sb", path],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode == 0:
+                return int(r.stdout.split()[0])
+        except Exception:
+            pass
+        return 0
+
+    portage_disk = {
+        "repos":     _du("/var/db/repos"),
+        "distfiles": _du("/var/cache/distfiles"),
+        "binpkgs":   _du("/var/cache/binpkgs"),
+        "vartree":   _du("/var/db/pkg"),
+    }
+
+    return {
+        "top_use_flags": [{"flag": k, "cnt": v} for k, v in use_counter.most_common(20)],
+        "keyword_dist":  kw_dist,
+        "portage_disk":  portage_disk,
+        "slotted":       slotted,
+        "src_vs_bin":    src_vs_bin,
+        "license_dist":  dict(license_counter),
+        "total":         sum(kw_dist.values()),
+    }
+
+
 def _package_info(atom: str):
     _maybe_reload_portage()
     import portage
@@ -548,6 +699,10 @@ async def cmd_installed_packages(args):
     search = args.get("search", "").lower()
     for item in await in_thread(_installed_packages, search):
         yield item
+
+
+async def cmd_pkg_stats(_args):
+    yield await in_thread(_pkg_stats)
 
 async def cmd_package_info(args):
     atom = args.get("atom", "")
@@ -1263,6 +1418,10 @@ async def cmd_history_purge(args):
     yield await in_thread(_history_purge, days)
 
 
+async def cmd_history_stats(args):
+    yield await in_thread(_history_stats)
+
+
 # ---------------------------------------------------------------------------
 # Overlay management
 # ---------------------------------------------------------------------------
@@ -1387,6 +1546,7 @@ async def cmd_overlay_sync(args):
 HANDLERS = {
     "system_status":      cmd_system_status,
     "installed_packages": cmd_installed_packages,
+    "pkg_stats":          cmd_pkg_stats,
     "package_info":       cmd_package_info,
     "package_search":     cmd_package_search,
     "world_updates":      cmd_world_updates,
@@ -1413,6 +1573,7 @@ HANDLERS = {
     "history_log":        cmd_history_log,
     "history_delete":     cmd_history_delete,
     "history_purge":      cmd_history_purge,
+    "history_stats":      cmd_history_stats,
     "overlay_list":       cmd_overlay_list,
     "overlay_add":        cmd_overlay_add,
     "overlay_remove":     cmd_overlay_remove,

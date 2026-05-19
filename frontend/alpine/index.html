@@ -290,48 +290,133 @@
       <!-- Dashboard -->
       <div x-show="$store.router.view === 'dashboard'" x-data="dashboardComponent()">
         <div class="dashboard">
-          <h2>System Overview</h2>
           <p class="muted"  x-show="!status && !error">Loading…</p>
           <p class="error"  x-show="error" x-text="error"></p>
 
-          <div class="dash-gauges" x-show="status && !error">
-            <div class="dash-gauge-card">
-              <div class="gauge-outer">
-                <div class="gauge-ring" :style="gaugeStyle(cpuPct())"></div>
-                <div class="gauge-hole"></div>
-                <span class="gauge-text" x-text="cpuPct() + '%'"></span>
+          <!-- Section: System & Portage Status -->
+          <div class="dash-section" x-show="status && !error">
+            <button class="dash-section-header" @click="toggleSection('system')">
+              <span><span class="dash-section-icon">🖥️</span> System &amp; Portage Status</span>
+              <span class="dash-section-chevron" :class="sections.system && 'open'"></span>
+            </button>
+            <div x-show="sections.system" x-transition class="dash-section-body">
+              <div class="dash-gauges">
+                <div class="dash-gauge-card">
+                  <div class="gauge-outer">
+                    <div class="gauge-ring" :style="gaugeStyle(cpuPct())"></div>
+                    <div class="gauge-hole"></div>
+                    <span class="gauge-text" x-text="cpuPct() + '%'"></span>
+                  </div>
+                  <span class="gauge-label">CPU</span>
+                  <span class="gauge-sub" x-text="'load avg ' + (status?.cpu_load1 ?? 0)"></span>
+                </div>
+                <div class="dash-gauge-card">
+                  <div class="gauge-outer">
+                    <div class="gauge-ring" :style="gaugeStyle(memPct())"></div>
+                    <div class="gauge-hole"></div>
+                    <span class="gauge-text" x-text="memPct() + '%'"></span>
+                  </div>
+                  <span class="gauge-label">RAM</span>
+                  <span class="gauge-sub" x-text="fmtBytes(status?.mem_used ?? 0) + ' / ' + fmtBytes(status?.mem_total ?? 0)"></span>
+                </div>
+                <div class="dash-gauge-card">
+                  <div class="gauge-outer">
+                    <div class="gauge-ring" :style="gaugeStyle(diskPct())"></div>
+                    <div class="gauge-hole"></div>
+                    <span class="gauge-text" x-text="diskPct() + '%'"></span>
+                  </div>
+                  <span class="gauge-label">Disk /</span>
+                  <span class="gauge-sub" x-text="fmtBytes(status?.disk_used ?? 0) + ' / ' + fmtBytes(status?.disk_total ?? 0)"></span>
+                </div>
               </div>
-              <span class="gauge-label">CPU</span>
-              <span class="gauge-sub" x-text="'load avg ' + (status?.cpu_load1 ?? 0)"></span>
-            </div>
-            <div class="dash-gauge-card">
-              <div class="gauge-outer">
-                <div class="gauge-ring" :style="gaugeStyle(memPct())"></div>
-                <div class="gauge-hole"></div>
-                <span class="gauge-text" x-text="memPct() + '%'"></span>
+              <div class="dash-cards">
+                <div class="dash-card">
+                  <span class="dash-label">Installed packages</span>
+                  <span class="dash-value" x-text="status?.pkg_count"></span>
+                </div>
+                <div class="dash-card">
+                  <span class="dash-label">Last sync</span>
+                  <span class="dash-value dash-mono" x-text="status?.last_sync"></span>
+                </div>
+                <div class="dash-card" x-show="stats">
+                  <span class="dash-label">Total jobs</span>
+                  <span class="dash-value" x-text="stats?.total ?? '—'"></span>
+                </div>
               </div>
-              <span class="gauge-label">RAM</span>
-              <span class="gauge-sub" x-text="fmtBytes(status?.mem_used ?? 0) + ' / ' + fmtBytes(status?.mem_total ?? 0)"></span>
-            </div>
-            <div class="dash-gauge-card">
-              <div class="gauge-outer">
-                <div class="gauge-ring" :style="gaugeStyle(diskPct())"></div>
-                <div class="gauge-hole"></div>
-                <span class="gauge-text" x-text="diskPct() + '%'"></span>
+              <div class="dash-charts" x-show="hasPkgStats()" style="margin-top:1rem">
+                <div class="dash-chart-card dash-chart-full">
+                  <span class="dash-chart-title">Portage disk usage</span>
+                  <div x-html="portageSpaceSvg()"></div>
+                </div>
               </div>
-              <span class="gauge-label">Disk /</span>
-              <span class="gauge-sub" x-text="fmtBytes(status?.disk_used ?? 0) + ' / ' + fmtBytes(status?.disk_total ?? 0)"></span>
             </div>
           </div>
 
-          <div class="dash-cards" x-show="status && !error">
-            <div class="dash-card">
-              <span class="dash-label">Installed packages</span>
-              <span class="dash-value" x-text="status?.pkg_count"></span>
+          <!-- Section: System Analytics -->
+          <div class="dash-section" x-show="hasPkgStats()">
+            <button class="dash-section-header" @click="toggleSection('packages')">
+              <span><span class="dash-section-icon">🔬</span> System Analytics</span>
+              <span class="dash-section-chevron" :class="sections.packages && 'open'"></span>
+            </button>
+            <div x-show="sections.packages" x-transition class="dash-section-body">
+              <div class="dash-charts">
+                <div class="dash-chart-card">
+                  <span class="dash-chart-title">Compile time by category (from emerge.log)</span>
+                  <div x-html="compileCatsSvg()"></div>
+                </div>
+                <div class="dash-chart-card">
+                  <span class="dash-chart-title">Top 10 enabled USE flags</span>
+                  <div x-html="useFlagsSvg()"></div>
+                </div>
+                <div class="dash-chart-card">
+                  <span class="dash-chart-title">Package stability</span>
+                  <div x-html="keywordDistSvg()"></div>
+                </div>
+                <div class="dash-chart-card">
+                  <span class="dash-chart-title">Source vs Binary packages</span>
+                  <div x-html="srcVsBinSvg()"></div>
+                </div>
+                <div class="dash-chart-card">
+                  <span class="dash-chart-title">License distribution</span>
+                  <div x-html="licenseSvg()"></div>
+                </div>
+                <div class="dash-chart-card">
+                  <span class="dash-chart-title">Multi-slot packages</span>
+                  <div x-html="slottedSvg()"></div>
+                </div>
+              </div>
             </div>
-            <div class="dash-card">
-              <span class="dash-label">Last sync</span>
-              <span class="dash-value dash-mono" x-text="status?.last_sync"></span>
+          </div>
+
+          <!-- Section: Job History -->
+          <div class="dash-section" x-show="hasStats()">
+            <button class="dash-section-header" @click="toggleSection('jobs')">
+              <span><span class="dash-section-icon">📊</span> Job History</span>
+              <span class="dash-section-chevron" :class="sections.jobs && 'open'"></span>
+            </button>
+            <div x-show="sections.jobs" x-transition class="dash-section-body">
+              <div class="dash-charts">
+                <div class="dash-chart-card dash-chart-full">
+                  <span class="dash-chart-title">Job activity (last 30 days)</span>
+                  <div x-html="activitySvg()"></div>
+                </div>
+                <div class="dash-chart-card dash-chart-full">
+                  <span class="dash-chart-title">Compile time trend (last 90 days)</span>
+                  <div x-html="compileTrendSvg()"></div>
+                </div>
+                <div class="dash-chart-card">
+                  <span class="dash-chart-title">Job outcomes</span>
+                  <div x-html="donutSvg()"></div>
+                </div>
+                <div class="dash-chart-card">
+                  <span class="dash-chart-title">By type</span>
+                  <div x-html="kindSvg()"></div>
+                </div>
+                <div class="dash-chart-card dash-chart-full">
+                  <span class="dash-chart-title">Top 10 slowest builds</span>
+                  <div x-html="topSlowSvg()"></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
