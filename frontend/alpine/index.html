@@ -38,27 +38,69 @@
   </div>
 
   <!-- ── App layout ─────────────────────────────────────────────────────── -->
-  <div x-show="$store.auth.isLoggedIn" x-cloak class="layout">
+  <div x-show="$store.auth.isLoggedIn" x-cloak class="layout app-shell" x-data="appShellComponent()">
 
-    <!-- Sidebar -->
-    <nav x-data="navComponent()">
-      <div class="logo"><span class="tree">⬡</span> Arbor</div>
-      <ul>
-        <template x-for="item in items" :key="item.id">
-          <li :class="{ active: isActive(item.id) }">
-            <button @click="nav(item.id)" x-text="item.label"></button>
-          </li>
-        </template>
-      </ul>
-      <div class="bottom">
-        <button class="logout" @click="logout">Logout</button>
+    <header class="app-bar">
+      <div class="app-bar-main">
+        <div class="app-brand-cluster">
+          <button type="button" class="app-brand" @click="nav('dashboard')">
+            <span class="tree">⬡</span>
+            <span>Arbor</span>
+          </button>
+
+          <nav class="app-primary-nav" aria-label="Primary sections">
+            <ul>
+              <template x-for="item in items" :key="item.id">
+                <li>
+                  <button
+                    type="button"
+                    class="app-primary-link"
+                    :class="{ active: isActive(item.id) }"
+                    :aria-current="isActive(item.id) ? 'page' : 'false'"
+                    @click="nav(item.id)"
+                    x-text="item.label"
+                  ></button>
+                </li>
+              </template>
+            </ul>
+          </nav>
+        </div>
+
+        <div class="app-bar-tools">
+          <div class="app-status-strip" aria-label="System summary">
+            <template x-for="pill in statusPills()" :key="pill.key">
+              <span class="app-status-pill" :class="'is-' + pill.tone" x-text="pill.text"></span>
+            </template>
+          </div>
+
+          <button type="button" class="app-logout" @click="logout">Logout</button>
+        </div>
       </div>
-    </nav>
+
+      <div class="app-context-bar">
+        <div class="app-context-copy">
+          <span class="app-context-label" x-text="currentMeta().section"></span>
+          <p class="app-context-title" x-text="currentMeta().title"></p>
+          <p class="app-context-detail" x-show="currentMeta().detail" x-text="currentMeta().detail"></p>
+        </div>
+
+        <nav class="app-context-nav" x-show="contextItems().length" aria-label="Page sections">
+          <ul>
+            <template x-for="item in contextItems()" :key="item.id">
+              <li>
+                <button type="button" class="app-context-link" @click="scrollToSection(item.id)" x-text="item.label"></button>
+              </li>
+            </template>
+          </ul>
+        </nav>
+      </div>
+    </header>
 
     <!-- Main content — views toggled with x-show (never destroyed, preserving
          WebSocket state across navigation). Priority matches the original
          Svelte if-else chain: install > uninstall > pkg-detail > rest. -->
-    <main>
+    <main class="app-main">
+      <div class="app-content">
 
       <!-- Install flow -->
       <div x-show="$store.router.view === 'install'" x-data="installComponent()">
@@ -221,7 +263,168 @@
         </div>
       </div>
 
-      <!-- Package detail (view='packages' + selectedPackage set) -->
+      <!-- Dashboard -->
+      <div x-show="$store.router.view === 'dashboard'" x-data="dashboardComponent()">
+        <div class="dashboard">
+          <p class="muted"  x-show="!status && !error">Loading…</p>
+          <p class="error"  x-show="error" x-text="error"></p>
+          <div x-show="status && !error">
+            <section class="dash-summary-strip">
+              <template x-for="signal in topSummaryCards()" :key="signal.key">
+                <div class="dash-summary-cell" :data-tone="signal.tone">
+                  <span class="dash-summary-label" x-text="signal.label"></span>
+                  <span class="dash-summary-value" x-text="signal.value"></span>
+                  <span class="dash-summary-detail" x-text="signal.detail"></span>
+                </div>
+              </template>
+            </section>
+
+            <section class="dash-block dash-console-panel" id="dash-jobs" x-show="hasActivity()">
+              <div class="dash-block-header">
+                <div>
+                  <h2>Recent activity</h2>
+                </div>
+              </div>
+
+              <div class="dash-console-body dash-activity-console">
+                <div class="dash-pane dash-pane-log">
+                  <div class="dash-pane-header">
+                    <span class="dash-kicker">Recent jobs</span>
+                  </div>
+                  <div class="dash-support-list" x-show="recentJobRows().length">
+                    <template x-for="item in recentJobRows()" :key="item.key">
+                      <div class="dash-support-row dash-log-row">
+                        <div class="dash-support-row-main">
+                          <span class="dash-support-row-label" x-text="item.label"></span>
+                          <span class="dash-support-row-meta" x-text="item.meta"></span>
+                        </div>
+                        <span class="dash-status-chip" :data-tone="item.tone" x-text="item.value"></span>
+                      </div>
+                    </template>
+                  </div>
+                  <p class="dash-card-empty" x-show="!recentJobRows().length">No recent jobs yet.</p>
+                </div>
+
+                <div class="dash-pane-stack">
+                  <div class="dash-pane dash-pane-compact">
+                    <div class="dash-pane-header">
+                      <span class="dash-kicker">Activity snapshot</span>
+                    </div>
+                    <div class="dash-stat-list">
+                      <template x-for="card in activitySummaryCards()" :key="card.key">
+                        <div class="dash-stat-line" :data-tone="card.tone">
+                          <div class="dash-stat-line-head">
+                            <span class="dash-kicker" x-text="card.label"></span>
+                            <span class="dash-stat-line-value" x-text="card.value"></span>
+                          </div>
+                          <span class="dash-support-detail" x-text="card.detail"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+
+                  <div class="dash-pane dash-pane-compact">
+                    <div class="dash-pane-header">
+                      <span class="dash-kicker">Longest completed builds</span>
+                    </div>
+                    <div class="dash-support-list" x-show="longestBuildRows().length">
+                      <template x-for="item in longestBuildRows()" :key="item.key">
+                        <div class="dash-support-row">
+                          <span class="dash-support-row-label" x-text="item.label"></span>
+                          <span class="dash-support-row-value" x-text="item.value"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <p class="dash-card-empty" x-show="!longestBuildRows().length">No completed builds yet.</p>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="dash-block dash-console-panel" id="dash-packages" x-show="hasComposition()">
+              <div class="dash-block-header">
+                <div>
+                  <h2>Gentoo composition</h2>
+                </div>
+              </div>
+
+              <div class="dash-console-body dash-composition-console">
+                <div class="dash-pane dash-pane-visual">
+                  <span class="dash-chart-title">Compile time by category</span>
+                  <div x-html="compileCatsSvg()"></div>
+                </div>
+
+                <div class="dash-pane-stack">
+                  <div class="dash-pane dash-pane-compact">
+                    <div class="dash-pane-header">
+                      <span class="dash-kicker">Package posture</span>
+                    </div>
+                    <div class="dash-meter-stack">
+                      <div class="dash-inline-meter">
+                        <div class="dash-inline-meter-head">
+                          <span class="dash-kicker">Source / binary mix</span>
+                          <span class="dash-inline-meter-value" x-text="sourceBinaryMeter().value"></span>
+                        </div>
+                        <div class="dash-inline-meter-bar" x-show="sourceBinaryMeter().segments.length">
+                          <template x-for="segment in sourceBinaryMeter().segments" :key="segment.key">
+                            <span class="dash-inline-meter-segment" :class="segment.tone" :style="`width:${segment.pct}%`"></span>
+                          </template>
+                        </div>
+                        <p class="dash-support-detail" x-text="sourceBinaryMeter().detail"></p>
+                      </div>
+
+                      <div class="dash-inline-meter">
+                        <div class="dash-inline-meter-head">
+                          <span class="dash-kicker">Keyword posture</span>
+                          <span class="dash-inline-meter-value" x-text="keywordPostureMeter().value"></span>
+                        </div>
+                        <div class="dash-inline-meter-bar" x-show="keywordPostureMeter().segments.length">
+                          <template x-for="segment in keywordPostureMeter().segments" :key="segment.key">
+                            <span class="dash-inline-meter-segment" :class="segment.tone" :style="`width:${segment.pct}%`"></span>
+                          </template>
+                        </div>
+                        <p class="dash-support-detail" x-text="keywordPostureMeter().detail"></p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="dash-pane dash-pane-compact">
+                    <div class="dash-pane-header">
+                      <span class="dash-kicker">Top enabled USE flags</span>
+                    </div>
+                    <div class="dash-support-list" x-show="topUseFlagRows().length">
+                      <template x-for="item in topUseFlagRows()" :key="item.key">
+                        <div class="dash-support-row">
+                          <span class="dash-support-row-label" x-text="item.label"></span>
+                          <span class="dash-support-row-value" x-text="item.value"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <p class="dash-card-empty" x-show="!topUseFlagRows().length">No USE flag distribution data yet.</p>
+                  </div>
+
+                  <div class="dash-pane dash-pane-compact">
+                    <div class="dash-pane-header">
+                      <span class="dash-kicker">Multi-slot packages</span>
+                    </div>
+                    <div class="dash-support-list" x-show="slottedRows().length">
+                      <template x-for="item in slottedRows()" :key="item.key">
+                        <div class="dash-support-row">
+                          <span class="dash-support-row-label" x-text="item.label"></span>
+                          <span class="dash-support-row-value" x-text="item.value"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <p class="dash-card-empty" x-show="!slottedRows().length">No multi-slot packages found.</p>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+
+      <!-- Package detail -->
       <div x-show="$store.router.selectedPackage && $store.router.view === 'packages'"
            x-data="packageDetailComponent()">
         <button class="pd-back" @click="navigateBack()">← Back</button>
@@ -251,26 +454,46 @@
             <span class="pd-badge pd-muted" x-show="info?.installed" x-text="fmtSize(info?.SIZE)"></span>
           </div>
 
-          <!-- Tabs -->
           <div class="pd-tabs">
             <template x-for="t in ['info', 'use flags', 'deps']" :key="t">
               <button :class="{ active: tab === t }" @click="tab = t" x-text="t"></button>
             </template>
           </div>
 
-          <!-- Info tab: RDEPEND -->
           <div class="pd-panel" x-show="tab === 'info'">
             <h4>RDEPEND</h4>
             <pre class="dep-raw" x-text="deps && deps.rdepend ? deps.rdepend : '—'"></pre>
           </div>
 
-          <!-- Use flags tab -->
           <div x-show="tab === 'use flags'">
             <p class="error" x-show="flagsError" x-text="flagsError"></p>
-            <div class="pd-flags" x-show="!flagsError && flags && flags.flags && flags.flags.length">
+            <p class="muted" x-show="!flagsError && flagsNotice" x-text="flagsNotice"></p>
+            <div class="pd-use-grid" x-show="!flagsError && flags && flags.flags && flags.flags.length">
               <template x-for="f in (flags && flags.flags || [])" :key="f.name">
-                <span class="pd-flag" :class="{ on: f.enabled, off: !f.enabled }"
-                  x-text="(f.enabled ? '+' : '-') + f.name"></span>
+                <div class="pd-use-card">
+                  <div class="pd-use-head">
+                    <span class="pd-flag" :class="{ on: f.enabled, off: !f.enabled }"
+                      x-text="(f.enabled ? '+' : '-') + f.name"></span>
+                    <span class="pd-use-default" x-text="f.default_on ? 'IUSE default: on' : 'IUSE default: off'"></span>
+                  </div>
+                  <div class="pd-use-origin">
+                    <span class="pd-use-origin-label" x-text="flagOriginText(f)"></span>
+                    <span class="pd-use-origin-file" x-text="f.origin_file || '—'"></span>
+                  </div>
+                  <details class="pd-use-history" x-show="hasFlagHistory(f)">
+                    <summary x-text="'History (' + f.history.length + ')'"></summary>
+                    <div class="pd-use-history-list">
+                      <template x-for="(step, idx) in f.history" :key="f.name + '-' + idx">
+                        <div class="pd-use-history-item">
+                          <span class="pd-use-history-token" x-text="step.token"></span>
+                          <span class="pd-use-history-state" x-text="flagHistoryState(step)"></span>
+                          <span class="pd-use-history-origin" x-text="flagOriginText(step)"></span>
+                          <span class="pd-use-history-file" x-text="step.origin_file"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </details>
+                </div>
               </template>
             </div>
             <p class="muted" x-show="!flagsError && (!flags || !flags.flags || !flags.flags.length)">
@@ -278,7 +501,6 @@
             </p>
           </div>
 
-          <!-- Deps tab: DepGraph -->
           <div x-show="tab === 'deps'" x-data="depGraphComponent()">
             <p class="error" x-show="error && !loading" x-text="error"></p>
             <p class="muted"  x-show="loading">Resolving…</p>
@@ -287,147 +509,12 @@
         </div>
       </div>
 
-      <!-- Dashboard -->
-      <div x-show="$store.router.view === 'dashboard'" x-data="dashboardComponent()">
-        <div class="dashboard">
-          <p class="muted"  x-show="!status && !error">Loading…</p>
-          <p class="error"  x-show="error" x-text="error"></p>
-
-          <!-- Section: System & Portage Status -->
-          <div class="dash-section" x-show="status && !error">
-            <button class="dash-section-header" @click="toggleSection('system')">
-              <span><span class="dash-section-icon">🖥️</span> System &amp; Portage Status</span>
-              <span class="dash-section-chevron" :class="sections.system && 'open'"></span>
-            </button>
-            <div x-show="sections.system" x-transition class="dash-section-body">
-              <div class="dash-gauges">
-                <div class="dash-gauge-card">
-                  <div class="gauge-outer">
-                    <div class="gauge-ring" :style="gaugeStyle(cpuPct())"></div>
-                    <div class="gauge-hole"></div>
-                    <span class="gauge-text" x-text="cpuPct() + '%'"></span>
-                  </div>
-                  <span class="gauge-label">CPU</span>
-                  <span class="gauge-sub" x-text="'load avg ' + (status?.cpu_load1 ?? 0)"></span>
-                </div>
-                <div class="dash-gauge-card">
-                  <div class="gauge-outer">
-                    <div class="gauge-ring" :style="gaugeStyle(memPct())"></div>
-                    <div class="gauge-hole"></div>
-                    <span class="gauge-text" x-text="memPct() + '%'"></span>
-                  </div>
-                  <span class="gauge-label">RAM</span>
-                  <span class="gauge-sub" x-text="fmtBytes(status?.mem_used ?? 0) + ' / ' + fmtBytes(status?.mem_total ?? 0)"></span>
-                </div>
-                <div class="dash-gauge-card">
-                  <div class="gauge-outer">
-                    <div class="gauge-ring" :style="gaugeStyle(diskPct())"></div>
-                    <div class="gauge-hole"></div>
-                    <span class="gauge-text" x-text="diskPct() + '%'"></span>
-                  </div>
-                  <span class="gauge-label">Disk /</span>
-                  <span class="gauge-sub" x-text="fmtBytes(status?.disk_used ?? 0) + ' / ' + fmtBytes(status?.disk_total ?? 0)"></span>
-                </div>
-              </div>
-              <div class="dash-cards">
-                <div class="dash-card">
-                  <span class="dash-label">Installed packages</span>
-                  <span class="dash-value" x-text="status?.pkg_count"></span>
-                </div>
-                <div class="dash-card">
-                  <span class="dash-label">Last sync</span>
-                  <span class="dash-value dash-mono" x-text="status?.last_sync"></span>
-                </div>
-                <div class="dash-card" x-show="stats">
-                  <span class="dash-label">Total jobs</span>
-                  <span class="dash-value" x-text="stats?.total ?? '—'"></span>
-                </div>
-              </div>
-              <div class="dash-charts" x-show="hasPkgStats()" style="margin-top:1rem">
-                <div class="dash-chart-card dash-chart-full">
-                  <span class="dash-chart-title">Portage disk usage</span>
-                  <div x-html="portageSpaceSvg()"></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Section: System Analytics -->
-          <div class="dash-section" x-show="hasPkgStats()">
-            <button class="dash-section-header" @click="toggleSection('packages')">
-              <span><span class="dash-section-icon">🔬</span> System Analytics</span>
-              <span class="dash-section-chevron" :class="sections.packages && 'open'"></span>
-            </button>
-            <div x-show="sections.packages" x-transition class="dash-section-body">
-              <div class="dash-charts">
-                <div class="dash-chart-card">
-                  <span class="dash-chart-title">Compile time by category (from emerge.log)</span>
-                  <div x-html="compileCatsSvg()"></div>
-                </div>
-                <div class="dash-chart-card">
-                  <span class="dash-chart-title">Top 10 enabled USE flags</span>
-                  <div x-html="useFlagsSvg()"></div>
-                </div>
-                <div class="dash-chart-card">
-                  <span class="dash-chart-title">Package stability</span>
-                  <div x-html="keywordDistSvg()"></div>
-                </div>
-                <div class="dash-chart-card">
-                  <span class="dash-chart-title">Source vs Binary packages</span>
-                  <div x-html="srcVsBinSvg()"></div>
-                </div>
-                <div class="dash-chart-card">
-                  <span class="dash-chart-title">License distribution</span>
-                  <div x-html="licenseSvg()"></div>
-                </div>
-                <div class="dash-chart-card">
-                  <span class="dash-chart-title">Multi-slot packages</span>
-                  <div x-html="slottedSvg()"></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Section: Job History -->
-          <div class="dash-section" x-show="hasStats()">
-            <button class="dash-section-header" @click="toggleSection('jobs')">
-              <span><span class="dash-section-icon">📊</span> Job History</span>
-              <span class="dash-section-chevron" :class="sections.jobs && 'open'"></span>
-            </button>
-            <div x-show="sections.jobs" x-transition class="dash-section-body">
-              <div class="dash-charts">
-                <div class="dash-chart-card dash-chart-full">
-                  <span class="dash-chart-title">Job activity (last 30 days)</span>
-                  <div x-html="activitySvg()"></div>
-                </div>
-                <div class="dash-chart-card dash-chart-full">
-                  <span class="dash-chart-title">Compile time trend (last 90 days)</span>
-                  <div x-html="compileTrendSvg()"></div>
-                </div>
-                <div class="dash-chart-card">
-                  <span class="dash-chart-title">Job outcomes</span>
-                  <div x-html="donutSvg()"></div>
-                </div>
-                <div class="dash-chart-card">
-                  <span class="dash-chart-title">By type</span>
-                  <div x-html="kindSvg()"></div>
-                </div>
-                <div class="dash-chart-card dash-chart-full">
-                  <span class="dash-chart-title">Top 10 slowest builds</span>
-                  <div x-html="topSlowSvg()"></div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <!-- Installed packages list -->
       <div x-show="$store.router.view === 'packages' && !$store.router.selectedPackage"
            x-data="packageListComponent()">
         <div class="pkg-toolbar">
-          <h2>Installed Packages</h2>
-          <input type="search" x-model="search" @input="onInput()" placeholder="Filter…">
+          <h2 x-text="title()"></h2>
+          <input type="search" x-model="search" @input="onInput()" :placeholder="placeholder()">
         </div>
         <p class="muted" x-show="loading">Loading…</p>
         <div x-show="!loading">
@@ -439,7 +526,7 @@
             </thead>
             <tbody>
               <template x-for="pkg in packages" :key="pkg.cpv">
-                <tr class="clickable" @click="navigateTo(pkg.cpv)">
+                <tr class="clickable" @click="openPackage(pkg.cpv)">
                   <td class="td-pkg" x-text="pkg.pf"></td>
                   <td class="td-cat" x-text="pkg.cat"></td>
                   <td x-text="pkg.slot"></td>
@@ -451,6 +538,280 @@
           <p class="pkg-count" x-text="packages.length + ' packages'"></p>
         </div>
       </div>
+
+      <!-- USE flags -->
+      <section x-show="$store.router.view === 'use-flags'" x-data="useFlagsExplorerComponent()" class="ufi-view">
+        <div x-show="!selectedFlagName()">
+          <div class="pkg-toolbar">
+            <h2>USE Flags</h2>
+            <input
+              id="use-flags-search"
+              type="search"
+              x-model="search"
+              @input="onSearchInput()"
+              placeholder="Search USE flags by name…"
+            >
+          </div>
+
+          <p class="muted">Open a USE flag to inspect configured state, package-specific overrides, and installed build state on its own page.</p>
+
+          <div class="ufi-filter-row" aria-label="Filter USE flags by state">
+            <template x-for="filter in stateFilters()" :key="filter.value">
+              <button
+                type="button"
+                class="ufi-filter-chip"
+                :class="{ active: isFilterActive(filter.value) }"
+                @click="toggleStateFilter(filter.value)"
+                x-text="filter.label"
+              ></button>
+            </template>
+          </div>
+
+          <p class="error" x-show="error" x-text="error"></p>
+          <p class="muted" x-show="loading">Loading USE flags…</p>
+
+          <table class="pkg-table" x-show="!loading && !error && filteredFlags().length">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>Global</th>
+                <th>Source</th>
+                <th>Overrides</th>
+                <th>Supporting</th>
+                <th>Built on</th>
+                <th>Mismatch</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="flag in filteredFlags()" :key="flag.name">
+                <tr class="clickable" @click="selectFlag(flag)">
+                  <td>
+                    <div class="ufi-list-flag-cell">
+                      <span class="td-pkg" x-text="flag.name"></span>
+                      <span class="td-desc" x-text="flag.description || 'No description available.'"></span>
+                    </div>
+                  </td>
+                  <td x-text="globalStateLabel(flag)"></td>
+                  <td x-text="globalSourceLabel(flag)"></td>
+                  <td x-text="packageOverrideCount(flag)"></td>
+                  <td x-text="installedSupportCount(flag)"></td>
+                  <td x-text="installedEnabledCount(flag)"></td>
+                  <td x-text="mismatchCount(flag) || '—'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+
+          <p class="pkg-count" x-show="!loading && !error && filteredFlags().length" x-text="visibleCountText()"></p>
+          <p class="muted" x-show="!loading && !error && !filteredFlags().length" x-text="emptyStateText()"></p>
+        </div>
+
+        <div x-show="selectedFlagName()" class="ufi-detail-view">
+          <button class="pd-back" @click="backToList()">← Back</button>
+
+          <div class="ufi-detail-panel" aria-label="Selected USE flag details" aria-live="polite">
+            <p class="error" x-show="error" x-text="error"></p>
+            <p class="muted" x-show="!error && loading">Loading USE flag…</p>
+
+            <div x-show="selectedFlag()">
+            <header class="ufi-flag-detail-header">
+              <div class="ufi-flag-detail-copy">
+                <h3 x-text="selectedFlag()?.name"></h3>
+                <p class="ufi-package-description" x-text="selectedFlag()?.description || 'No description available for this USE flag.'"></p>
+              </div>
+            </header>
+
+            <div class="ufi-chip-row">
+              <template x-for="badge in detailBadges(selectedFlag())" :key="selectedFlag()?.name + ':' + badge.text">
+                <span class="ufi-inline-chip" :class="'is-' + badge.tone" x-text="badge.text"></span>
+              </template>
+            </div>
+
+            <dl class="ufi-summary-row">
+              <div>
+                <dt>Global</dt>
+                <dd :class="summaryValueClass(selectedFlag(), 'global')" x-text="globalStateLabel(selectedFlag())"></dd>
+              </div>
+              <div>
+                <dt>Source</dt>
+                <dd x-text="globalSourceLabel(selectedFlag())"></dd>
+                <p class="ufi-summary-sub" x-show="selectedFlag()?.global_origin_file" x-text="selectedFlag()?.global_origin_file"></p>
+              </div>
+              <div>
+                <dt>Overrides <span class="ufi-term-help" tabindex="0" :title="termHelp('override')" aria-label="Override help">?</span></dt>
+                <dd x-text="packageOverrideCount(selectedFlag()) + ' packages'"></dd>
+              </div>
+              <div>
+                <dt>Installed supporting <span class="ufi-term-help" tabindex="0" :title="termHelp('supporting-package')" aria-label="Supporting package help">?</span></dt>
+                <dd x-text="installedSupportCount(selectedFlag()) + ' packages'"></dd>
+              </div>
+              <div>
+                <dt>Built enabled <span class="ufi-term-help" tabindex="0" :title="termHelp('built-enabled')" aria-label="Built enabled help">?</span></dt>
+                <dd x-text="installedEnabledCount(selectedFlag()) + ' packages'"></dd>
+              </div>
+              <div>
+                <dt>Built disabled <span class="ufi-term-help" tabindex="0" :title="termHelp('built-disabled')" aria-label="Built disabled help">?</span></dt>
+                <dd x-text="installedDisabledCount(selectedFlag()) + ' packages'"></dd>
+              </div>
+              <div>
+                <dt>Mismatch <span class="ufi-term-help" tabindex="0" :title="termHelp('mismatch')" aria-label="Mismatch help">?</span></dt>
+                <dd :class="summaryValueClass(selectedFlag(), 'mismatch')" x-text="mismatchCount(selectedFlag()) + ' packages'"></dd>
+              </div>
+            </dl>
+
+            <div class="ufi-package-sections">
+              <section class="ufi-panel-section">
+                <header class="ufi-section-header">
+                  <div>
+                    <h4>Configuration state</h4>
+                    <p class="ufi-section-note">Configured global state for this flag. This does not imply that every installed package has already been rebuilt.</p>
+                  </div>
+                </header>
+                <div class="ufi-config-grid">
+                  <article class="ufi-config-card">
+                    <p class="ufi-config-kicker">Global configured state</p>
+                    <p class="ufi-config-value" :class="summaryValueClass(selectedFlag(), 'global')" x-text="globalStateLabel(selectedFlag())"></p>
+                  </article>
+                  <article class="ufi-config-card">
+                    <p class="ufi-config-kicker">Effective source</p>
+                    <p class="ufi-config-value" x-text="globalSourceLabel(selectedFlag())"></p>
+                    <p class="ufi-related-package-origin" x-text="globalOriginDetail(selectedFlag())"></p>
+                  </article>
+                </div>
+                <div class="ufi-mismatch-banner" x-show="mismatchCount(selectedFlag())">
+                  <span class="ufi-inline-chip is-warn">Mismatch</span>
+                  <p x-text="mismatchText(selectedFlag())"></p>
+                </div>
+              </section>
+
+              <section class="ufi-panel-section">
+                <header class="ufi-section-header">
+                  <div>
+                    <h4>Package-specific overrides <span class="ufi-term-help" tabindex="0" :title="termHelp('override')" aria-label="Override help">?</span></h4>
+                    <p class="ufi-section-note">Explicit package.use state for this flag. These rows may include packages that are not installed.</p>
+                  </div>
+                </header>
+
+                <section class="ufi-package-section">
+                  <h5 x-text="packageOverrideSectionTitle(selectedFlag(), true)"></h5>
+                  <ul class="ufi-related-package-list" x-show="overridePackagesEnabled(selectedFlag()).length">
+                    <template x-for="pkg in visiblePackages(selectedFlag(), 'override-enabled', overridePackagesEnabled(selectedFlag()))" :key="selectedFlag()?.name + ':override:on:' + pkg.cp">
+                      <li class="ufi-related-package-card">
+                        <div class="ufi-related-package-top">
+                          <button type="button" class="ufi-related-package-link" @click="navigateTo(pkg.cpv)" x-text="pkg.cp"></button>
+                          <span class="ufi-inline-chip" :class="'is-' + packageStateTone(pkg)" x-text="packageStateLabel(pkg)"></span>
+                        </div>
+                        <div class="ufi-related-package-meta">
+                          <span class="pd-badge pd-muted" x-text="pkg.installed ? 'Installed' : 'Not installed'"></span>
+                          <span class="ufi-source-chip" :class="'is-' + packageSourceTone(pkg)" x-text="packageSourceLabel(pkg)"></span>
+                        </div>
+                        <p class="ufi-related-package-origin" x-show="packageOriginDetail(pkg)" x-text="packageOriginDetail(pkg)"></p>
+                      </li>
+                    </template>
+                  </ul>
+                  <button type="button" class="ufi-show-more" x-show="remainingPackages(selectedFlag(), 'override-enabled', overridePackagesEnabled(selectedFlag()))" @click="togglePackageSection(selectedFlag(), 'override-enabled')" x-text="'Show ' + remainingPackages(selectedFlag(), 'override-enabled', overridePackagesEnabled(selectedFlag())) + ' more'"></button>
+                  <p class="muted" x-show="!overridePackagesEnabled(selectedFlag()).length">No package.use entries currently enable this flag for any package.</p>
+                </section>
+
+                <section class="ufi-package-section">
+                  <h5 x-text="packageOverrideSectionTitle(selectedFlag(), false)"></h5>
+                  <ul class="ufi-related-package-list" x-show="overridePackagesDisabled(selectedFlag()).length">
+                    <template x-for="pkg in visiblePackages(selectedFlag(), 'override-disabled', overridePackagesDisabled(selectedFlag()))" :key="selectedFlag()?.name + ':override:off:' + pkg.cp">
+                      <li class="ufi-related-package-card">
+                        <div class="ufi-related-package-top">
+                          <button type="button" class="ufi-related-package-link" @click="navigateTo(pkg.cpv)" x-text="pkg.cp"></button>
+                          <span class="ufi-inline-chip" :class="'is-' + packageStateTone(pkg)" x-text="packageStateLabel(pkg)"></span>
+                        </div>
+                        <div class="ufi-related-package-meta">
+                          <span class="pd-badge pd-muted" x-text="pkg.installed ? 'Installed' : 'Not installed'"></span>
+                          <span class="ufi-source-chip" :class="'is-' + packageSourceTone(pkg)" x-text="packageSourceLabel(pkg)"></span>
+                        </div>
+                        <p class="ufi-related-package-origin" x-show="packageOriginDetail(pkg)" x-text="packageOriginDetail(pkg)"></p>
+                      </li>
+                    </template>
+                  </ul>
+                  <button type="button" class="ufi-show-more" x-show="remainingPackages(selectedFlag(), 'override-disabled', overridePackagesDisabled(selectedFlag()))" @click="togglePackageSection(selectedFlag(), 'override-disabled')" x-text="'Show ' + remainingPackages(selectedFlag(), 'override-disabled', overridePackagesDisabled(selectedFlag())) + ' more'"></button>
+                  <p class="muted" x-show="!overridePackagesDisabled(selectedFlag()).length">No package.use entries currently disable this flag for any package.</p>
+                </section>
+              </section>
+
+              <section class="ufi-panel-section">
+                <header class="ufi-section-header">
+                  <div>
+                    <h4>Installed packages built with this flag enabled <span class="ufi-term-help" tabindex="0" :title="termHelp('built-enabled')" aria-label="Built enabled help">?</span></h4>
+                    <p class="ufi-section-note">Installed packages whose IUSE supports this flag and whose current build has it enabled.</p>
+                  </div>
+                </header>
+                <ul class="ufi-related-package-list" x-show="installedPackagesEnabled(selectedFlag()).length">
+                  <template x-for="pkg in visiblePackages(selectedFlag(), 'installed-enabled', installedPackagesEnabled(selectedFlag()))" :key="selectedFlag()?.name + ':installed:on:' + pkg.cp">
+                    <li class="ufi-related-package-card" :class="{ 'is-mismatch': pkg.mismatch }">
+                      <div class="ufi-related-package-top">
+                        <button type="button" class="ufi-related-package-link" @click="navigateTo(pkg.cpv)" x-text="pkg.cp"></button>
+                        <div class="ufi-chip-row">
+                          <span class="ufi-inline-chip" :class="'is-' + installedPackageStateTone(pkg)" x-text="installedPackageStateLabel(pkg)"></span>
+                          <span class="ufi-inline-chip" :class="'is-' + configuredPackageStateTone(pkg)" x-text="configuredPackageStateLabel(pkg)"></span>
+                          <span class="ufi-source-chip" :class="'is-' + configuredPackageSourceTone(pkg)" x-text="configuredPackageSourceLabel(pkg)"></span>
+                          <span class="ufi-inline-chip is-warn" x-show="pkg.mismatch" x-text="mismatchLabel(pkg)"></span>
+                        </div>
+                      </div>
+                      <p class="ufi-related-package-origin" x-text="configuredPackageOriginDetail(pkg)"></p>
+                    </li>
+                  </template>
+                </ul>
+                <button type="button" class="ufi-show-more" x-show="remainingPackages(selectedFlag(), 'installed-enabled', installedPackagesEnabled(selectedFlag()))" @click="togglePackageSection(selectedFlag(), 'installed-enabled')" x-text="'Show ' + remainingPackages(selectedFlag(), 'installed-enabled', installedPackagesEnabled(selectedFlag())) + ' more'"></button>
+                <p class="muted" x-show="!installedPackagesEnabled(selectedFlag()).length">No installed packages are currently built with this flag enabled.</p>
+              </section>
+
+              <section class="ufi-panel-section">
+                <header class="ufi-section-header">
+                  <div>
+                    <h4>Installed packages supporting this flag but built without it <span class="ufi-term-help" tabindex="0" :title="termHelp('built-disabled')" aria-label="Built disabled help">?</span></h4>
+                    <p class="ufi-section-note">Installed packages whose IUSE supports this flag but whose current build does not enable it.</p>
+                  </div>
+                </header>
+                <ul class="ufi-related-package-list" x-show="installedPackagesDisabled(selectedFlag()).length">
+                  <template x-for="pkg in visiblePackages(selectedFlag(), 'installed-disabled', installedPackagesDisabled(selectedFlag()))" :key="selectedFlag()?.name + ':installed:off:' + pkg.cp">
+                    <li class="ufi-related-package-card" :class="{ 'is-mismatch': pkg.mismatch }">
+                      <div class="ufi-related-package-top">
+                        <button type="button" class="ufi-related-package-link" @click="navigateTo(pkg.cpv)" x-text="pkg.cp"></button>
+                        <div class="ufi-chip-row">
+                          <span class="ufi-inline-chip" :class="'is-' + installedPackageStateTone(pkg)" x-text="installedPackageStateLabel(pkg)"></span>
+                          <span class="ufi-inline-chip" :class="'is-' + configuredPackageStateTone(pkg)" x-text="configuredPackageStateLabel(pkg)"></span>
+                          <span class="ufi-source-chip" :class="'is-' + configuredPackageSourceTone(pkg)" x-text="configuredPackageSourceLabel(pkg)"></span>
+                          <span class="ufi-inline-chip is-warn" x-show="pkg.mismatch" x-text="mismatchLabel(pkg)"></span>
+                        </div>
+                      </div>
+                      <p class="ufi-related-package-origin" x-text="configuredPackageOriginDetail(pkg)"></p>
+                    </li>
+                  </template>
+                </ul>
+                <button type="button" class="ufi-show-more" x-show="remainingPackages(selectedFlag(), 'installed-disabled', installedPackagesDisabled(selectedFlag()))" @click="togglePackageSection(selectedFlag(), 'installed-disabled')" x-text="'Show ' + remainingPackages(selectedFlag(), 'installed-disabled', installedPackagesDisabled(selectedFlag())) + ' more'"></button>
+                <p class="muted" x-show="!installedPackagesDisabled(selectedFlag()).length">Every installed package supporting this flag is currently built with it enabled.</p>
+              </section>
+
+              <details class="ufi-advanced-details" x-show="hasAdvancedDetails(selectedFlag())">
+                <summary>Advanced details</summary>
+                <div class="ufi-advanced-body">
+                  <section class="ufi-package-section" x-show="selectedFlag()?.global_history?.length">
+                    <h5 x-text="'Global configuration history (' + selectedFlag()?.global_history?.length + ')'"></h5>
+                    <div class="pd-use-history-list">
+                      <template x-for="(step, idx) in selectedFlag()?.global_history || []" :key="selectedFlag()?.name + ':global-history:' + idx">
+                        <div class="pd-use-history-item">
+                          <span class="pd-use-history-token" x-text="step.token"></span>
+                          <span class="pd-use-history-state" x-text="flagHistoryState(step)"></span>
+                          <span class="pd-use-history-origin" x-text="sourceLabel(step)"></span>
+                          <span class="pd-use-history-file" x-text="step.origin_file"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </section>
+                </div>
+              </details>
+            </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <!-- Search -->
       <div x-show="$store.router.view === 'search'" x-data="searchComponent()">
@@ -483,174 +844,240 @@
       <!-- Maintenance / world-update / sync -->
       <div x-show="$store.router.view === 'updates'" x-data="updatesComponent()">
         <div class="mv-view">
-          <h2>Maintenance</h2>
+          <header class="mv-header">
+            <div class="mv-header-copy">
+              <h2>Maintenance</h2>
+              <p class="muted">Operational actions stay in the main column while the selected action keeps its command, risk notes, activity, and last result visible alongside the output.</p>
+            </div>
+          </header>
 
-          <!-- Sync -->
-          <div class="mv-card">
-            <div class="mv-card-header">
-              <div class="mv-card-title">
-                <span class="mv-title">Sync</span>
-                <span class="mv-cmd">emaint sync -a</span>
-              </div>
-              <div class="mv-card-actions">
-                <span class="mv-rc" :class="statusClass(sync.rc)" x-show="sync.rc !== null"
-                      x-text="sync.rc === 0 ? 'done' : 'exit ' + sync.rc"></span>
-                <button class="mv-btn-toggle" @click="sync.expanded = !sync.expanded"
-                        x-text="sync.expanded ? '▲' : '▼'"></button>
-                <button class="mv-btn-run" @click="startSync()" :disabled="sync.running"
-                        x-text="sync.running ? 'Running…' : sync.rc !== null ? 'Re-sync' : 'Sync'"></button>
-              </div>
-            </div>
-            <div class="terminal" x-ref="syncTerm" x-show="sync.expanded">
-              <template x-for="(line, i) in sync.lines" :key="i">
-                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
-              </template>
-              <div class="line cursor" x-show="sync.running">▊</div>
-              <div class="line muted-line" x-show="sync.lines.length === 0 && !sync.running">Run sync to update the portage tree.</div>
-            </div>
-          </div>
-
-          <!-- Check updates -->
-          <div class="mv-card">
-            <div class="mv-card-header">
-              <div class="mv-card-title">
-                <span class="mv-title">Check updates</span>
-                <span class="mv-cmd">emerge -uDN --pretend @world</span>
-              </div>
-              <div class="mv-card-actions">
-                <span class="mv-rc" :class="statusClass(worldPretend.rc)" x-show="worldPretend.rc !== null"
-                      x-text="worldPretend.rc === 0 ? 'done' : 'exit ' + worldPretend.rc"></span>
-                <button class="mv-btn-toggle" @click="worldPretend.expanded = !worldPretend.expanded"
-                        x-text="worldPretend.expanded ? '▲' : '▼'"></button>
-                <button class="mv-btn-run" @click="startWorldPretend()" :disabled="worldPretend.running"
-                        x-text="worldPretend.running ? 'Running…' : 'Check'"></button>
-              </div>
-            </div>
-            <div class="terminal" x-ref="wpTerm" x-show="worldPretend.expanded">
-              <template x-for="(line, i) in worldPretend.lines" :key="i">
-                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
-              </template>
-              <div class="line cursor" x-show="worldPretend.running">▊</div>
-              <div class="line muted-line" x-show="worldPretend.lines.length === 0 && !worldPretend.running">Run a check to see pending updates.</div>
-            </div>
-          </div>
-
-          <!-- Update @world -->
-          <div class="mv-card">
-            <div class="mv-card-header">
-              <div class="mv-card-title">
-                <span class="mv-title">Update @world</span>
-                <span class="mv-cmd">emerge -uDN --with-bdeps=y @world</span>
-              </div>
-              <div class="mv-card-actions">
-                <span class="mv-rc" :class="statusClass(worldUpdate.rc)" x-show="worldUpdate.rc !== null"
-                      x-text="worldUpdate.rc === 0 ? 'done' : 'exit ' + worldUpdate.rc"></span>
-                <button class="mv-btn-toggle" @click="worldUpdate.expanded = !worldUpdate.expanded"
-                        x-text="worldUpdate.expanded ? '▲' : '▼'"></button>
-                <button class="mv-btn-run" @click="startWorldUpdate()" :disabled="worldUpdate.running"
-                        x-text="worldUpdate.running ? 'Running…' : worldUpdate.rc !== null ? 'Retry' : 'Update'"></button>
-              </div>
-            </div>
-            <div class="mv-card-opts">
-              <div class="eo-opts">
-                <div class="eo-preview" title="Command that will be executed">
-                  <span class="eo-prompt">$</span>
-                  <span class="eo-cmd" x-text="_eoCommand"></span>
-                  <template x-for="f in _eoBaseFlags" :key="f">
-                    <span class="eo-base" x-text="f"></span>
-                  </template>
-                  <template x-for="f in eoUserFlags()" :key="f">
-                    <span class="eo-user" x-text="f"></span>
-                  </template>
-                  <span class="eo-target">@world</span>
+          <div class="mv-layout">
+            <section class="mv-primary">
+              <div class="mv-card" id="updates-sync" :class="{ active: selectedAction === 'sync' }" @click="selectAction('sync')" @focusin="selectAction('sync')">
+                <div class="mv-card-header">
+                  <div class="mv-card-title">
+                    <div class="mv-card-title-row">
+                      <span class="mv-title">Sync</span>
+                      <span class="mv-state-chip" :class="'is-' + cardState('sync').tone" x-text="cardState('sync').text"></span>
+                    </div>
+                    <span class="mv-cmd">emaint sync -a</span>
+                    <p class="mv-card-summary" x-text="actionSummary('sync')"></p>
+                  </div>
+                  <div class="mv-card-actions">
+                    <button class="mv-btn-toggle" @click="sync.expanded = !sync.expanded"
+                            x-text="sync.expanded ? '▲' : '▼'"></button>
+                    <button class="mv-btn-run" @click="startSync()" :disabled="sync.running"
+                            x-text="sync.running ? 'Running…' : sync.rc !== null ? 'Re-sync' : 'Sync'"></button>
+                  </div>
                 </div>
-                <button class="eo-toggle" type="button" @click="eoOpen = !eoOpen">
-                  <span x-text="eoOpen ? '▾' : '▸'"></span>
-                  <span>Options</span>
-                  <span class="eo-badge" x-show="eoActiveCount() > 0" x-text="eoActiveCount()"></span>
-                </button>
-                <div class="eo-list" x-show="eoOpen">
-                  <template x-for="item in _eoSchema" :key="item.key">
-                    <label class="eo-opt">
-                      <input type="checkbox" :checked="!!eoChecked[item.key]" @change="eoToggle(item.key)">
-                      <span class="eo-flag" x-text="item.label"></span>
-                      <input type="number" class="eo-num"
-                             :min="item.min ?? 1" :max="item.max ?? 100"
-                             :value="item.type === 'int' ? _eoValueFor(item) : ''"
-                             :disabled="!eoChecked[item.key]"
-                             @input="item.type === 'int' && eoSetValue(item, $event.target.value)"
-                             :style="item.type !== 'int' ? 'visibility:hidden' : ''">
-                      <span class="eo-desc" x-text="item.desc"></span>
-                    </label>
+                <div class="terminal" x-ref="syncTerm" x-show="sync.expanded">
+                  <template x-for="(line, i) in sync.lines" :key="i">
+                    <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
                   </template>
+                  <div class="line cursor" x-show="sync.running">▊</div>
+                  <div class="line muted-line" x-show="sync.lines.length === 0 && !sync.running">Run sync to update the portage tree.</div>
                 </div>
               </div>
-            </div>
-            <div class="terminal" x-ref="wuTerm" x-show="worldUpdate.expanded">
-              <template x-for="(line, i) in worldUpdate.lines" :key="i">
-                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
-              </template>
-              <div class="line cursor" x-show="worldUpdate.running">▊</div>
-              <div class="line muted-line" x-show="worldUpdate.lines.length === 0 && !worldUpdate.running">Runs as a background job — safe to navigate away.</div>
-            </div>
-          </div>
 
-          <!-- Preserved rebuild -->
-          <div class="mv-card">
-            <div class="mv-card-header">
-              <div class="mv-card-title">
-                <span class="mv-title">Preserved rebuild</span>
-                <span class="mv-cmd">emerge @preserved-rebuild</span>
+              <div class="mv-card" id="updates-check" :class="{ active: selectedAction === 'worldPretend' }" @click="selectAction('worldPretend')" @focusin="selectAction('worldPretend')">
+                <div class="mv-card-header">
+                  <div class="mv-card-title">
+                    <div class="mv-card-title-row">
+                      <span class="mv-title">Check updates</span>
+                      <span class="mv-state-chip" :class="'is-' + cardState('worldPretend').tone" x-text="cardState('worldPretend').text"></span>
+                    </div>
+                    <span class="mv-cmd">emerge -uDN --pretend @world</span>
+                    <p class="mv-card-summary" x-text="actionSummary('worldPretend')"></p>
+                  </div>
+                  <div class="mv-card-actions">
+                    <button class="mv-btn-toggle" @click="worldPretend.expanded = !worldPretend.expanded"
+                            x-text="worldPretend.expanded ? '▲' : '▼'"></button>
+                    <button class="mv-btn-run" @click="startWorldPretend()" :disabled="worldPretend.running"
+                            x-text="worldPretend.running ? 'Running…' : 'Check'"></button>
+                  </div>
+                </div>
+                <div class="terminal" x-ref="wpTerm" x-show="worldPretend.expanded">
+                  <template x-for="(line, i) in worldPretend.lines" :key="i">
+                    <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                  </template>
+                  <div class="line cursor" x-show="worldPretend.running">▊</div>
+                  <div class="line muted-line" x-show="worldPretend.lines.length === 0 && !worldPretend.running">Run a check to see pending updates.</div>
+                </div>
               </div>
-              <div class="mv-card-actions">
-                <span class="mv-rc" :class="statusClass(preserved.rc)" x-show="preserved.rc !== null"
-                      x-text="preserved.rc === 0 ? 'done' : 'exit ' + preserved.rc"></span>
-                <button class="mv-btn-toggle" @click="preserved.expanded = !preserved.expanded"
-                        x-text="preserved.expanded ? '▲' : '▼'"></button>
-                <button class="mv-btn-run" @click="startPreserved()" :disabled="preserved.running"
-                        x-text="preserved.running ? 'Running…' : preserved.rc !== null ? 'Retry' : 'Rebuild'"></button>
-              </div>
-            </div>
-            <div class="terminal" x-ref="psTerm" x-show="preserved.expanded">
-              <template x-for="(line, i) in preserved.lines" :key="i">
-                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
-              </template>
-              <div class="line cursor" x-show="preserved.running">▊</div>
-              <div class="line muted-line" x-show="preserved.lines.length === 0 && !preserved.running">Rebuild libraries preserved after updates.</div>
-            </div>
-          </div>
 
-          <!-- Depclean -->
-          <div class="mv-card">
-            <div class="mv-card-header">
-              <div class="mv-card-title">
-                <span class="mv-title">Depclean</span>
-                <span class="mv-cmd">emerge --depclean</span>
+              <div class="mv-card" id="updates-world" :class="{ active: selectedAction === 'worldUpdate' }" @click="selectAction('worldUpdate')" @focusin="selectAction('worldUpdate')">
+                <div class="mv-card-header">
+                  <div class="mv-card-title">
+                    <div class="mv-card-title-row">
+                      <span class="mv-title">Update @world</span>
+                      <span class="mv-state-chip" :class="'is-' + cardState('worldUpdate').tone" x-text="cardState('worldUpdate').text"></span>
+                    </div>
+                    <span class="mv-cmd">emerge -uDN --with-bdeps=y @world</span>
+                    <p class="mv-card-summary" x-text="actionSummary('worldUpdate')"></p>
+                  </div>
+                  <div class="mv-card-actions">
+                    <button class="mv-btn-toggle" @click="worldUpdate.expanded = !worldUpdate.expanded"
+                            x-text="worldUpdate.expanded ? '▲' : '▼'"></button>
+                    <button class="mv-btn-run" @click="startWorldUpdate()" :disabled="worldUpdate.running"
+                            x-text="worldUpdate.running ? 'Running…' : worldUpdate.rc !== null ? 'Retry' : 'Update'"></button>
+                  </div>
+                </div>
+                <div class="mv-card-opts">
+                  <div class="eo-opts">
+                    <div class="eo-preview" title="Command that will be executed">
+                      <span class="eo-prompt">$</span>
+                      <span class="eo-cmd" x-text="_eoCommand"></span>
+                      <template x-for="f in _eoBaseFlags" :key="f">
+                        <span class="eo-base" x-text="f"></span>
+                      </template>
+                      <template x-for="f in eoUserFlags()" :key="f">
+                        <span class="eo-user" x-text="f"></span>
+                      </template>
+                      <span class="eo-target">@world</span>
+                    </div>
+                    <button class="eo-toggle" type="button" @click="eoOpen = !eoOpen">
+                      <span x-text="eoOpen ? '▾' : '▸'"></span>
+                      <span>Options</span>
+                      <span class="eo-badge" x-show="eoActiveCount() > 0" x-text="eoActiveCount()"></span>
+                    </button>
+                    <div class="eo-list" x-show="eoOpen">
+                      <template x-for="item in _eoSchema" :key="item.key">
+                        <label class="eo-opt">
+                          <input type="checkbox" :checked="!!eoChecked[item.key]" @change="eoToggle(item.key)">
+                          <span class="eo-flag" x-text="item.label"></span>
+                          <input type="number" class="eo-num"
+                                 :min="item.min ?? 1" :max="item.max ?? 100"
+                                 :value="item.type === 'int' ? _eoValueFor(item) : ''"
+                                 :disabled="!eoChecked[item.key]"
+                                 @input="item.type === 'int' && eoSetValue(item, $event.target.value)"
+                                 :style="item.type !== 'int' ? 'visibility:hidden' : ''">
+                          <span class="eo-desc" x-text="item.desc"></span>
+                        </label>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+                <div class="terminal" x-ref="wuTerm" x-show="worldUpdate.expanded">
+                  <template x-for="(line, i) in worldUpdate.lines" :key="i">
+                    <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                  </template>
+                  <div class="line cursor" x-show="worldUpdate.running">▊</div>
+                  <div class="line muted-line" x-show="worldUpdate.lines.length === 0 && !worldUpdate.running">Runs as a background job — safe to navigate away.</div>
+                </div>
               </div>
-              <div class="mv-card-actions">
-                <span class="mv-rc" :class="statusClass(depclean.rc)" x-show="depclean.rc !== null"
-                      x-text="depclean.rc === 0 ? 'done' : 'exit ' + depclean.rc"></span>
-                <button class="mv-btn-toggle" @click="depclean.expanded = !depclean.expanded"
-                        x-text="depclean.expanded ? '▲' : '▼'"></button>
-                <button class="mv-btn-run" @click="startDepcleanPretend()" :disabled="depclean.running"
-                        x-text="depclean.running ? 'Running…' : depclean.dcStep === 'idle' ? 'Check' : 'Re-check'"></button>
-              </div>
-            </div>
-            <div class="terminal" x-ref="dcTerm" x-show="depclean.expanded">
-              <template x-for="(line, i) in depclean.lines" :key="i">
-                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
-              </template>
-              <div class="line cursor" x-show="depclean.running">▊</div>
-              <div class="line muted-line" x-show="depclean.lines.length === 0 && !depclean.running">Remove packages no longer needed.</div>
-              <div class="mv-confirm-row" x-show="depclean.dcStep === 'confirm' && !depclean.running">
-                <span class="mv-confirm-msg">⚠ The packages above will be removed.</span>
-                <button class="mv-btn-confirm-run" @click="startDepclean()">Remove</button>
-                <button class="mv-btn-confirm-cancel"
-                  @click="depclean.dcStep = 'idle'; depclean.lines = []">Cancel</button>
-              </div>
-            </div>
-          </div>
 
+              <div class="mv-card" id="updates-preserved" :class="{ active: selectedAction === 'preserved' }" @click="selectAction('preserved')" @focusin="selectAction('preserved')">
+                <div class="mv-card-header">
+                  <div class="mv-card-title">
+                    <div class="mv-card-title-row">
+                      <span class="mv-title">Preserved rebuild</span>
+                      <span class="mv-state-chip" :class="'is-' + cardState('preserved').tone" x-text="cardState('preserved').text"></span>
+                    </div>
+                    <span class="mv-cmd">emerge @preserved-rebuild</span>
+                    <p class="mv-card-summary" x-text="actionSummary('preserved')"></p>
+                  </div>
+                  <div class="mv-card-actions">
+                    <button class="mv-btn-toggle" @click="preserved.expanded = !preserved.expanded"
+                            x-text="preserved.expanded ? '▲' : '▼'"></button>
+                    <button class="mv-btn-run" @click="startPreserved()" :disabled="preserved.running"
+                            x-text="preserved.running ? 'Running…' : preserved.rc !== null ? 'Retry' : 'Rebuild'"></button>
+                  </div>
+                </div>
+                <div class="terminal" x-ref="psTerm" x-show="preserved.expanded">
+                  <template x-for="(line, i) in preserved.lines" :key="i">
+                    <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                  </template>
+                  <div class="line cursor" x-show="preserved.running">▊</div>
+                  <div class="line muted-line" x-show="preserved.lines.length === 0 && !preserved.running">Rebuild libraries preserved after updates.</div>
+                </div>
+              </div>
+
+              <div class="mv-card" id="updates-depclean" :class="{ active: selectedAction === 'depclean' }" @click="selectAction('depclean')" @focusin="selectAction('depclean')">
+                <div class="mv-card-header">
+                  <div class="mv-card-title">
+                    <div class="mv-card-title-row">
+                      <span class="mv-title">Depclean</span>
+                      <span class="mv-state-chip" :class="'is-' + cardState('depclean').tone" x-text="cardState('depclean').text"></span>
+                    </div>
+                    <span class="mv-cmd">emerge --depclean</span>
+                    <p class="mv-card-summary" x-text="actionSummary('depclean')"></p>
+                  </div>
+                  <div class="mv-card-actions">
+                    <button class="mv-btn-toggle" @click="depclean.expanded = !depclean.expanded"
+                            x-text="depclean.expanded ? '▲' : '▼'"></button>
+                    <button class="mv-btn-run" @click="startDepcleanPretend()" :disabled="depclean.running"
+                            x-text="depclean.running ? 'Running…' : depclean.dcStep === 'idle' ? 'Check' : 'Re-check'"></button>
+                  </div>
+                </div>
+                <div class="terminal" x-ref="dcTerm" x-show="depclean.expanded">
+                  <template x-for="(line, i) in depclean.lines" :key="i">
+                    <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                  </template>
+                  <div class="line cursor" x-show="depclean.running">▊</div>
+                  <div class="line muted-line" x-show="depclean.lines.length === 0 && !depclean.running">Remove packages no longer needed.</div>
+                  <div class="mv-confirm-row" x-show="depclean.dcStep === 'confirm' && !depclean.running">
+                    <span class="mv-confirm-msg">⚠ The packages above will be removed.</span>
+                    <button class="mv-btn-confirm-run" @click="startDepclean()">Remove</button>
+                    <button class="mv-btn-confirm-cancel"
+                      @click="depclean.dcStep = 'idle'; depclean.lines = []">Cancel</button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <aside class="mv-context-panel">
+              <div class="mv-context-section">
+                <span class="mv-context-kicker">Selected action</span>
+                <div class="mv-context-header">
+                  <h3 x-text="selectedActionMeta().title"></h3>
+                  <span class="mv-state-chip" :class="'is-' + activityStatus().tone" x-text="activityStatus().label"></span>
+                </div>
+                <p class="mv-context-summary" x-text="selectedActionMeta().summary"></p>
+              </div>
+
+              <div class="mv-context-section">
+                <span class="mv-context-label">Command preview</span>
+                <pre class="mv-context-command" x-text="'$ ' + commandText()"></pre>
+              </div>
+
+              <div class="mv-context-section">
+                <span class="mv-context-label">Active job status</span>
+                <p class="mv-context-body" x-text="activityStatus().detail"></p>
+              </div>
+
+              <div class="mv-context-section">
+                <span class="mv-context-label">Last run result</span>
+                <p class="mv-context-body" x-text="lastResultText()"></p>
+              </div>
+
+              <div class="mv-context-section" x-show="hasPortageDisk()">
+                <div class="mv-context-header">
+                  <span class="mv-context-label">Portage disk usage</span>
+                  <span class="mv-context-note" x-show="portageHint()" x-text="portageHint()"></span>
+                </div>
+                <div class="mv-storage-list">
+                  <template x-for="item in portageDiskRows()" :key="item.key">
+                    <div class="mv-storage-row">
+                      <div class="mv-storage-copy">
+                        <span class="mv-storage-path" x-text="item.label"></span>
+                        <span class="mv-storage-size" x-text="item.sizeValue + ' ' + item.sizeUnit"></span>
+                      </div>
+                      <span class="mv-storage-share" x-text="item.pct + '%'"></span>
+                    </div>
+                  </template>
+                </div>
+              </div>
+
+              <div class="mv-context-section">
+                <span class="mv-context-label">Pretend / risk notes</span>
+                <ul class="mv-note-list">
+                  <template x-for="(note, idx) in riskNotes()" :key="selectedAction + ':' + idx">
+                    <li x-text="note"></li>
+                  </template>
+                </ul>
+              </div>
+            </aside>
+          </div>
         </div>
       </div>
 
@@ -848,6 +1275,7 @@
         </div>
       </div>
 
+      </div>
     </main>
   </div>
 
