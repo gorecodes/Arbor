@@ -51,6 +51,7 @@ Arbor runs as two separate processes with different privilege levels:
 
 This separation is intentional: the web UI stays unprivileged, while only the package-management backend requires root access.
 
+## Requirements
 - Gentoo Linux with OpenRC or systemd
 - Python 3.11+
 - `openssl` (used for certificate generation)
