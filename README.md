@@ -22,9 +22,6 @@ It is **not intended to be exposed to the public internet**.
 - Track live `emerge` output from the browser
 - Run maintenance tasks like world update, depclean, and sync
 - Keep the privileged package-management path separate from the web server
-
-## Features
-
 - **Dashboard** — system gauges (CPU, RAM, disk) with live load average
 - **Package browser** — search packages, view details, dependency tree, installed files
 - **Install / Uninstall** — live emerge output streamed to the browser, with emerge option flags
