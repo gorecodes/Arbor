@@ -70,7 +70,7 @@ Two processes run with separate privileges:
 
 The frontend is a no-build Alpine.js app in `frontend/alpine/`.
 
-## Prerequisites
+This separation is intentional: the web UI stays unprivileged, while only the package-management backend requires root access.
 
 - Gentoo Linux
 - Python 3.11+
@@ -111,7 +111,7 @@ The installer will:
 8. Generate an access token in `/etc/arbor/token` if one does not already exist
 9. Create `/etc/arbor/arbor.env` if it does not already exist
 
-## First run
+## First start
 
 **OpenRC:**
 ```bash
@@ -126,7 +126,7 @@ systemctl start arbor-daemon arbor
 
 Open `https://localhost:8443` in your browser, accept the self-signed certificate warning, and enter the token from `/etc/arbor/token`.
 
-## Start at boot
+## Enable at boot
 
 **OpenRC:**
 ```bash
@@ -255,6 +255,13 @@ rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 | `ARBOR_ALLOW_PLAINTEXT` | unset | Set to `1` to allow plain HTTP when cert/key are missing |
 | `ARBOR_CORS_ORIGINS` | `https://localhost:8443,http://localhost:5173` | Comma-separated allowed origins |
 | `ARBOR_STATIC_DIR` | auto-detected | Override the frontend static directory |
+
+## Logs
+
+```text
+/var/log/arbor/daemon.log   # arbor-daemon output
+/var/log/arbor/web.log      # web server output
+```
 
 ## LAN access
 
