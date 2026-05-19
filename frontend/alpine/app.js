@@ -46,6 +46,9 @@
     useFlags:    (atom)      => _get('/package/use-flags?atom=' + encodeURIComponent(atom)),
     deps:        (atom)      => _get('/package/deps?atom=' + encodeURIComponent(atom)),
     depGraph:    (atom, d=2) => _get('/package/dep-graph?atom=' + encodeURIComponent(atom) + '&depth=' + d),
+    stats:       ()          => _get('/stats'),
+    pkgStats:    ()          => _get('/pkg-stats'),
+    compileCats: ()          => _get('/analytics/compile-time-by-category'),
   }
 
   const emerge = {
@@ -195,8 +198,13 @@
   function dashboardComponent() {
     return {
       status: null,
+      stats: null,
+      pkgStats: null,
+      compileCats: null,
       error: null,
       _timer: null,
+      sections: { system: true, jobs: true, packages: true },
+      toggleSection(s) { this.sections[s] = !this.sections[s] },
       init() {
         this._load()
         this.$watch('$store.router.view', v => {
@@ -210,8 +218,12 @@
         this._timer = setInterval(() => { if (Alpine.store('router').view === 'dashboard') this._load() }, 5000)
       },
       async _load() {
-        try { this.status = await api.status() }
-        catch(e) { this.error = e.message }
+        try {
+          this.status = await api.status()
+          api.stats().then(s => { this.stats = s }).catch(() => {})
+          api.pkgStats().then(s => { this.pkgStats = s }).catch(() => {})
+          api.compileCats().then(s => { this.compileCats = s }).catch(() => {})
+        } catch(e) { this.error = e.message }
       },
       fmtBytes(b) {
         if (!b) return '0 B'
@@ -225,15 +237,273 @@
       diskPct() { return this.status ? this._safePct(this.status.disk_used, this.status.disk_total) : 0 },
       memPct()  { return this.status ? this._safePct(this.status.mem_used,  this.status.mem_total)  : 0 },
       cpuPct()  { return this.status ? Math.round(this.status.cpu_pct || 0) : 0 },
-      // Returns :style string for the conic-gradient ring gauge.
-      // Semi-circle: starts at left (270deg), fills clockwise over the top to right.
-      // Outer div (150x75 overflow:hidden) clips to show only the top half of the 150x150 circle.
       gaugeStyle(pct) {
         const p = isNaN(pct) || !isFinite(pct) ? 0 : Math.max(0, Math.min(100, pct))
         const color = p >= 85 ? '#f85149' : p >= 60 ? '#d29922' : '#3fb950'
         const deg = (p / 100) * 180
         return `background:conic-gradient(from 270deg,${color} 0deg ${deg}deg,#21262d ${deg}deg 180deg,transparent 180deg 360deg)`
-      }
+      },
+      hasStats() {
+        return this.stats && (this.stats.total > 0)
+      },
+      _esc(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+      },
+      _fmtDur(s) {
+        s = Math.round(s)
+        if (s < 60) return s + 's'
+        const m = Math.floor(s / 60), sec = s % 60
+        return m + 'm ' + (sec ? sec + 's' : '')
+      },
+      activitySvg() {
+        if (!this.stats) return ''
+        const data = this.stats.activity_30d || []
+        const days = []
+        for (let i = 29; i >= 0; i--) {
+          const d = new Date(Date.now() - i * 86400000)
+          const key = d.toISOString().slice(0, 10)
+          const found = data.find(r => r.day === key)
+          days.push({ day: key, cnt: found ? found.cnt : 0 })
+        }
+        const max = Math.max(1, ...days.map(d => d.cnt))
+        // Layout: Y-axis label area on the left, bars area on the right
+        const Y_LABEL_W = 28, BAR_W = 11, GAP = 3, CHART_H = 60, LABEL_H = 16, TOP_PAD = 4
+        const barsW = days.length * (BAR_W + GAP) - GAP
+        const totalW = Y_LABEL_W + barsW
+        const totalH = TOP_PAD + CHART_H + LABEL_H
+
+        // Y-axis grid lines and labels (0, mid, max)
+        const yTicks = [0, Math.round(max / 2), max].filter((v, i, a) => a.indexOf(v) === i)
+        const grid = yTicks.map(v => {
+          const y = TOP_PAD + CHART_H - Math.round((v / max) * CHART_H)
+          return `<line x1="${Y_LABEL_W}" y1="${y}" x2="${totalW}" y2="${y}" stroke="#21262d" stroke-width="1"/>
+<text x="${Y_LABEL_W - 4}" y="${y + 3}" fill="#6e7681" font-size="8" text-anchor="end">${v}</text>`
+        }).join('')
+
+        // Bars + x-axis date ticks
+        const bars = days.map((d, i) => {
+          const h = d.cnt === 0 ? 2 : Math.max(4, Math.round((d.cnt / max) * CHART_H))
+          const x = Y_LABEL_W + i * (BAR_W + GAP)
+          const y = TOP_PAD + CHART_H - h
+          const color = d.cnt === 0 ? '#21262d' : '#3fb950'
+          const label = d.day.slice(5) // MM-DD
+          const tick = (i === 0 || i === 6 || i === 13 || i === 20 || i === 29)
+            ? `<text x="${x + BAR_W / 2}" y="${TOP_PAD + CHART_H + LABEL_H - 1}" fill="#6e7681" font-size="8" text-anchor="middle">${this._esc(label)}</text>` : ''
+          return `<rect x="${x}" y="${y}" width="${BAR_W}" height="${h}" rx="2" fill="${color}"><title>${this._esc(d.day)}: ${d.cnt} job${d.cnt !== 1 ? 's' : ''}</title></rect>${tick}`
+        }).join('')
+
+        // Y-axis title (rotated)
+        const yTitle = `<text transform="rotate(-90)" x="${-(TOP_PAD + CHART_H / 2)}" y="9" fill="#6e7681" font-size="8" text-anchor="middle">jobs/day</text>`
+
+        return `<svg viewBox="0 0 ${totalW} ${totalH}" width="100%" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible">${yTitle}${grid}${bars}</svg>`
+      },
+      donutSvg() {
+        if (!this.stats) return ''
+        const sc = this.stats.status_counts || {}
+        const done = sc.done || 0
+        const failed = sc.failed || 0
+        const cancelled = sc.cancelled || 0
+        const total = done + failed + cancelled
+        if (total === 0) return `<p class="dash-chart-empty">No data yet</p>`
+        return this._donutSvgHelper([
+          { val: done,      color: '#3fb950', label: 'Done' },
+          { val: failed,    color: '#f85149', label: 'Failed' },
+          { val: cancelled, color: '#d29922', label: 'Cancelled' },
+        ].filter(s => s.val > 0), total)
+      },
+      kindSvg() {
+        if (!this.stats?.kind_counts?.length) return ''
+        const COLORS = { install: '#3fb950', uninstall: '#f85149', world_update: '#58a6ff', depclean: '#bc8cff', sync: '#d29922', preserved_rebuild: '#79c0ff' }
+        const rows = this.stats.kind_counts.slice(0, 10).map(it => ({
+          label: it.kind.replace(/_/g, ' '), val: it.cnt, color: COLORS[it.kind] || '#8b949e'
+        }))
+        return this._hBarSvg(rows, v => String(v), 120, 140, 300)
+      },
+      topSlowSvg() {
+        if (!this.stats?.top_slow?.length) return `<p class="dash-chart-empty">No completed builds yet</p>`
+        const items = this.stats.top_slow.slice(0, 10)
+        const maxDur = items[0]?.duration || 1
+        const ROW_H = 26
+        const rows = items.map((item, i) => {
+          const barW = Math.max(4, Math.round((item.duration / maxDur) * 150))
+          const name = item.atom.replace(/^=/, '').split('/').pop() || item.atom
+          const y = i * ROW_H
+          return `<text x="0" y="${y + 13}" fill="#8b949e" font-size="11" dominant-baseline="middle">${this._esc(name.slice(0, 26))}</text>
+<rect x="165" y="${y + 5}" width="${barW}" height="13" rx="3" fill="#58a6ff"/>
+<text x="${165 + barW + 6}" y="${y + 13}" fill="#58a6ff" font-size="11" dominant-baseline="middle">${this._esc(this._fmtDur(item.duration))}</text>`
+        }).join('')
+        const h = items.length * ROW_H
+        return `<svg viewBox="0 0 380 ${h}" width="100%" height="${h}" xmlns="http://www.w3.org/2000/svg" style="display:block">${rows}</svg>`
+      },
+      compileTrendSvg() {
+        if (!this.stats?.compile_by_day?.length) return `<p class="dash-chart-empty">No data yet — future compilations will be tracked here</p>`
+        const data = this.stats.compile_by_day
+        const max = Math.max(1, ...data.map(d => d.secs))
+        const BAR_W = Math.max(6, Math.floor(280 / data.length) - 3)
+        const GAP = 3, Y_LABEL_W = 32, CHART_H = 60, LABEL_H = 16, TOP_PAD = 4
+        const barsW = data.length * (BAR_W + GAP) - GAP
+        const totalW = Y_LABEL_W + barsW
+        const maxMin = Math.round(max / 60)
+        const yTicks = [0, Math.round(maxMin / 2), maxMin].filter((v, i, a) => a.indexOf(v) === i)
+        const grid = yTicks.map(v => {
+          const y = TOP_PAD + CHART_H - Math.round(((v * 60) / max) * CHART_H)
+          const label = v >= 60 ? Math.floor(v / 60) + 'h' + (v % 60 ? (v % 60) + 'm' : '') : v + 'm'
+          return `<line x1="${Y_LABEL_W}" y1="${y}" x2="${totalW}" y2="${y}" stroke="#21262d" stroke-width="1"/>
+<text x="${Y_LABEL_W - 4}" y="${y + 3}" fill="#6e7681" font-size="8" text-anchor="end">${label}</text>`
+        }).join('')
+        const bars = data.map((d, i) => {
+          const h = Math.max(3, Math.round((d.secs / max) * CHART_H))
+          const x = Y_LABEL_W + i * (BAR_W + GAP)
+          const y = TOP_PAD + CHART_H - h
+          const showLabel = i === 0 || i === data.length - 1 || i % Math.ceil(data.length / 6) === 0
+          const tick = showLabel ? `<text x="${x + BAR_W / 2}" y="${TOP_PAD + CHART_H + LABEL_H - 1}" fill="#6e7681" font-size="8" text-anchor="middle">${this._esc(d.day.slice(5))}</text>` : ''
+          const mins = Math.round(d.secs / 60)
+          const hh = Math.floor(mins / 60), mm = mins % 60
+          const dur = hh ? hh + 'h ' + (mm ? mm + 'm' : '') : mm + 'm'
+          return `<rect x="${x}" y="${y}" width="${BAR_W}" height="${h}" rx="2" fill="#ffa657"><title>${this._esc(d.day)}: ${dur}</title></rect>${tick}`
+        }).join('')
+        const yTitle = `<text transform="rotate(-90)" x="${-(TOP_PAD + CHART_H / 2)}" y="9" fill="#6e7681" font-size="8" text-anchor="middle">compile</text>`
+        return `<svg viewBox="0 0 ${totalW} ${TOP_PAD + CHART_H + LABEL_H}" width="100%" xmlns="http://www.w3.org/2000/svg" style="display:block;overflow:visible">${yTitle}${grid}${bars}</svg>`
+      },
+      hasPkgStats() { return !!(this.pkgStats?.top_use_flags?.length) },
+      _fmtSize(b) {
+        if (!b) return '0 B'
+        if (b > 1024 ** 3) return (b / 1024 ** 3).toFixed(1) + ' GB'
+        if (b > 1024 ** 2) return (b / 1024 ** 2).toFixed(0) + ' MB'
+        return (b / 1024).toFixed(0) + ' KB'
+      },
+      useFlagsSvg() {
+        if (!this.pkgStats?.top_use_flags?.length) return ''
+        const all = this.pkgStats.top_use_flags.map(it => [it.flag, it.cnt])
+        const colorFn = (i, n) => `hsl(${130 - (i/n)*50},55%,${Math.round(55 - (i/n)*12)}%)`
+        return this._hBarSvg(this._topNOther(all, 10, colorFn), v => String(v), 90, 160, 300)
+      },
+      compileCatsSvg() {
+        if (!this.compileCats) return `<p class="dash-chart-empty">Loading from emerge.log…</p>`
+        const all = Object.entries(this.compileCats)
+        if (!all.length) return `<p class="dash-chart-empty">No emerge history found in /var/log/emerge.log</p>`
+        const fmtH = s => {
+          const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60)
+          return h ? `${h}h ${m}m` : `${m}m`
+        }
+        const colorFn = (i, n) => `hsl(${210 + (i/n)*60},60%,${Math.round(60 - (i/n)*15)}%)`
+        return this._hBarSvg(this._topNOther(all, 10, colorFn), fmtH, 100, 160, 310)
+      },
+      keywordDistSvg() {
+        if (!this.pkgStats?.keyword_dist) return ''
+        const kd = this.pkgStats.keyword_dist
+        const total = (kd.stable || 0) + (kd.testing || 0) + (kd.live || 0) + (kd.unknown || 0)
+        if (total === 0) return `<p class="dash-chart-empty">No data</p>`
+        return this._donutSvgHelper([
+          { val: kd.stable,  color: '#3fb950', label: 'Stable' },
+          { val: kd.testing, color: '#d29922', label: 'Testing (~)' },
+          { val: kd.live,    color: '#bc8cff', label: 'Live (9999)' },
+          { val: kd.unknown, color: '#6e7681', label: 'Other' },
+        ].filter(s => s.val > 0), total)
+      },
+      portageSpaceSvg() {
+        const disk = this.pkgStats?.portage_disk
+        if (!disk) return ''
+        const COLORS = { repos: '#58a6ff', distfiles: '#d29922', binpkgs: '#3fb950', vartree: '#bc8cff' }
+        const LABELS = { repos: '/var/db/repos (tree)', distfiles: '/var/cache/distfiles', binpkgs: '/var/cache/binpkgs', vartree: '/var/db/pkg' }
+        const entries = Object.entries(disk).filter(([, v]) => v >= 0)
+        const maxVal = Math.max(1, ...entries.map(([, v]) => v))
+        const ROW_H = 26
+        const rows = entries.map(([key, bytes], i) => {
+          const barW = bytes === 0 ? 2 : Math.max(4, Math.round((bytes / maxVal) * 160))
+          const color = COLORS[key] || '#8b949e'
+          const label = LABELS[key] || key
+          const size = this._fmtSize(bytes)
+          const y = i * ROW_H
+          return `<text x="0" y="${y + 14}" fill="#8b949e" font-size="11" dominant-baseline="middle">${this._esc(label)}</text>
+<rect x="175" y="${y + 5}" width="${barW}" height="13" rx="3" fill="${color}"/>
+<text x="${175 + barW + 6}" y="${y + 14}" fill="${color}" font-size="11" dominant-baseline="middle">${this._esc(size)}</text>`
+        }).join('')
+        const h = entries.length * ROW_H
+        const hint = (disk.distfiles || 0) > 5 * 1024 ** 3
+          ? `<text x="0" y="${h + 16}" fill="#d29922" font-size="10">💡 Consider running eclean-dist to free up distfiles space</text>` : ''
+        return `<svg viewBox="0 0 420 ${h + (hint ? 22 : 0)}" width="100%" height="${h + (hint ? 22 : 0)}" xmlns="http://www.w3.org/2000/svg" style="display:block">${rows}${hint}</svg>`
+      },
+      // Horizontal bar chart helper — fixed label column, bar, value label.
+      // rows: [{label, val, color}], fmtVal: val→string
+      _hBarSvg(rows, fmtVal = v => String(v), labelW = 105, barMax = 160, viewW = 320) {
+        const maxVal = Math.max(1, ...rows.map(r => r.val))
+        const ROW_H = 22, PAD_T = 2
+        const items = rows.map((r, i) => {
+          const barW = r.val === 0 ? 2 : Math.max(4, Math.round((r.val / maxVal) * barMax))
+          const y = PAD_T + i * ROW_H
+          return `<text x="0" y="${y + 11}" fill="#8b949e" font-size="11" dominant-baseline="middle">${this._esc(r.label)}</text>` +
+                 `<rect x="${labelW}" y="${y + 4}" width="${barW}" height="12" rx="3" fill="${r.color}"/>` +
+                 `<text x="${labelW + barW + 5}" y="${y + 11}" fill="#6e7681" font-size="10" dominant-baseline="middle">${this._esc(fmtVal(r.val))}</text>`
+        }).join('')
+        const h = PAD_T + rows.length * ROW_H
+        return `<svg viewBox="0 0 ${viewW} ${h}" width="100%" height="${h}" xmlns="http://www.w3.org/2000/svg" style="display:block">${items}</svg>`
+      },
+      // Top-N + Other bucket: takes [[label,val]] sorted desc, returns [{label,val,color}]
+      _topNOther(entries, n, colorFn, otherColor = '#6e7681') {
+        const top = entries.slice(0, n)
+        const rest = entries.slice(n)
+        const rows = top.map(([label, val], i) => ({ label, val, color: colorFn(i, top.length) }))
+        if (rest.length > 0) {
+          const otherVal = rest.reduce((s, [, v]) => s + v, 0)
+          if (otherVal > 0) rows.push({ label: 'Other', val: otherVal, color: otherColor })
+        }
+        return rows
+      },
+      _donutSvgHelper(segments, total, viewW = 340, viewH = 100) {
+        const R = 38, r = 24, cx = 50, cy = 50
+        let startAngle = -Math.PI / 2
+        const paths = segments.map(seg => {
+          const angle = (seg.val / total) * 2 * Math.PI
+          const endAngle = startAngle + angle
+          const x1 = cx + R * Math.cos(startAngle), y1 = cy + R * Math.sin(startAngle)
+          const x2 = cx + R * Math.cos(endAngle),   y2 = cy + R * Math.sin(endAngle)
+          const x3 = cx + r * Math.cos(endAngle),   y3 = cy + r * Math.sin(endAngle)
+          const x4 = cx + r * Math.cos(startAngle), y4 = cy + r * Math.sin(startAngle)
+          const large = angle > Math.PI ? 1 : 0
+          const d = `M${x1.toFixed(2)} ${y1.toFixed(2)} A${R} ${R} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)} L${x3.toFixed(2)} ${y3.toFixed(2)} A${r} ${r} 0 ${large} 0 ${x4.toFixed(2)} ${y4.toFixed(2)} Z`
+          startAngle = endAngle
+          return `<path d="${d}" fill="${seg.color}"><title>${this._esc(seg.label)}: ${seg.val}</title></path>`
+        }).join('')
+        const legend = segments.map((seg, i) => {
+          const pct = Math.round((seg.val / total) * 100)
+          const y = 20 + i * 22
+          return `<rect x="108" y="${y - 9}" width="10" height="10" rx="2" fill="${seg.color}"/>
+<text x="122" y="${y}" fill="#c9d1d9" font-size="11">${this._esc(seg.label)}: ${seg.val} (${pct}%)</text>`
+        }).join('')
+        return `<svg viewBox="0 0 ${viewW} ${viewH}" width="100%" xmlns="http://www.w3.org/2000/svg" style="display:block">${paths}${legend}</svg>`
+      },
+      slottedSvg() {
+        if (!this.pkgStats?.slotted?.length) return `<p class="dash-chart-empty">No multi-version packages found — clean system!</p>`
+        const all = this.pkgStats.slotted.map(it => [it.cp.split('/')[1] || it.cp, it.count])
+        const colorFn = () => '#ffa657'
+        return this._hBarSvg(this._topNOther(all, 10, colorFn), v => `${v} slots`, 120, 140, 310)
+      },
+      srcVsBinSvg() {
+        const svb = this.pkgStats?.src_vs_bin
+        if (!svb) return ''
+        const total = (svb.source || 0) + (svb.binary || 0)
+        if (total === 0) return `<p class="dash-chart-empty">No data</p>`
+        return this._donutSvgHelper([
+          { val: svb.source || 0, color: '#3fb950', label: 'Source-compiled' },
+          { val: svb.binary || 0, color: '#58a6ff', label: 'Binary package' },
+        ].filter(s => s.val > 0), total)
+      },
+      licenseSvg() {
+        const ld = this.pkgStats?.license_dist
+        if (!ld) return ''
+        const total = Object.values(ld).reduce((a, b) => a + b, 0)
+        if (total === 0) return `<p class="dash-chart-empty">No data</p>`
+        const segments = [
+          { key: 'copyleft',    color: '#3fb950', label: 'Copyleft (GPL…)' },
+          { key: 'permissive',  color: '#58a6ff', label: 'Permissive (MIT, Apache…)' },
+          { key: 'proprietary', color: '#f85149', label: 'Proprietary' },
+          { key: 'other',       color: '#6e7681', label: 'Other / Unknown' },
+        ].filter(s => ld[s.key] > 0).map(s => ({ ...s, val: ld[s.key] }))
+        const legendH = segments.length * 22 + 10
+        const viewH = Math.max(110, legendH)
+        return this._donutSvgHelper(segments, total, 380, viewH)
+      },
     }
   }
 

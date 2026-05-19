@@ -15,14 +15,7 @@ It is **not intended to be exposed to the public internet**.
 
 ## Features
 
-- Browse available packages from a web UI
-- Inspect dependency trees more easily than in plain terminal output
-- Review package details and USE flags
-- Install and uninstall packages
-- Track live `emerge` output from the browser
-- Run maintenance tasks like world update, depclean, and sync
-- Keep the privileged package-management path separate from the web server
-- **Dashboard** — system gauges (CPU, RAM, disk) with live load average
+- **Dashboard** — system gauges (CPU, RAM, disk), live load average, and a full analytics section (see below)
 - **Package browser** — search packages, view details, dependency tree, installed files
 - **Install / Uninstall** — live emerge output streamed to the browser, with emerge option flags
 - **Maintenance** — world update, depclean, preserved-rebuild, sync, all with pretend mode
@@ -34,6 +27,39 @@ It is **not intended to be exposed to the public internet**.
 > - Overlay removal is not yet working — under investigation.
 > - History entries with very large logs return HTTP 500 when opened — under investigation.
 
+## Dashboard Analytics
+
+The dashboard is divided into three collapsible sections:
+
+### 🖥️ System & Portage Status
+Live system gauges (CPU, RAM, disk /) and summary cards (installed packages, last sync, total jobs).  
+Includes a **Portage disk usage** breakdown: repos tree, distfiles cache, binpkgs cache, and installed package DB — with a hint when `eclean-dist` could free significant space.
+
+### 🔬 System Analytics
+Gentoo-centric statistics computed from the live Portage database and `/var/log/emerge.log`:
+
+| Chart | What it shows |
+|---|---|
+| **Compile time by category** | Top 10 Portage categories by total CPU time (hours/min), parsed from `emerge.log` — remaining categories grouped as *Other* |
+| **Top 10 enabled USE flags** | Most-used active USE flags across all installed packages |
+| **Package stability** | Donut: Stable / Testing (`~arch`) / Live (`-9999`) / Other |
+| **Source vs Binary** | How much of your system was compiled from source vs installed via binpkg |
+| **License distribution** | Copyleft (GPL…) / Permissive (MIT, Apache…) / Proprietary / Other |
+| **Multi-slot packages** | Top 10 packages with the most concurrent slots installed (toolchains, runtimes…) |
+
+> Compile time data is read directly from `/var/log/emerge.log` with in-memory caching — the cache is invalidated automatically when the file changes.
+
+### 📊 Job History
+Charts derived from Arbor's own SQLite job log:
+
+| Chart | What it shows |
+|---|---|
+| **Job activity** | Daily bar chart over the last 30 days |
+| **Compile time trend** | Wall-clock compile time per day over the last 90 days |
+| **Job outcomes** | Success / failed / cancelled donut |
+| **By type** | Jobs broken down by kind (install, uninstall, world update…) |
+| **Top 10 slowest builds** | Longest single-package builds ever recorded |
+
 ## Screenshots
 
 ![Package browser and dependency tree](https://i.imgur.com/ww2S5zU.png)
@@ -41,6 +67,12 @@ It is **not intended to be exposed to the public internet**.
 ![Install flow with live emerge output](https://i.imgur.com/aZqroc4.png)
 
 ![Maintenance — world update, depclean, sync](https://i.imgur.com/AllJcX6.png)
+
+![Dashboard — System & Portage Status](https://i.imgur.com/X8EXcc8.png)
+
+![Dashboard — System Analytics](https://i.imgur.com/Gf1ufa7.png)
+
+![Dashboard — Job History](https://i.imgur.com/TuHPWUf.png)
 
 ## Architecture
 
