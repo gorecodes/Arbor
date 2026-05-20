@@ -1,6 +1,6 @@
 """
 Entry point: starts uvicorn with TLS.
-Certificate paths are read from /etc/arbor/arbor.conf or env vars.
+Certificate paths are read from /etc/arbor/arbor.env or env vars.
 """
 
 import copy
@@ -11,6 +11,7 @@ import sys
 import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 
+from .config_env import env_int, env_value
 from .ipc_auth import IPCAuthError, load_ipc_key
 
 
@@ -38,17 +39,17 @@ def _log_config():
 
 
 def run():
-    host = os.environ.get("ARBOR_HOST", "127.0.0.1")
-    port = int(os.environ.get("ARBOR_PORT", "8443"))
-    cert = os.environ.get("ARBOR_CERT", "/etc/arbor/cert.pem")
-    key = os.environ.get("ARBOR_KEY", "/etc/arbor/key.pem")
+    host = env_value("ARBOR_HOST", "127.0.0.1")
+    port = env_int("ARBOR_PORT", 8443)
+    cert = env_value("ARBOR_CERT", "/etc/arbor/cert.pem")
+    key = env_value("ARBOR_KEY", "/etc/arbor/key.pem")
 
     tls = os.path.exists(cert) and os.path.exists(key)
     if not tls:
         # The bearer token would be sent in clear over plain HTTP. Require an
         # explicit opt-in so accidental misconfiguration doesn't silently
         # downgrade security.
-        if os.environ.get("ARBOR_ALLOW_PLAINTEXT") != "1":
+        if env_value("ARBOR_ALLOW_PLAINTEXT") != "1":
             print(
                 f"[arbor] ERROR: TLS cert/key not found ({cert}, {key}).\n"
                 f"[arbor] Refusing to start in plain HTTP. Either provide the\n"
