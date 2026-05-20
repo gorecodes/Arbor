@@ -4,19 +4,41 @@ All portage calls run in a thread executor to avoid event loop conflicts.
 """
 
 import asyncio
+import errno
 import json
 import os
 import re
 import sqlite3
+import stat
 import sys
 import threading
 import time
 import uuid
 import logging
+from collections import deque
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
+
+from arbor.ipc_auth import IPCAuthError, load_ipc_key, verify_request
 
 SOCKET_PATH = "/run/arbor/daemon.sock"
+MAX_JOB_LOG_BYTES = 512 * 1024
+MAX_HISTORY_LOG_BYTES = 1024 * 1024
+_ENV_FILE = Path(os.environ.get("ARBOR_ENV_FILE", "/etc/arbor/arbor.env"))
+_ENABLED_VALUES = {"1", "true", "yes", "on"}
+_STATE_DIR = Path("/var/lib/arbor/jobs")
+_HISTORY_LOG_TRUNCATED_MARKER = "\n\n[... log truncated: middle omitted ...]\n\n"
+_LIVE_LOG_TRUNCATED_CHUNK = {
+    "line": "-- live log truncated; showing most recent output only --",
+}
+_HISTORY_HEAD_BYTES = MAX_HISTORY_LOG_BYTES // 4
+_HISTORY_TAIL_BYTES = max(
+    MAX_HISTORY_LOG_BYTES
+    - _HISTORY_HEAD_BYTES
+    - len(_HISTORY_LOG_TRUNCATED_MARKER.encode("utf-8")),
+    0,
+)
 ALLOWED_COMMANDS = {
     "world_updates",
     "installed_packages",
@@ -60,30 +82,160 @@ ALLOWED_COMMANDS = {
 # Job registry — tracks long-running emerge processes across connections
 # ---------------------------------------------------------------------------
 
+def _chunk_bytes(chunk: dict) -> int:
+    return len(json.dumps(chunk, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def _trim_text_prefix(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0 or not text:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _trim_text_suffix(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0 or not text:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[-max_bytes:].decode("utf-8", errors="ignore")
+
+
+def _truncate_history_text(text: str) -> tuple[str, bool]:
+    if not text:
+        return "", False
+    encoded = text.encode("utf-8")
+    if len(encoded) <= MAX_HISTORY_LOG_BYTES:
+        return text, False
+    head = _trim_text_prefix(text, _HISTORY_HEAD_BYTES)
+    tail = _trim_text_suffix(text, _HISTORY_TAIL_BYTES)
+    return f"{head}{_HISTORY_LOG_TRUNCATED_MARKER}{tail}", True
+
+
+class _HistoryLogBuffer:
+    def __init__(self):
+        self._full_parts: list[str] = []
+        self._full_bytes = 0
+        self._head = ""
+        self._tail_parts: deque[str] = deque()
+        self._tail_bytes = 0
+        self.truncated = False
+
+    def append_line(self, line: str):
+        self.append_text(line + "\n")
+
+    def append_text(self, text: str):
+        if not text:
+            return
+        text_bytes = len(text.encode("utf-8"))
+
+        if not self.truncated and self._full_bytes + text_bytes <= MAX_HISTORY_LOG_BYTES:
+            self._full_parts.append(text)
+            self._full_bytes += text_bytes
+            return
+
+        if not self.truncated:
+            combined = "".join(self._full_parts) + text
+            self._full_parts.clear()
+            self._full_bytes = 0
+            self._head = _trim_text_prefix(combined, _HISTORY_HEAD_BYTES)
+            tail = _trim_text_suffix(combined, _HISTORY_TAIL_BYTES)
+            self._tail_parts = deque([tail] if tail else [])
+            self._tail_bytes = len(tail.encode("utf-8"))
+            self.truncated = True
+            return
+
+        if text_bytes >= _HISTORY_TAIL_BYTES:
+            tail = _trim_text_suffix(text, _HISTORY_TAIL_BYTES)
+            self._tail_parts = deque([tail] if tail else [])
+            self._tail_bytes = len(tail.encode("utf-8"))
+            return
+
+        self._tail_parts.append(text)
+        self._tail_bytes += text_bytes
+        while self._tail_bytes > _HISTORY_TAIL_BYTES and self._tail_parts:
+            removed = self._tail_parts.popleft()
+            self._tail_bytes -= len(removed.encode("utf-8"))
+
+    def render(self) -> tuple[str, bool]:
+        if not self.truncated:
+            return "".join(self._full_parts), False
+        return f"{self._head}{_HISTORY_LOG_TRUNCATED_MARKER}{''.join(self._tail_parts)}", True
+
+
 class _Job:
-    def __init__(self, atom: str, proc, kind: str = "install"):
+    def __init__(
+        self,
+        atom: str,
+        proc,
+        kind: str = "install",
+        *,
+        status: str = "running",
+        created_at: float | None = None,
+        started_at: float | None = None,
+        pid: int | None = None,
+        recovered: bool = False,
+        status_note: str | None = None,
+        status_updated_at: float | None = None,
+    ):
         self.atom = atom
         self.kind = kind
         self.proc = proc
-        self.logs: list = []
-        self.status: str = "running"   # running | done | failed
+        self.logs: deque[tuple[dict, int]] = deque()
+        now = time.time()
+        self.status: str = status
         self.returncode = None
-        self.created_at: float = time.time()
+        self.created_at: float = now if created_at is None else created_at
+        self.started_at: float = self.created_at if started_at is None else started_at
+        self.pid: int | None = pid if pid is not None else getattr(proc, "pid", None)
+        self.recovered = recovered
+        self.status_note = status_note
+        self.status_updated_at: float = now if status_updated_at is None else status_updated_at
         self._queues: list = []
+        self._log_bytes = 0
+        self._log_truncated = False
+        self._history_log = _HistoryLogBuffer()
+
+    def set_status(self, status: str, *, returncode=None, note: str | None = None, when: float | None = None):
+        self.status = status
+        if returncode is not None:
+            self.returncode = returncode
+        self.status_note = note
+        self.status_updated_at = time.time() if when is None else when
 
     def _push(self, chunk: dict):
-        self.logs.append(chunk)
+        stored = dict(chunk)
+        size = _chunk_bytes(stored)
+        self.logs.append((stored, size))
+        self._log_bytes += size
+        trimmed = False
+        while self._log_bytes > MAX_JOB_LOG_BYTES and self.logs:
+            _, removed_size = self.logs.popleft()
+            self._log_bytes -= removed_size
+            trimmed = True
+        if trimmed:
+            self._log_truncated = True
+        if "line" in stored:
+            self._history_log.append_line(stored["line"])
         for q in self._queues:
             q.put_nowait(chunk)
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue()
         self._queues.append(q)
-        for chunk in list(self.logs):
+        if self._log_truncated:
+            q.put_nowait(dict(_LIVE_LOG_TRUNCATED_CHUNK))
+        for chunk, _ in list(self.logs):
             q.put_nowait(chunk)
         if self.status != "running":
             q.put_nowait(None)  # sentinel so reader always terminates
         return q
+
+    def history_log_text(self) -> tuple[str, bool]:
+        return self._history_log.render()
 
     def unsubscribe(self, q: asyncio.Queue):
         try:
@@ -97,6 +249,7 @@ _jobs: dict[str, _Job] = {}
 # clients clicking "install <atom>" can't both decide "no running job" and
 # spawn duplicate emerge processes.
 _jobs_lock: asyncio.Lock | None = None
+_job_state_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Portage reload — detect repos.conf changes and reinitialize portage.db
@@ -164,6 +317,7 @@ def _db_init():
 
 
 def _history_save(job_id: str, atom: str, kind: str, status: str, returncode, created_at: float, finished_at: float, log_text: str):
+    log_text, _ = _truncate_history_text(log_text)
     with _db_lock:
         with sqlite3.connect(_DB_PATH) as conn:
             conn.execute(
@@ -201,7 +355,9 @@ def _history_log(job_id: str) -> dict:
             row = conn.execute("SELECT log FROM job_history WHERE job_id=?", (job_id,)).fetchone()
             if row is None:
                 return {"error": "not found"}
-            return {"log": row[0] or ""}
+            log_text, truncated = _truncate_history_text(row[0] or "")
+            truncated = truncated or _HISTORY_LOG_TRUNCATED_MARKER in log_text
+            return {"log": log_text, "truncated": truncated}
 
 
 def _history_delete(job_id: str) -> dict:
@@ -279,6 +435,104 @@ def _get_jobs_lock() -> asyncio.Lock:
     if _jobs_lock is None:
         _jobs_lock = asyncio.Lock()
     return _jobs_lock
+
+
+def _job_state_path(job_id: str) -> Path:
+    return _STATE_DIR / f"{job_id}.json"
+
+
+def _job_state_payload(job_id: str, job: _Job) -> dict:
+    payload = {
+        "job_id": job_id,
+        "kind": job.kind,
+        "atom": job.atom,
+        "pid": job.pid,
+        "status": job.status,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "status_updated_at": job.status_updated_at,
+    }
+    if job.status_note:
+        payload["status_note"] = job.status_note
+    if job.recovered:
+        payload["recovered"] = True
+    return payload
+
+
+def _persist_job_state(job_id: str, job: _Job):
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path = _job_state_path(job_id)
+    tmp_path = path.with_suffix(".json.tmp")
+    data = json.dumps(_job_state_payload(job_id, job), separators=(",", ":"), ensure_ascii=False)
+    with _job_state_lock:
+        tmp_path.write_text(data, encoding="utf-8")
+        os.replace(tmp_path, path)
+
+
+def _remove_job_state(job_id: str):
+    path = _job_state_path(job_id)
+    with _job_state_lock:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _pid_is_running(pid: int | None) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _load_recovered_jobs() -> dict[str, _Job]:
+    recovered: dict[str, _Job] = {}
+    if not _STATE_DIR.exists():
+        return recovered
+    for path in sorted(_STATE_DIR.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            job_id = str(raw["job_id"])
+            atom = str(raw["atom"])
+            kind = str(raw["kind"])
+            created_at = float(raw["created_at"])
+            started_at = float(raw.get("started_at", created_at))
+            pid = raw.get("pid")
+            pid = int(pid) if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit()) else None
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            log.warning("ignoring corrupt job state %s: %s", path, exc)
+            continue
+
+        recovered_at = time.time()
+        if _pid_is_running(pid):
+            status = "orphaned"
+            note = "job process still exists after daemon restart, but live output cannot be reattached"
+        else:
+            status = "unknown"
+            note = "job was active before daemon restart, but its final state is unknown"
+        job = _Job(
+            atom,
+            None,
+            kind=kind,
+            status=status,
+            created_at=created_at,
+            started_at=started_at,
+            pid=pid,
+            recovered=True,
+            status_note=note,
+            status_updated_at=recovered_at,
+        )
+        recovered[job_id] = job
+        try:
+            _persist_job_state(job_id, job)
+        except OSError as exc:
+            log.warning("failed to refresh recovered state for %s: %s", job_id, exc)
+    return recovered
 
 _ANSI = re.compile(r'\x1b\[[0-9;]*[mKJH]|\x1b\].*?(?:\x07|\x1b\\)')
 
@@ -358,21 +612,23 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     try:
         raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
         request = json.loads(raw.decode())
-        cmd = request.get("cmd")
+        cmd, args = verify_request(request)
 
         if cmd not in ALLOWED_COMMANDS:
             await send(writer, {"error": f"command '{cmd}' not allowed"})
             return
 
-        log.info("cmd=%s args=%s", cmd, request.get("args", {}))
+        log.info("cmd=%s args=%s", cmd, args)
         handler = HANDLERS.get(cmd)
-        async for chunk in handler(request.get("args", {})):
+        async for chunk in handler(args):
             await send(writer, chunk)
 
     except asyncio.TimeoutError:
         await send(writer, {"error": "timeout"})
     except json.JSONDecodeError:
         await send(writer, {"error": "invalid json"})
+    except IPCAuthError as e:
+        await send(writer, {"error": str(e)})
     except Exception as e:
         log.exception("unhandled error")
         await send(writer, {"error": str(e)})
@@ -1165,25 +1421,27 @@ async def _run_job(job_id: str):
         async for raw in job.proc.stdout:
             job._push({"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())})
         await job.proc.wait()
-        job.returncode = job.proc.returncode
-        job.status = "done" if job.proc.returncode == 0 else "failed"
+        job.set_status("done" if job.proc.returncode == 0 else "failed", returncode=job.proc.returncode)
         job._push({"done": True, "returncode": job.proc.returncode})
     except Exception as e:
         log.exception("job %s error", job_id)
-        job.status = "failed"
-        job.returncode = -1
+        job.set_status("failed", returncode=-1, note=str(e))
         job._push({"error": str(e), "done": True})
     finally:
         for q in list(job._queues):
             q.put_nowait(None)  # sentinel: stream ended
         log.info("job %s finished status=%s rc=%s", job_id, job.status, job.returncode)
         finished_at = time.time()
-        log_text = "\n".join(c["line"] for c in job.logs if "line" in c)
+        log_text, _ = job.history_log_text()
         try:
             await in_thread(_history_save, job_id, job.atom, job.kind, job.status,
                             job.returncode, job.created_at, finished_at, log_text)
         except Exception as exc:
             log.warning("failed to persist history for job %s: %s", job_id, exc)
+        try:
+            await in_thread(_remove_job_state, job_id)
+        except Exception as exc:
+            log.warning("failed to remove state for job %s: %s", job_id, exc)
 
 
 async def _cleanup_jobs():
@@ -1192,11 +1450,15 @@ async def _cleanup_jobs():
         await asyncio.sleep(300)
         cutoff = time.time() - 1800
         stale = [jid for jid, j in _jobs.items()
-                 if j.status != "running" and j.created_at < cutoff]
+                 if j.status != "running" and j.status_updated_at < cutoff]
         for jid in stale:
             job = _jobs.pop(jid)
             for q in list(job._queues):
                 q.put_nowait(None)
+            try:
+                _remove_job_state(jid)
+            except OSError as exc:
+                log.warning("failed to remove stale state for job %s: %s", jid, exc)
             log.info("evicted job %s from registry", jid)
 
 
@@ -1223,6 +1485,7 @@ async def cmd_emerge_install(args):
         )
         job_id = str(uuid.uuid4())
         _jobs[job_id] = _Job(atom, proc, kind="install")
+        await in_thread(_persist_job_state, job_id, _jobs[job_id])
 
     asyncio.create_task(_run_job(job_id))
     log.info("started job %s for %s", job_id, atom)
@@ -1244,6 +1507,7 @@ async def _start_background_job(key: str, cmd: list, kind: str = "task"):
         )
         job_id = str(uuid.uuid4())
         _jobs[job_id] = _Job(key, proc, kind=kind)
+        await in_thread(_persist_job_state, job_id, _jobs[job_id])
 
     asyncio.create_task(_run_job(job_id))
     log.info("started job %s for %s", job_id, key)
@@ -1334,6 +1598,9 @@ async def cmd_job_attach(args):
         return
 
     job = _jobs[job_id]
+    if job.status != "running" and job.recovered:
+        yield {"error": job.status_note or "job output is unavailable after daemon restart"}
+        return
     q = job.subscribe()
     try:
         while True:
@@ -1352,21 +1619,37 @@ async def cmd_job_attach(args):
         job.unsubscribe(q)
 
 
+def _job_summary(job_id: str, job: _Job) -> dict:
+    summary = {
+        "job_id": job_id,
+        "atom": job.atom,
+        "kind": job.kind,
+        "status": job.status,
+        "returncode": job.returncode,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "pid": job.pid,
+    }
+    if job.recovered:
+        summary["recovered"] = True
+    if job.status_note:
+        summary["status_note"] = job.status_note
+    return summary
+
+
 async def cmd_job_status(args):
     job_id = args.get("job_id", "")
     if not job_id or job_id not in _jobs:
         yield {"error": "job not found"}
         return
     job = _jobs[job_id]
-    yield {"job_id": job_id, "atom": job.atom, "kind": job.kind,
-           "status": job.status, "returncode": job.returncode}
+    yield _job_summary(job_id, job)
 
 
 async def cmd_job_list(_args):
     for jid, job in _jobs.items():
-        if job.status == "running":
-            yield {"job_id": jid, "atom": job.atom, "kind": job.kind,
-                   "status": job.status, "returncode": job.returncode, "created_at": job.created_at}
+        if job.status in {"running", "orphaned", "unknown"}:
+            yield _job_summary(jid, job)
     yield {"done": True}
 
 
@@ -1382,12 +1665,15 @@ async def cmd_job_cancel(args):
             await asyncio.wait_for(job.proc.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             job.proc.kill()
-        job.status = "failed"
-        job.returncode = -1
+        job.set_status("failed", returncode=-1, note="cancelled")
+        await in_thread(_persist_job_state, job_id, job)
         job._push({"done": True, "returncode": -1, "error": "cancelled"})
         for q in list(job._queues):
             q.put_nowait(None)
         log.info("cancelled job %s", job_id)
+    elif job.recovered:
+        yield {"error": job.status_note or "recovered job cannot be cancelled safely"}
+        return
     yield {"ok": True}
 
 
@@ -1434,6 +1720,22 @@ async def cmd_etc_update_check(_args):
 _CFG_BASENAME_RE = re.compile(r"^\._cfg\d+_[^/]+$")
 
 
+def _write_bytes_nofollow(path: Path, data: bytes, create_mode: int):
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise OSError(errno.ENOTSUP, "safe nofollow writes are not supported on this platform")
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    fd = os.open(path, flags, create_mode)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EPERM, f"{path} is not a regular file")
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(data)
+    finally:
+        os.close(fd)
+
+
 def _etc_update_resolve(cfg_file: str, action: str):
     # cfg_file arrives from the client. Validate strictly: it must live under
     # /etc, must be a regular file, and its basename must match Portage's
@@ -1458,10 +1760,25 @@ def _etc_update_resolve(cfg_file: str, action: str):
     real_basename = re.sub(r"^\._cfg\d+_", "", cfg_path.name)
     real_path = cfg_path.with_name(real_basename)
 
-    if action == "replace":
-        real_path.parent.mkdir(parents=True, exist_ok=True)
-        real_path.write_bytes(cfg_path.read_bytes())
-    cfg_path.unlink()
+    try:
+        if action == "replace":
+            if real_path.parent.is_symlink():
+                return [{"error": f"refusing to write through symlinked directory: {real_path.parent}"}]
+            if real_path.exists():
+                st = real_path.stat(follow_symlinks=False)
+                if stat.S_ISLNK(st.st_mode):
+                    return [{"error": f"refusing to overwrite symlink target: {real_path}"}]
+                if not stat.S_ISREG(st.st_mode):
+                    return [{"error": f"destination is not a regular file: {real_path}"}]
+                create_mode = stat.S_IMODE(st.st_mode)
+            else:
+                create_mode = stat.S_IMODE(cfg_path.stat().st_mode)
+            _write_bytes_nofollow(real_path, cfg_path.read_bytes(), create_mode)
+        cfg_path.unlink()
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return [{"error": f"refusing to overwrite symlink target: {real_path}"}]
+        return [{"error": f"could not resolve config update safely: {e}"}]
     return [{"ok": True, "cfg_file": str(cfg_path), "action": action}]
 
 
@@ -1504,7 +1821,64 @@ async def cmd_history_stats(args):
 # ---------------------------------------------------------------------------
 
 _OVERLAY_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
-_OVERLAY_URL_RE  = re.compile(r'^(https?://|git://|git\+https://).+')
+
+
+def _env_value(name: str) -> str:
+    value = os.environ.get(name)
+    if value is not None:
+        return value
+    try:
+        for raw_line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            key, sep, file_value = line.partition("=")
+            if sep and key.strip() == name:
+                return file_value.strip().strip("\"'")
+    except OSError:
+        return ""
+    return ""
+
+
+def _env_enabled(name: str) -> bool:
+    return _env_value(name).strip().lower() in _ENABLED_VALUES
+
+
+def _overlay_add_enabled() -> bool:
+    return _env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
+
+
+def _overlay_approval_text(name: str, sync_uri: str) -> str:
+    return f"ADD {name} {sync_uri}"
+
+
+def _validate_overlay_uri(sync_type: str, sync_uri: str) -> str | None:
+    try:
+        parsed = urlparse(sync_uri)
+    except ValueError:
+        return "invalid sync URI"
+
+    allowed_schemes = {
+        "git": {"https", "git", "git+https"},
+        "rsync": {"rsync"},
+        "svn": {"https", "svn"},
+    }
+    schemes = allowed_schemes.get(sync_type)
+    if not schemes:
+        return None
+    if parsed.scheme not in schemes:
+        return f"invalid sync URI for {sync_type} — allowed schemes: {', '.join(sorted(schemes))}"
+    if not parsed.netloc:
+        return "invalid sync URI — host is required"
+    if parsed.username or parsed.password:
+        return "invalid sync URI — embedded credentials are not allowed"
+    if not parsed.path or parsed.path == "/":
+        return "invalid sync URI — repository path is required"
+    if parsed.query or parsed.fragment:
+        return "invalid sync URI — query strings and fragments are not allowed"
+    return None
 
 
 def _overlay_list() -> list:
@@ -1539,11 +1913,12 @@ def _overlay_add(name: str, sync_type: str, sync_uri: str) -> dict:
     import subprocess
     if not _OVERLAY_NAME_RE.match(name):
         return {"error": "invalid overlay name"}
-    if not _OVERLAY_URL_RE.match(sync_uri):
-        return {"error": "invalid sync URI — must start with https:// or git://"}
     allowed_types = {"git", "rsync", "svn"}
     if sync_type not in allowed_types:
         return {"error": f"unsupported sync type — allowed: {', '.join(sorted(allowed_types))}"}
+    uri_error = _validate_overlay_uri(sync_type, sync_uri)
+    if uri_error:
+        return {"error": uri_error}
     result = subprocess.run(
         ["eselect", "repository", "add", name, sync_type, sync_uri],
         capture_output=True, text=True,
@@ -1579,21 +1954,27 @@ async def cmd_overlay_list(_args):
 
 async def cmd_overlay_add(args):
     global _repos_conf_mtime
+    if not _overlay_add_enabled():
+        yield {"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"}
+        return
     name      = args.get("name", "").strip()
     sync_type = args.get("sync_type", "git").strip()
     sync_uri  = args.get("sync_uri", "").strip()
+    approve_danger = bool(args.get("approve_danger", False))
+    approval_text = args.get("approval_text", "").strip()
+    if not approve_danger:
+        yield {"error": "overlay add requires an explicit dangerous-action confirmation"}
+        return
+    if approval_text != _overlay_approval_text(name, sync_uri):
+        yield {"error": "overlay add confirmation text does not match the requested name and URL"}
+        return
     result = await in_thread(_overlay_add, name, sync_type, sync_uri)
     if "error" in result:
         yield result
         return
     _repos_conf_mtime = 0.0  # force portage reload on next overlay_list
-    # kick off sync as a background job
-    async for item in _start_background_job(
-        f"@sync:{name}",
-        ["emaint", "sync", "-r", name],
-        kind="sync",
-    ):
-        yield item
+    yield {"ok": True, "warning": "Overlay added. Review it carefully, then run sync explicitly."}
+    yield {"done": True}
 
 
 async def cmd_overlay_remove(args):
@@ -1668,6 +2049,12 @@ async def main():
         sys.exit(1)
 
     try:
+        load_ipc_key()
+    except IPCAuthError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
+
+    try:
         arbor_gid = grp.getgrnam("arbor").gr_gid
     except KeyError:
         log.error("group 'arbor' not found — create it before running the daemon")
@@ -1686,6 +2073,9 @@ async def main():
     os.chmod(SOCKET_PATH, 0o660)
 
     _db_init()
+    _jobs.update(_load_recovered_jobs())
+    if _jobs:
+        log.warning("recovered %d non-live job snapshot(s) after restart", len(_jobs))
     asyncio.create_task(_cleanup_jobs())
     log.info("listening on %s", SOCKET_PATH)
     async with server:

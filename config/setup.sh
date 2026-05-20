@@ -31,9 +31,15 @@ else
     -subj "/CN=${HOSTNAME_SAN}" \
     -addext "subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:${HOSTNAME_SAN}" \
     2>/dev/null
-  chmod 640 /etc/arbor/key.pem /etc/arbor/cert.pem
-  chown root:arbor /etc/arbor/key.pem /etc/arbor/cert.pem
+  chmod 600 /etc/arbor/key.pem
+  chown arbor:arbor /etc/arbor/key.pem
+  chmod 644 /etc/arbor/cert.pem
+  chown root:root /etc/arbor/cert.pem
 fi
+chmod 600 /etc/arbor/key.pem
+chown arbor:arbor /etc/arbor/key.pem
+chmod 644 /etc/arbor/cert.pem
+chown root:root /etc/arbor/cert.pem
 
 # --- access token ---
 if [[ -f /etc/arbor/token ]]; then
@@ -42,13 +48,15 @@ else
   echo "==> Generating access token"
   token=$(openssl rand -base64 32)
   printf '%s\n' "$token" > /etc/arbor/token
-  chmod 640 /etc/arbor/token
-  chown root:arbor /etc/arbor/token
+  chmod 600 /etc/arbor/token
+  chown arbor:arbor /etc/arbor/token
   echo ""
   echo "    Access token: $token"
   echo "    (saved to /etc/arbor/token)"
   echo ""
 fi
+chmod 600 /etc/arbor/token
+chown arbor:arbor /etc/arbor/token
 
 # --- env config ---
 if [[ -f /etc/arbor/arbor.env ]]; then
@@ -58,13 +66,26 @@ else
     cp "$REPO/config/arbor.env.example" /etc/arbor/arbor.env
   else
     cat > /etc/arbor/arbor.env <<'EOF'
-ARBOR_HOST=0.0.0.0
+ARBOR_HOST=127.0.0.1
 ARBOR_PORT=8443
 ARBOR_CERT=/etc/arbor/cert.pem
 ARBOR_KEY=/etc/arbor/key.pem
+ARBOR_ENABLE_OVERLAY_ADD=0
 EOF
   fi
-  chmod 640 /etc/arbor/arbor.env
-  chown root:arbor /etc/arbor/arbor.env
   echo "==> Created /etc/arbor/arbor.env"
 fi
+
+# --- IPC key ---
+if [[ -f /etc/arbor/ipc.key ]]; then
+  echo "==> IPC key file already exists — skipping"
+else
+  echo "==> Generating IPC key"
+  ipc_key=$(openssl rand -hex 32)
+  printf '%s\n' "$ipc_key" > /etc/arbor/ipc.key
+  chmod 600 /etc/arbor/ipc.key
+  chown arbor:arbor /etc/arbor/ipc.key
+fi
+
+chmod 640 /etc/arbor/arbor.env
+chown root:arbor /etc/arbor/arbor.env

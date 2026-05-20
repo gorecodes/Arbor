@@ -6,6 +6,10 @@ Requires=arbor-daemon.service
 [Service]
 Type=simple
 User=arbor
+UMask=0027
+LogsDirectory=arbor
+LogsDirectoryMode=0750
+LogsDirectoryUser=arbor
 EnvironmentFile=-/etc/arbor/arbor.env
 ExecStart=/usr/bin/arbor
 StandardOutput=append:/var/log/arbor/web.log

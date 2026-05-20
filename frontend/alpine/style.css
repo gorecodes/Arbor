@@ -3304,6 +3304,15 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
   font-family: inherit; font-size: 0.82rem; background: #0d1117; color: #c9d1d9;
   border: 1px solid #30363d; border-radius: 5px; padding: 0.3rem 0.5rem;
 }
+.ov-confirm { display: grid; gap: 0.75rem; }
+.ov-confirm-grid { display: grid; gap: 0.5rem; }
+.ov-confirm-grid > div { display: grid; gap: 0.15rem; }
+.ov-confirm-uri code { overflow-wrap: anywhere; }
+.ov-confirm-check { display: flex; gap: 0.5rem; align-items: flex-start; color: #c9d1d9; }
+.ov-approval {
+  display: block; padding: 0.55rem 0.7rem; background: #0d1117; border: 1px solid #30363d;
+  border-radius: 5px; color: #f0f6fc; overflow-wrap: anywhere;
+}
 .ov-uri  { font-size: 0.76rem; color: #8b949e; max-width: 22rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ov-meta { font-size: 0.76rem; color: #6e7681; }
 

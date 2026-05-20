@@ -17,5 +17,8 @@ depend() {
 
 start_pre() {
     checkpath --directory --owner root:arbor --mode 0750 /run/arbor
-    checkpath --directory --owner arbor:arbor --mode 0755 /var/log/arbor
+    checkpath --directory --owner arbor:arbor --mode 0750 /var/log/arbor
+    touch /var/log/arbor/web.log
+    chown arbor:arbor /var/log/arbor/web.log
+    chmod 0640 /var/log/arbor/web.log
 }

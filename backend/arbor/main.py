@@ -26,6 +26,34 @@ logging.basicConfig(
 
 app = FastAPI(title="Arbor", version="0.1.0", docs_url=None, redoc_url=None)
 
+# The current Alpine frontend evaluates template expressions at runtime and uses
+# inline style attributes/bindings, so CSP cannot drop unsafe-eval or
+# unsafe-inline for styles without breaking the UI.
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-eval'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self' ws: wss:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    ),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+}
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for header, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(header, value)
+    return response
+
 # CORS — default to loopback only. Set ARBOR_CORS_ORIGINS to a comma-separated
 # list to override (e.g. "https://arbor.lan,http://localhost:5173").
 _default_cors = "https://localhost:8443,http://localhost:5173"
@@ -42,6 +70,36 @@ app.add_middleware(
 )
 
 Auth = Annotated[str, Depends(require_auth)]
+_WS_AUTH_TIMEOUT = 5
+_ENV_FILE = Path(os.environ.get("ARBOR_ENV_FILE", "/etc/arbor/arbor.env"))
+_ENABLED_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_value(name: str) -> str:
+    value = os.environ.get(name)
+    if value is not None:
+        return value
+    try:
+        for raw_line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            key, sep, file_value = line.partition("=")
+            if sep and key.strip() == name:
+                return file_value.strip().strip("\"'")
+    except OSError:
+        return ""
+    return ""
+
+
+def _env_enabled(name: str) -> bool:
+    return _env_value(name).strip().lower() in _ENABLED_VALUES
+
+
+def _overlay_add_enabled() -> bool:
+    return _env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
 
 
 # ---------------------------------------------------------------------------
@@ -123,16 +181,52 @@ async def dep_graph(auth: Auth, atom: str = Query(min_length=1), depth: int = Qu
 # emerge — REST + WebSocket endpoints
 # ---------------------------------------------------------------------------
 
-async def _ws_emerge(websocket: WebSocket, token: str, cmd: str, atom: str, extra_args: dict = {}):
-    if not verify_token(token):
-        await websocket.close(code=4401)
-        return
-    if not atom:
-        await websocket.close(code=4400)
-        return
+async def _ws_fail(websocket: WebSocket, code: int, error: str):
+    try:
+        await websocket.send_text(json.dumps({"error": error, "done": True}))
+    except Exception:
+        pass
+    try:
+        await websocket.close(code=code, reason=error)
+    except Exception:
+        pass
+
+
+async def _ws_require_auth(websocket: WebSocket) -> bool:
     await websocket.accept()
     try:
-        async for chunk in query(cmd, {"atom": atom, **extra_args}):
+        # Authenticate from the first frame so tokens never appear in URLs or logs.
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=_WS_AUTH_TIMEOUT)
+    except asyncio.TimeoutError:
+        await _ws_fail(websocket, 4401, "authentication required")
+        return False
+    except WebSocketDisconnect:
+        return False
+    except Exception:
+        await _ws_fail(websocket, 4400, "invalid auth message")
+        return False
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        await _ws_fail(websocket, 4400, "invalid auth message")
+        return False
+
+    token = payload.get("token") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or payload.get("type") != "auth" or not verify_token(token):
+        await _ws_fail(websocket, 4401, "invalid or missing token")
+        return False
+    return True
+
+
+async def _ws_emerge(websocket: WebSocket, cmd: str, atom: str, extra_args: dict | None = None):
+    if not await _ws_require_auth(websocket):
+        return
+    if not atom:
+        await _ws_fail(websocket, 4400, "missing atom")
+        return
+    try:
+        async for chunk in query(cmd, {"atom": atom, **(extra_args or {})}):
             await websocket.send_text(json.dumps(chunk))
             if chunk.get("done"):
                 break
@@ -144,14 +238,16 @@ async def _ws_emerge(websocket: WebSocket, token: str, cmd: str, atom: str, extr
         except Exception:
             pass
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
-async def _ws_job_cmd(websocket: WebSocket, token: str, daemon_cmd: str, args: dict):
+async def _ws_job_cmd(websocket: WebSocket, daemon_cmd: str, args: dict):
     """Start (or resume) a background job and stream its output."""
-    if not verify_token(token):
-        await websocket.close(code=4401); return
-    await websocket.accept()
+    if not await _ws_require_auth(websocket):
+        return
     try:
         job_id = None
         async for chunk in query(daemon_cmd, args):
@@ -177,68 +273,66 @@ async def _ws_job_cmd(websocket: WebSocket, token: str, daemon_cmd: str, args: d
         try: await websocket.send_text(json.dumps({"error": str(e), "done": True}))
         except Exception: pass
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.websocket("/ws/emerge/pretend")
-async def ws_emerge_pretend(websocket: WebSocket, token: str = Query(default=""), atom: str = Query(default=""), clean: str = Query(default="0"), opts: str = Query(default="")):
-    await _ws_emerge(websocket, token, "emerge_pretend", atom, {"clean": clean == "1", "opts": opts})
+async def ws_emerge_pretend(websocket: WebSocket, atom: str = Query(default=""), clean: str = Query(default="0"), opts: str = Query(default="")):
+    await _ws_emerge(websocket, "emerge_pretend", atom, {"clean": clean == "1", "opts": opts})
 
 
 @app.websocket("/ws/emerge/install")
-async def ws_emerge_install(websocket: WebSocket, token: str = Query(default=""), atom: str = Query(default=""), opts: str = Query(default="")):
-    if not atom:
-        await websocket.close(code=4400); return
-    await _ws_job_cmd(websocket, token, "emerge_install", {"atom": atom, "opts": opts})
+async def ws_emerge_install(websocket: WebSocket, atom: str = Query(default=""), opts: str = Query(default="")):
+    await _ws_job_cmd(websocket, "emerge_install", {"atom": atom, "opts": opts})
 
 
 @app.websocket("/ws/emerge/uninstall-pretend")
-async def ws_emerge_uninstall_pretend(websocket: WebSocket, token: str = Query(default=""), atom: str = Query(default="")):
-    await _ws_emerge(websocket, token, "emerge_uninstall_pretend", atom)
+async def ws_emerge_uninstall_pretend(websocket: WebSocket, atom: str = Query(default="")):
+    await _ws_emerge(websocket, "emerge_uninstall_pretend", atom)
 
 
 @app.websocket("/ws/emerge/uninstall")
-async def ws_emerge_uninstall(websocket: WebSocket, token: str = Query(default=""), atom: str = Query(default="")):
-    if not atom:
-        await websocket.close(code=4400); return
-    await _ws_job_cmd(websocket, token, "emerge_uninstall", {"atom": atom})
+async def ws_emerge_uninstall(websocket: WebSocket, atom: str = Query(default="")):
+    await _ws_job_cmd(websocket, "emerge_uninstall", {"atom": atom})
 
 
 @app.websocket("/ws/emerge/world-update")
-async def ws_emerge_world_update(websocket: WebSocket, token: str = Query(default=""), opts: str = Query(default="")):
-    await _ws_job_cmd(websocket, token, "emerge_world_update", {"opts": opts})
+async def ws_emerge_world_update(websocket: WebSocket, opts: str = Query(default="")):
+    await _ws_job_cmd(websocket, "emerge_world_update", {"opts": opts})
 
 
 @app.websocket("/ws/emerge/depclean-pretend")
-async def ws_emerge_depclean_pretend(websocket: WebSocket, token: str = Query(default="")):
-    await _ws_job_cmd(websocket, token, "emerge_depclean_pretend", {})
+async def ws_emerge_depclean_pretend(websocket: WebSocket):
+    await _ws_job_cmd(websocket, "emerge_depclean_pretend", {})
 
 
 @app.websocket("/ws/emerge/depclean")
-async def ws_emerge_depclean(websocket: WebSocket, token: str = Query(default="")):
-    await _ws_job_cmd(websocket, token, "emerge_depclean", {})
+async def ws_emerge_depclean(websocket: WebSocket):
+    await _ws_job_cmd(websocket, "emerge_depclean", {})
 
 
 @app.websocket("/ws/emerge/preserved-rebuild")
-async def ws_emerge_preserved_rebuild(websocket: WebSocket, token: str = Query(default="")):
-    await _ws_job_cmd(websocket, token, "emerge_preserved_rebuild", {})
+async def ws_emerge_preserved_rebuild(websocket: WebSocket):
+    await _ws_job_cmd(websocket, "emerge_preserved_rebuild", {})
 
 
 @app.websocket("/ws/emerge/world-pretend")
-async def ws_emerge_world_pretend(websocket: WebSocket, token: str = Query(default="")):
-    await _ws_job_cmd(websocket, token, "world_updates", {})
+async def ws_emerge_world_pretend(websocket: WebSocket):
+    await _ws_job_cmd(websocket, "world_updates", {})
 
 
 @app.websocket("/ws/emerge/sync")
-async def ws_emerge_sync(websocket: WebSocket, token: str = Query(default="")):
-    await _ws_job_cmd(websocket, token, "emerge_sync", {})
+async def ws_emerge_sync(websocket: WebSocket):
+    await _ws_job_cmd(websocket, "emerge_sync", {})
 
 
 @app.websocket("/ws/jobs/{job_id}")
-async def ws_job_attach(websocket: WebSocket, job_id: str, token: str = Query(default="")):
-    if not verify_token(token):
-        await websocket.close(code=4401); return
-    await websocket.accept()
+async def ws_job_attach(websocket: WebSocket, job_id: str):
+    if not await _ws_require_auth(websocket):
+        return
     try:
         async for chunk in query("job_attach", {"job_id": job_id}):
             if chunk.get("keepalive"):
@@ -254,7 +348,10 @@ async def ws_job_attach(websocket: WebSocket, job_id: str, token: str = Query(de
         except Exception:
             pass
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.get("/api/jobs")
@@ -291,8 +388,8 @@ async def job_cancel(auth: Auth, job_id: str):
 
 
 @app.websocket("/ws/emerge/autounmask")
-async def ws_emerge_autounmask(websocket: WebSocket, token: str = Query(default=""), atom: str = Query(default="")):
-    await _ws_emerge(websocket, token, "emerge_autounmask", atom)
+async def ws_emerge_autounmask(websocket: WebSocket, atom: str = Query(default="")):
+    await _ws_emerge(websocket, "emerge_autounmask", atom)
 
 
 @app.get("/api/emerge/etc-update")
@@ -377,13 +474,28 @@ async def overlay_list(auth: Auth):
     return [r for r in results if "name" in r]
 
 
+@app.get("/api/overlays/config")
+async def overlay_config(auth: Auth):
+    return {"add_enabled": _overlay_add_enabled()}
+
+
 @app.post("/api/overlays")
 async def overlay_add(auth: Auth, request: Request):
+    if not _overlay_add_enabled():
+        return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
     body = await request.json()
     name      = str(body.get("name", "")).strip()
     sync_type = str(body.get("sync_type", "git")).strip()
     sync_uri  = str(body.get("sync_uri", "")).strip()
-    data = await query_one("overlay_add", {"name": name, "sync_type": sync_type, "sync_uri": sync_uri})
+    approve_danger = bool(body.get("approve_danger", False))
+    approval_text = str(body.get("approval_text", "")).strip()
+    data = await query_one("overlay_add", {
+        "name": name,
+        "sync_type": sync_type,
+        "sync_uri": sync_uri,
+        "approve_danger": approve_danger,
+        "approval_text": approval_text,
+    })
     if "error" in data:
         return JSONResponse(status_code=400, content=data)
     return data
@@ -398,11 +510,9 @@ async def overlay_remove(auth: Auth, name: str, purge: int = Query(default=0)):
 
 
 @app.websocket("/ws/overlays/sync/{name}")
-async def ws_overlay_sync(websocket: WebSocket, name: str, token: str = Query(default="")):
-    if not verify_token(token):
-        await websocket.close(code=4401)
+async def ws_overlay_sync(websocket: WebSocket, name: str):
+    if not await _ws_require_auth(websocket):
         return
-    await websocket.accept()
     try:
         job_id = None
         async for chunk in query("overlay_sync", {"name": name}):
@@ -426,7 +536,10 @@ async def ws_overlay_sync(websocket: WebSocket, name: str, token: str = Query(de
         except Exception:
             pass
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -434,12 +547,9 @@ async def ws_overlay_sync(websocket: WebSocket, name: str, token: str = Query(de
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/updates")
-async def ws_world_updates(websocket: WebSocket, token: str = Query(default="")):
-    if not verify_token(token):
-        await websocket.close(code=4401)
+async def ws_world_updates(websocket: WebSocket):
+    if not await _ws_require_auth(websocket):
         return
-
-    await websocket.accept()
     try:
         async for chunk in query("world_updates"):
             await websocket.send_text(json.dumps(chunk))
@@ -450,7 +560,10 @@ async def ws_world_updates(websocket: WebSocket, token: str = Query(default=""))
     except Exception as e:
         await websocket.send_text(json.dumps({"error": str(e)}))
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
