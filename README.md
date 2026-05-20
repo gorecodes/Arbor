@@ -19,24 +19,6 @@ Designed for Gentoo systems in a local environment. Not intended to be exposed t
 - **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with an explicit danger confirmation flow
 - **Jobs** — view active jobs, reopen live output, browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`), and surface recovered orphaned/unknown jobs after daemon restart
 
-## Dashboard
-
-The current dashboard is centered on two main areas plus a top summary strip:
-
-### Recent activity
-
-- Recent job list
-- Activity snapshot
-- Longest completed builds
-
-### Gentoo composition
-
-- Compile time by category from `/var/log/emerge.log`
-- Source / binary mix
-- Keyword posture
-- Top enabled USE flags
-- Multi-slot packages
-
 ## Screenshots
 
 ### Dashboard
