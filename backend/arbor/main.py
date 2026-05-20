@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .auth import require_auth, verify_token
+from .config_env import env_enabled, env_list
 from .daemon_client import query, query_all, query_one
 from .emerge_log import compile_time_by_category
 
@@ -66,11 +67,7 @@ def _default_loopback_origins() -> list[str]:
 
 # CORS — default to local loopback origins only. Set ARBOR_CORS_ORIGINS to a
 # comma-separated list to override.
-_cors_origins = [
-    o.strip()
-    for o in os.environ.get("ARBOR_CORS_ORIGINS", ",".join(_default_loopback_origins())).split(",")
-    if o.strip()
-]
+_cors_origins = env_list("ARBOR_CORS_ORIGINS", _default_loopback_origins())
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -81,35 +78,9 @@ app.add_middleware(
 
 Auth = Annotated[str, Depends(require_auth)]
 _WS_AUTH_TIMEOUT = 5
-_ENV_FILE = Path(os.environ.get("ARBOR_ENV_FILE", "/etc/arbor/arbor.env"))
-_ENABLED_VALUES = {"1", "true", "yes", "on"}
-
-
-def _env_value(name: str) -> str:
-    value = os.environ.get(name)
-    if value is not None:
-        return value
-    try:
-        for raw_line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[7:].strip()
-            key, sep, file_value = line.partition("=")
-            if sep and key.strip() == name:
-                return file_value.strip().strip("\"'")
-    except OSError:
-        return ""
-    return ""
-
-
-def _env_enabled(name: str) -> bool:
-    return _env_value(name).strip().lower() in _ENABLED_VALUES
-
 
 def _overlay_add_enabled() -> bool:
-    return _env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
+    return env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
 
 
 async def _json_object_body(request: Request, *, allow_empty: bool = True) -> dict | JSONResponse:

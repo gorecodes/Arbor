@@ -60,6 +60,10 @@ class InstallSurfaceCharacterizationTests(unittest.TestCase):
         self.assertIn("/usr/bin/arbor-daemon", install_script)
         self.assertIn("/usr/bin/arbor-approve", install_script)
 
+    def test_setup_script_creates_log_directory_for_services(self):
+        setup_script = (REPO_ROOT / "config" / "setup.sh").read_text(encoding="utf-8")
+        self.assertIn('install -d -m 750 -o arbor -g arbor /var/log/arbor', setup_script)
+
     def test_install_script_and_service_files_share_the_same_entrypoint_paths(self):
         install_script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
         service_files = [

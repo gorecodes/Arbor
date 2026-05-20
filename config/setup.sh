@@ -20,6 +20,10 @@ useradd -r -s /sbin/nologin -G portage arbor 2>/dev/null || true
 echo "==> Creating /etc/arbor"
 install -d -m 750 -o root -g arbor /etc/arbor
 
+# --- /var/log/arbor ---
+echo "==> Creating /var/log/arbor"
+install -d -m 750 -o arbor -g arbor /var/log/arbor
+
 # --- TLS certificate ---
 if [[ -f /etc/arbor/cert.pem ]]; then
   echo "==> TLS certificate already exists — skipping"

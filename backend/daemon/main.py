@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from arbor.action_security import action_metadata, infer_job_action
+from arbor.config_env import env_enabled
 from arbor.ipc_auth import IPCAuthError, load_ipc_key, verify_request
 
 SOCKET_PATH = "/run/arbor/daemon.sock"
@@ -30,8 +31,6 @@ MAX_JOB_LOG_BYTES = 512 * 1024
 MAX_HISTORY_LOG_BYTES = 1024 * 1024
 RUNNING_HISTORY_FLUSH_SECONDS = 30.0
 RUNNING_HISTORY_FLUSH_LINES = 100
-_ENV_FILE = Path(os.environ.get("ARBOR_ENV_FILE", "/etc/arbor/arbor.env"))
-_ENABLED_VALUES = {"1", "true", "yes", "on"}
 _STATE_DIR = Path("/var/lib/arbor/jobs")
 _HISTORY_LOG_TRUNCATED_MARKER = "\n\n[... log truncated: middle omitted ...]\n\n"
 _LIVE_LOG_TRUNCATED_CHUNK = {
@@ -2669,31 +2668,8 @@ async def cmd_history_stats(args):
 _OVERLAY_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
 
 
-def _env_value(name: str) -> str:
-    value = os.environ.get(name)
-    if value is not None:
-        return value
-    try:
-        for raw_line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[7:].strip()
-            key, sep, file_value = line.partition("=")
-            if sep and key.strip() == name:
-                return file_value.strip().strip("\"'")
-    except OSError:
-        return ""
-    return ""
-
-
-def _env_enabled(name: str) -> bool:
-    return _env_value(name).strip().lower() in _ENABLED_VALUES
-
-
 def _overlay_add_enabled() -> bool:
-    return _env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
+    return env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
 
 
 def _validate_overlay_uri(sync_type: str, sync_uri: str) -> str | None:
