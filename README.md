@@ -129,7 +129,7 @@ The installer will:
 9. Create `/etc/arbor/arbor.env` if it does not already exist
 10. Generate an IPC key in `/etc/arbor/ipc.key` if one does not already exist
 
-## First run
+## First start
 
 **OpenRC:**
 ```bash
