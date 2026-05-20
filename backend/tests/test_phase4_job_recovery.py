@@ -29,6 +29,9 @@ class JobRecoveryTests(unittest.IsolatedAsyncioTestCase):
             10.0,
             55.0,
             "line one\n",
+            "emerge_world_update",
+            "approval_required",
+            "sys-apps/portage",
         )
         self.assertEqual(job._history_lines_since_flush, 0)
         self.assertEqual(job._history_checkpointed_at, 55.0)

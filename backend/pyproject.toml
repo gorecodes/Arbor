@@ -14,6 +14,7 @@ dependencies = [
 [project.scripts]
 arbor = "arbor.server:run"
 arbor-daemon = "daemon.main:cli"
+arbor-approve = "arbor.approval_cli:main"
 
 [tool.setuptools]
 packages = ["arbor", "daemon"]

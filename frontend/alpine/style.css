@@ -4059,6 +4059,40 @@ input:focus,
   overflow: hidden;
 }
 
+.app-approval-lock {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgb(1 4 9 / 0.7);
+  backdrop-filter: blur(6px);
+}
+
+.app-approval-card {
+  width: min(42rem, 100%);
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 24px 60px rgb(1 4 9 / 0.35);
+}
+
+.app-approval-title {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.app-approval-line {
+  font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+  font-size: 0.92rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
 .app-bar {
   position: sticky;
   top: 0;

@@ -41,6 +41,15 @@
   <!-- ── App layout ─────────────────────────────────────────────────────── -->
   <div x-show="$store.auth.isLoggedIn" x-cloak class="layout app-shell" x-data="appShellComponent">
 
+    <div class="app-approval-lock" x-show="approvalPending()">
+      <div class="app-approval-card">
+        <div class="app-approval-title">Awaiting shell approval</div>
+        <template x-for="(line, i) in approvalDetailLines()" :key="i">
+          <div class="app-approval-line" x-text="line"></div>
+        </template>
+      </div>
+    </div>
+
     <header class="app-bar">
       <div class="app-bar-main">
         <div class="app-brand-cluster">
@@ -1083,15 +1092,21 @@
       </div>
 
       <!-- Background jobs -->
-      <div x-show="$store.router.view === 'jobs'" x-data="jobsViewComponent">
-        <div class="jv-view">
-          <div class="jv-header">
-            <h2>Jobs</h2>
-            <div class="jv-tabs">
-              <button class="jv-tab" :class="{ active: tab === 'active' }" @click="switchTab('active')">Active</button>
-              <button class="jv-tab" :class="{ active: tab === 'history' }" @click="switchTab('history')">History</button>
+        <div x-show="$store.router.view === 'jobs'" x-data="jobsViewComponent">
+          <div class="jv-view">
+            <div class="jv-header">
+              <h2>Jobs</h2>
+              <div class="jv-tabs">
+                <button class="jv-tab" :class="{ active: tab === 'active' }" @click="switchTab('active')">Active</button>
+                <button class="jv-tab" :class="{ active: tab === 'history' }" @click="switchTab('history')">History</button>
+              </div>
             </div>
-          </div>
+
+            <div class="terminal" x-show="approvalLines.length > 0">
+              <template x-for="(line, i) in approvalLines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+            </div>
 
           <!-- ── Active tab ─────────────────────────────────────────────── -->
           <div x-show="tab === 'active'">
@@ -1210,6 +1225,11 @@
             <h2>Overlays</h2>
             <button class="jv-btn-refresh" @click="toggleAdd()" x-text="addShow ? '✕ Cancel' : '+ Add overlay'"></button>
           </div>
+          <div class="terminal" x-show="approvalLines.length > 0">
+            <template x-for="(line, i) in approvalLines" :key="i">
+              <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+            </template>
+          </div>
           <p class="muted" x-show="!loading && !error && addEnabled === false">Overlay add is disabled by default. Set <code>ARBOR_ENABLE_OVERLAY_ADD=1</code> to enable this dangerous admin action.</p>
           <p class="jv-err-msg" x-show="addConfigError">Overlay add status could not be loaded from the backend: <span x-text="addConfigError"></span></p>
           <p class="jv-err-msg" x-show="addDisabledNotice" x-text="addDisabledNotice"></p>
@@ -1239,9 +1259,7 @@
                 <input type="checkbox" x-model="addDangerAck">
                 <span>I understand this is a dangerous admin action and trust this overlay with root-equivalent power.</span>
               </label>
-              <p class="muted">Type this exact approval phrase to continue:</p>
-              <code class="ov-approval" x-text="addApprovalPhrase()"></code>
-              <input class="ov-input ov-input-wide" type="text" placeholder="Type the exact approval phrase" x-model="addApprovalText">
+              <p class="muted">Review the repository carefully before continuing. Arbor will still require a separate root approval in the shell before the overlay is added.</p>
               <div class="ov-add-row">
                 <button class="jv-btn-refresh" :disabled="addBusy" @click="editAdd()">Back</button>
                 <button class="jv-btn-open" :disabled="addBusy" @click="add()">

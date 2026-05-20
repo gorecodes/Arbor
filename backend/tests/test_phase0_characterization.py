@@ -58,6 +58,7 @@ class InstallSurfaceCharacterizationTests(unittest.TestCase):
         install_script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("/usr/bin/arbor", install_script)
         self.assertIn("/usr/bin/arbor-daemon", install_script)
+        self.assertIn("/usr/bin/arbor-approve", install_script)
 
     def test_install_script_and_service_files_share_the_same_entrypoint_paths(self):
         install_script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
@@ -70,8 +71,16 @@ class InstallSurfaceCharacterizationTests(unittest.TestCase):
         contents = [path.read_text(encoding="utf-8") for path in service_files]
         self.assertIn("/usr/bin/arbor", install_script)
         self.assertIn("/usr/bin/arbor-daemon", install_script)
+        self.assertIn("/usr/bin/arbor-approve", install_script)
         self.assertTrue(any("/usr/bin/arbor" in content for content in contents))
         self.assertTrue(any("/usr/bin/arbor-daemon" in content for content in contents))
+
+    def test_dev_sync_script_installs_arbor_approve_wrapper(self):
+        sync_script = (REPO_ROOT / "sync_installed_dev.sh").read_text(encoding="utf-8")
+        self.assertIn("/usr/bin/arbor-approve", sync_script)
+        self.assertIn("find /usr/lib/python-exec", sync_script)
+        self.assertIn("ln -sf \"$arbor_link\" /usr/bin/arbor-approve", sync_script)
+        self.assertIn("from arbor.approval_cli import main", sync_script)
 
 
 class AuthCharacterizationTests(unittest.TestCase):
@@ -121,6 +130,8 @@ class ApiCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 "purge": True,
                 "approve_danger": False,
                 "approval_text": "",
+                "approval_request_id": "",
+                "approval_token": "",
             },
         )
 
@@ -138,6 +149,13 @@ class ApiCharacterizationTests(unittest.IsolatedAsyncioTestCase):
         response = await web_main.etc_update_resolve("test-token", FakeRequest(["not-a-dict"]))
         self.assertEqual(response.status_code, 400)
         self.assertEqual(json.loads(response.body), {"error": "request body must be an object"})
+
+    async def test_package_info_returns_404_when_daemon_reports_not_found(self):
+        with patch.object(web_main, "query_all", AsyncMock(side_effect=RuntimeError("not found"))):
+            response = await web_main.package_info("test-token", "app-misc/hello")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(json.loads(response.body), {"error": "not found"})
 
 
 class WebSocketCharacterizationTests(unittest.IsolatedAsyncioTestCase):

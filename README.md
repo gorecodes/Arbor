@@ -6,17 +6,36 @@ A local-first web UI for managing Portage from a browser on the same machine.
 
 Designed for Gentoo systems in a local environment. Not intended to be exposed to the internet.
 
+## Root approval flow
+
+**Arbor now uses a shell-first approval model for privileged actions. This is a major part of the safety model, not an optional extra.**
+
+For actions such as install, uninstall, world update, sync, preserved-rebuild, depclean, and other root-backed destructive/admin operations:
+
+1. Start the action in the browser as usual.
+2. Arbor creates a pending approval request and locks the UI.
+3. On a root shell, run `arbor-approve approve <request_id>`.
+4. The browser notices the approval and starts the action automatically.
+
+If you answer **No** in `arbor-approve`, the request is cancelled, the frontend unlocks, and you can retry without reloading the page.
+
+This means:
+
+- the browser can **request** dangerous actions, but it does not directly self-authorize them
+- the approval decision happens in a **root shell**
+- refreshing the UI does **not** lose a pending approval request; Arbor restores it and reopens the relevant page
+
 ## Features
 
 - **Dashboard** — summary cards, recent job activity, compile time by category, source/binary mix, keyword posture, top enabled USE flags, and multi-slot package summaries
 - **Installed packages** — filter installed packages, open package details, inspect metadata, USE state, and runtime dependencies
 - **Search packages** — search the Portage tree and jump to the selected package
 - **USE flags** — inspect global USE state, package-specific overrides, installed build state, and mismatch indicators
-- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and launch install or uninstall from package details
+- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and require shell approval before the real root action starts
 - **Autounmask flow** — for masked install targets, Arbor can write accepted keywords to `/etc/portage/package.accept_keywords`
 - **etc-update review** — after successful installs, pending `._cfg*` files can be reviewed and resolved in the UI
-- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with a separate pretend/confirm flow
-- **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with an explicit danger confirmation flow
+- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with shell approval on privileged steps
+- **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with explicit danger acknowledgement plus shell approval
 - **Jobs** — view active jobs, reopen live output, browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`), and surface recovered orphaned/unknown jobs after daemon restart
 
 ## Dashboard
@@ -75,6 +94,7 @@ That directory is the canonical UI source and the one served in development and 
 
 - Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over HTTPS on port `8443`, and it is **not intended for internet exposure**.
 - Treat the Arbor token as **root-equivalent**. Arbor now authenticates web-to-daemon IPC requests and avoids putting WebSocket tokens in URLs, but an authenticated session can still trigger root-backed Portage actions.
+- Root-backed actions are now intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
 - Safer defaults are enabled out of the box: localhost bind, tighter token/key handling, response security headers, and overlay add disabled by default.
 - Overlay add remains a dangerous admin action. If you enable `ARBOR_ENABLE_OVERLAY_ADD=1`, Arbor requires an explicit approval flow, but adding an untrusted overlay still means trusting it with root-level package build execution.
 - The etc-update resolve path now refuses unsafe symlinked overwrite targets, and job handling is more honest after restarts: active jobs are snapshotted to disk and may come back as `orphaned` or `unknown` rather than being treated as live.
@@ -154,6 +174,15 @@ systemctl start arbor-daemon arbor
 Open `https://localhost:8443` or `https://127.0.0.1:8443` in your browser, accept the self-signed certificate warning, and enter the token from `/etc/arbor/token`.
 
 For a first install, keep Arbor on localhost until you are comfortable with the model: the bearer token unlocks root-backed package actions, and LAN exposure is still a deliberate tradeoff rather than the default.
+
+When you start a privileged action from the UI, expect Arbor to pause and ask for shell approval. Open a root shell and run:
+
+```bash
+arbor-approve list
+arbor-approve approve <request_id>
+```
+
+If you reject the prompt in `arbor-approve`, the request is cancelled and the browser unlocks immediately.
 
 ## Start at boot
 
@@ -260,7 +289,8 @@ systemctl daemon-reload
 ```
 
 ```bash
-rm -f /usr/bin/arbor /usr/bin/arbor-daemon /usr/local/bin/arbor /usr/local/bin/arbor-daemon
+rm -f /usr/bin/arbor /usr/bin/arbor-daemon /usr/bin/arbor-approve \
+      /usr/local/bin/arbor /usr/local/bin/arbor-daemon /usr/local/bin/arbor-approve
 rm -rf /usr/lib/arbor
 userdel arbor
 ```

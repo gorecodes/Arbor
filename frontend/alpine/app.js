@@ -43,17 +43,26 @@
     return { 'Authorization': 'Bearer ' + _getToken(), 'Content-Type': 'application/json' }
   }
 
+  async function _apiError(res) {
+    let detail = 'HTTP ' + res.status
+    try {
+      const data = await res.json()
+      if (data && data.error) detail = data.error
+    } catch (_) {}
+    throw new Error(detail)
+  }
+
   async function _get(path) {
     const res = await fetch(BASE + path, { headers: _hdr() })
     if (res.status === 401) throw new Error('Unauthorized')
-    if (!res.ok) throw new Error('HTTP ' + res.status)
+    if (!res.ok) await _apiError(res)
     return res.json()
   }
 
   async function _post(path, body) {
     const res = await fetch(BASE + path, { method: 'POST', headers: _hdr(), body: JSON.stringify(body) })
     if (res.status === 401) throw new Error('Unauthorized')
-    if (!res.ok) throw new Error('HTTP ' + res.status)
+    if (!res.ok) await _apiError(res)
     return res.json()
   }
 
@@ -62,7 +71,7 @@
     if (body !== undefined) opts.body = JSON.stringify(body)
     const res = await fetch(BASE + path, opts)
     if (res.status === 401) throw new Error('Unauthorized')
-    if (!res.ok) throw new Error('HTTP ' + res.status)
+    if (!res.ok) await _apiError(res)
     return res.json()
   }
 
@@ -84,31 +93,59 @@
 
   const emerge = {
     etcUpdateCheck:   ()                 => _get('/emerge/etc-update'),
-    etcUpdateResolve: (cfg_file, action) => _post('/emerge/etc-update/resolve', { cfg_file, action }),
+    etcUpdateResolve: (cfg_file, action, approval = null) => _post('/emerge/etc-update/resolve', {
+      cfg_file, action,
+      approval_request_id: approval && approval.request_id ? approval.request_id : '',
+      approval_token: approval && approval.approval_token ? approval.approval_token : '',
+    }),
+  }
+
+  const approvalRequests = {
+    create: (cmd, args) => _post('/approval-requests', { cmd, args }),
+    show:   (id)        => _get('/approval-requests/' + encodeURIComponent(id)),
+    list:   (status = 'pending') => _get('/approval-requests?status=' + encodeURIComponent(status)),
   }
 
   const jobs = {
     status:     (id)   => _get('/jobs/' + encodeURIComponent(id)),
     listByAtom: (atom) => _get('/jobs?atom=' + encodeURIComponent(atom)),
     list:       ()     => _get('/jobs'),
-    cancel:     (id)   => _post('/jobs/' + encodeURIComponent(id) + '/cancel', {}),
+    cancel:     (id, approval = null)   => _post('/jobs/' + encodeURIComponent(id) + '/cancel', {
+      approval_request_id: approval && approval.request_id ? approval.request_id : '',
+      approval_token: approval && approval.approval_token ? approval.approval_token : '',
+    }),
   }
 
   const jobHistory = {
     list:   (limit = 50, offset = 0, kind = '') =>
       _get('/history?limit=' + limit + '&offset=' + offset + (kind ? '&kind=' + encodeURIComponent(kind) : '')),
     log:    (id)   => _get('/history/' + encodeURIComponent(id) + '/log'),
-    delete: (id)   => _del('/history/' + encodeURIComponent(id)),
-    purge:  (days) => _post('/history/purge', { days }),
+    delete: (id, approval = null)   => _del('/history/' + encodeURIComponent(id), {
+      approval_request_id: approval && approval.request_id ? approval.request_id : '',
+      approval_token: approval && approval.approval_token ? approval.approval_token : '',
+    }),
+    purge:  (days, approval = null) => _post('/history/purge', {
+      days,
+      approval_request_id: approval && approval.request_id ? approval.request_id : '',
+      approval_token: approval && approval.approval_token ? approval.approval_token : '',
+    }),
   }
 
   const overlays = {
     list:   ()                             => _get('/overlays'),
     config: ()                             => _get('/overlays/config'),
-    add:    (name, sync_type, sync_uri, approve_danger, approval_text) =>
-      _post('/overlays', { name, sync_type, sync_uri, approve_danger, approval_text }),
-    remove: (name, purge = false, approve_danger = false, approval_text = '') =>
-      _del('/overlays/' + encodeURIComponent(name) + (purge ? '?purge=1' : ''), { approve_danger, approval_text }),
+    add:    (name, sync_type, sync_uri, approve_danger, approval_text, approval = null) =>
+      _post('/overlays', {
+        name, sync_type, sync_uri, approve_danger, approval_text,
+        approval_request_id: approval && approval.request_id ? approval.request_id : '',
+        approval_token: approval && approval.approval_token ? approval.approval_token : '',
+      }),
+    remove: (name, purge = false, approve_danger = false, approval_text = '', approval = null) =>
+      _del('/overlays/' + encodeURIComponent(name) + (purge ? '?purge=1' : ''), {
+        approve_danger, approval_text,
+        approval_request_id: approval && approval.request_id ? approval.request_id : '',
+        approval_token: approval && approval.approval_token ? approval.approval_token : '',
+      }),
   }
 
   function _wsProto() { return location.protocol === 'https:' ? 'wss' : 'ws' }
@@ -143,8 +180,238 @@
     return _openAuthedWebSocket('/ws/jobs/' + encodeURIComponent(jobId), onMsg)
   }
 
-  function wsOverlaySync(name, onMsg) {
-    return _openAuthedWebSocket('/ws/overlays/sync/' + encodeURIComponent(name), onMsg)
+  function wsOverlaySync(name, onMsg, extra = {}) {
+    return _openAuthedWebSocket(_withQuery('/ws/overlays/sync/' + encodeURIComponent(name), extra), onMsg)
+  }
+
+  function approvalCommand(request) {
+    return 'arbor-approve approve ' + request.request_id
+  }
+
+  function approvalPending(request) {
+    return !!request && request.status === 'pending'
+  }
+
+  function approvalLines(request) {
+    const lines = [
+      '-- shell approval required before this action can run --',
+      'request id: ' + request.request_id,
+      'action: ' + request.action_cmd + ' [' + request.action_class + ']',
+    ]
+    if (request.action_target) lines.push('target: ' + request.action_target)
+    lines.push('run as root: ' + approvalCommand(request))
+    lines.push('Arbor will start this action automatically after approval is recorded.')
+    lines.push('Other Arbor actions are locked until this approval is resolved.')
+    return lines
+  }
+
+  function approvalResolvedLines(request) {
+    return [
+      '-- shell approval received --',
+      'request id: ' + request.request_id,
+      'starting action automatically…',
+    ]
+  }
+
+  function approvalUnavailableLines(request) {
+    if (request.status === 'cancelled') {
+      return [
+        '-- approval request cancelled --',
+        'request id: ' + request.request_id,
+        'The shell rejected this operation.',
+        'Arbor is unlocked again. Start the action again if needed.',
+      ]
+    }
+    return [
+      '-- approval request is no longer usable --',
+      'request id: ' + request.request_id,
+      'status: ' + request.status,
+      'Start the action again to create a new approval request.',
+    ]
+  }
+
+  function _approvalAtomKey(atom) {
+    return String(atom || '').trim().replace(/^=/, '')
+  }
+
+  function _approvalRequestRoute(request) {
+    if (!request || !request.action_cmd) return null
+    const args = request.args || {}
+    if ((request.action_cmd === 'emerge_install' || request.action_cmd === 'emerge_autounmask') && args.atom) {
+      return { view: 'install', param: _approvalAtomKey(args.atom) }
+    }
+    if (request.action_cmd === 'emerge_uninstall' && args.atom) {
+      return { view: 'uninstall', param: _approvalAtomKey(args.atom) }
+    }
+    if (['emerge_world_update', 'emerge_depclean', 'emerge_preserved_rebuild', 'emerge_sync'].includes(request.action_cmd)) {
+      return { view: 'updates', param: null }
+    }
+    if (['overlay_sync', 'overlay_add', 'overlay_remove'].includes(request.action_cmd)) {
+      return { view: 'overlays', param: null }
+    }
+    if (['job_cancel', 'history_delete', 'history_purge'].includes(request.action_cmd)) {
+      return { view: 'jobs', param: null }
+    }
+    return null
+  }
+
+  function _navigateToApprovalRequest(request) {
+    const route = _approvalRequestRoute(request)
+    if (!route) return
+    const nextHash = route.param != null
+      ? '#/' + route.view + '/' + encodeURIComponent(route.param)
+      : '#/' + route.view
+    if (location.hash !== nextHash) location.hash = nextHash
+  }
+
+  function _approvalGateStore() {
+    return Alpine.store('approvalGate')
+  }
+
+  async function _refreshApprovalGate({ navigate = false } = {}) {
+    if (!Alpine.store('auth').isLoggedIn) {
+      _approvalGateStore().sync([])
+      return null
+    }
+    try {
+      const pending = await approvalRequests.list('pending')
+      const active = _approvalGateStore().sync(Array.isArray(pending) ? pending : [])
+      if (navigate && active) _navigateToApprovalRequest(active)
+      return active
+    } catch (_) {
+      return _approvalGateStore().active
+    }
+  }
+
+  function _syncApprovalGate(request) {
+    const gate = _approvalGateStore()
+    if (approvalPending(request)) gate.set(request)
+    else if (request && request.request_id) gate.clear(request.request_id)
+  }
+
+  function clearApprovalState(state, { keepRequest = false, syncGate = true } = {}) {
+    if (state._approvalPollTimer !== undefined && state._approvalPollTimer !== null) {
+      clearTimeout(state._approvalPollTimer)
+      state._approvalPollTimer = null
+    }
+    if (state._approvalVisibilityHandler) {
+      document.removeEventListener('visibilitychange', state._approvalVisibilityHandler)
+      state._approvalVisibilityHandler = null
+    }
+    if (syncGate && state.approvalRequest && state.approvalRequest.request_id) {
+      _approvalGateStore().clear(state.approvalRequest.request_id)
+    }
+    if (!keepRequest) state.approvalRequest = null
+    state.approvalCommand = ''
+    state.approvalError = null
+    state._approvalPollingRequestId = null
+    state._approvalPollDelay = 1500
+  }
+
+  function _restorePendingApprovalState(state, request, setLines, onApproved) {
+    if (!approvalPending(request)) return false
+    if (
+      state.approvalRequest &&
+      state.approvalRequest.request_id === request.request_id &&
+      (state._approvalPollTimer || state._approvalPollingRequestId === request.request_id)
+    ) {
+      return true
+    }
+    state.approvalRequest = request
+    state.approvalCommand = approvalCommand(request)
+    state.approvalError = null
+    _armApprovalPolling(state, setLines, onApproved)
+    return true
+  }
+
+  function _armApprovalPolling(state, setLines, onApproved) {
+    clearApprovalState(state, { keepRequest: true, syncGate: false })
+    const requestId = state.approvalRequest && state.approvalRequest.request_id
+    if (!requestId) return
+    state._approvalPollingRequestId = requestId
+    state._approvalPollDelay = 1500
+    _syncApprovalGate(state.approvalRequest)
+    if (setLines) setLines(approvalLines(state.approvalRequest))
+    const schedule = (delay) => {
+      const nextDelay = document.hidden ? Math.max(delay, 10000) : delay
+      state._approvalPollTimer = setTimeout(poll, nextDelay)
+    }
+    state._approvalVisibilityHandler = () => {
+      if (document.hidden || !state.approvalRequest || state.approvalRequest.request_id !== requestId) return
+      if (state._approvalPollTimer !== null) clearTimeout(state._approvalPollTimer)
+      state._approvalPollDelay = 1500
+      state._approvalPollTimer = setTimeout(poll, 100)
+    }
+    document.addEventListener('visibilitychange', state._approvalVisibilityHandler)
+    const poll = async () => {
+      if (!state.approvalRequest || state.approvalRequest.request_id !== requestId) return
+      let request
+      try {
+        request = await approvalRequests.show(requestId)
+      } catch (_) {
+        if (state.approvalRequest && state.approvalRequest.request_id === requestId) {
+          state._approvalPollDelay = Math.min(Math.max(state._approvalPollDelay || 1500, 1500) * 2, 30000)
+          schedule(state._approvalPollDelay)
+        }
+        return
+      }
+      if (!state.approvalRequest || state.approvalRequest.request_id !== requestId) return
+      state.approvalRequest = request
+      state.approvalCommand = approvalCommand(request)
+      state.approvalError = null
+      if (approvalPending(request)) {
+        _syncApprovalGate(request)
+        if (setLines) setLines(approvalLines(request))
+        state._approvalPollDelay = Math.min(Math.round(Math.max(state._approvalPollDelay || 1500, 1500) * 1.5), 10000)
+        schedule(state._approvalPollDelay)
+        return
+      }
+      if (request.status === 'approved') {
+        clearApprovalState(state, { keepRequest: true })
+        state.approvalRequest = request
+        if (setLines) setLines(approvalResolvedLines(request))
+        try {
+          await onApproved()
+        } catch (e) {
+          state.approvalError = e.message
+          if (setLines) setLines(approvalResolvedLines(request).concat(['Error: ' + e.message]))
+        }
+        return
+      }
+      clearApprovalState(state)
+      if (setLines) setLines(approvalUnavailableLines(request))
+      _refreshApprovalGate({ navigate: false })
+    }
+    schedule(state._approvalPollDelay)
+  }
+
+  async function _approvalRequestReady(state, cmd, args, setLines, onApproved) {
+    let request = state.approvalRequest
+    if (request && request.request_id) {
+      request = await approvalRequests.show(request.request_id)
+      if (request.status !== 'pending' && request.status !== 'approved') {
+        clearApprovalState(state)
+        request = null
+      }
+    }
+    if (!request) {
+      request = await approvalRequests.create(cmd, args)
+    } else if (!request.request_id) {
+      request = await approvalRequests.create(cmd, args)
+    }
+    state.approvalRequest = request
+    state.approvalCommand = approvalCommand(request)
+    state.approvalError = null
+    if (approvalPending(request)) {
+      _armApprovalPolling(state, setLines, onApproved)
+      return null
+    }
+    clearApprovalState(state, { keepRequest: true })
+    if (request.status !== 'approved') {
+      if (setLines) setLines(approvalUnavailableLines(request))
+      return null
+    }
+    return { request_id: request.request_id, approval_token: '' }
   }
 
   function detachWs(ws) {
@@ -387,17 +654,42 @@
       _timer: null,
       init() {
         this._loadSummary()
+        this._restorePendingApproval()
         this._timer = setInterval(() => {
           if (!Alpine.store('auth').isLoggedIn) return
           this._loadSummary()
         }, 15000)
         this.$watch('$store.auth.token', token => {
-          if (token) this._loadSummary()
+          if (token) {
+            this._loadSummary()
+            this._restorePendingApproval()
+          }
+        })
+        this.$watch('$store.approvalGate.active', request => {
+          if (approvalPending(request)) _navigateToApprovalRequest(request)
         })
       },
       isActive(id) { return isPrimaryRouteActive(id) },
-      nav(id) { navigate(id) },
+      nav(id) {
+        if (Alpine.store('approvalGate').active) return
+        navigate(id)
+      },
       logout() { Alpine.store('auth').logout() },
+      approvalPending() {
+        return Alpine.store('approvalGate').active
+      },
+      approvalDetailLines() {
+        const request = Alpine.store('approvalGate').active
+        if (!request) return []
+        const lines = approvalLines(request)
+        const queued = Math.max(0, Alpine.store('approvalGate').pendingCount() - 1)
+        if (queued > 0) lines.push(queued + ' more pending approval' + (queued === 1 ? '' : 's') + ' queued after this one.')
+        return lines
+      },
+      async _restorePendingApproval() {
+        if (!Alpine.store('auth').isLoggedIn) return
+        await _refreshApprovalGate({ navigate: true })
+      },
       async _loadSummary() {
         try {
           const [status, activeJobs] = await Promise.all([
@@ -2079,9 +2371,14 @@ ${labels}
       histExpanded: null, histLines: [], histLinesLoading: false,
       // purge
       purgeDays: 30, purgeMsg: null,
+      // approval flow
+      approvalRequest: null, approvalCommand: '', approvalError: null, approvalLines: [],
+      _approvalPollTimer: null,
       init() {
         this._load().then(() => this._scheduleRefresh())
         this.$watch('$store.router.view', v => { if (v === 'jobs') { this._load(); if (this.tab === 'history') this._loadHistory(0) } })
+        this.$watch('$store.approvalGate.active', request => { this._restorePendingApproval(request) })
+        this._restorePendingApproval(_approvalGateStore().active)
       },
       switchTab(t) {
         this.tab = t
@@ -2136,8 +2433,7 @@ ${labels}
       async kill(jobId, e) {
         e.stopPropagation()
         if (!confirm('Kill this job?')) return
-        try { await jobs.cancel(jobId); await this._load() }
-        catch(e) { alert('Kill failed: ' + e.message) }
+        await this._runKill(jobId)
       },
       openPanel(job, e) {
         e.stopPropagation()
@@ -2177,21 +2473,119 @@ ${labels}
       async deleteEntry(jobId, e) {
         e.stopPropagation()
         if (!confirm('Delete this history entry?')) return
-        try {
-          await jobHistory.delete(jobId)
-          this.histList = this.histList.filter(j => j.job_id !== jobId)
-          this.histTotal = Math.max(0, this.histTotal - 1)
-          if (this.histExpanded === jobId) { this.histExpanded = null; this.histLines = [] }
-        } catch(e) { alert('Delete failed: ' + e.message) }
+        await this._runDeleteEntry(jobId)
       },
       async purge() {
         if (!confirm('Delete all history older than ' + this.purgeDays + ' days?')) return
+        await this._runPurge(this.purgeDays)
+      },
+      async _runKill(jobId) {
+        let approval
         try {
-          const res = await jobHistory.purge(this.purgeDays)
+          approval = await _approvalRequestReady(
+            this,
+            'job_cancel',
+            { job_id: jobId },
+            lines => { this.approvalLines = lines },
+            () => this._runKill(jobId),
+          )
+        } catch (e) {
+          this.approvalError = e.message
+          this.approvalLines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) return
+        try {
+          await jobs.cancel(jobId, approval)
+          clearApprovalState(this)
+          this.approvalLines = []
+          await this._load()
+        } catch (e) {
+          this.approvalError = e.message
+          this.approvalLines = ['Error: ' + e.message]
+        }
+      },
+      async _runDeleteEntry(jobId) {
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            this,
+            'history_delete',
+            { job_id: jobId },
+            lines => { this.approvalLines = lines },
+            () => this._runDeleteEntry(jobId),
+          )
+        } catch (e) {
+          this.approvalError = e.message
+          this.approvalLines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) return
+        try {
+          await jobHistory.delete(jobId, approval)
+          clearApprovalState(this)
+          this.approvalLines = []
+          this.histList = this.histList.filter(j => j.job_id !== jobId)
+          this.histTotal = Math.max(0, this.histTotal - 1)
+          if (this.histExpanded === jobId) { this.histExpanded = null; this.histLines = [] }
+        } catch (e) {
+          this.approvalError = e.message
+          this.approvalLines = ['Error: ' + e.message]
+        }
+      },
+      async _runPurge(days) {
+        let approval
+        this.purgeMsg = null
+        try {
+          approval = await _approvalRequestReady(
+            this,
+            'history_purge',
+            { days },
+            lines => { this.approvalLines = lines },
+            () => this._runPurge(days),
+          )
+        } catch (e) {
+          this.approvalError = e.message
+          this.approvalLines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) return
+        try {
+          const res = await jobHistory.purge(days, approval)
+          clearApprovalState(this)
+          this.approvalLines = []
           this.purgeMsg = 'Deleted ' + res.deleted + ' entries.'
           this._loadHistory(0)
           setTimeout(() => { this.purgeMsg = null }, 3000)
-        } catch(e) { alert('Purge failed: ' + e.message) }
+        } catch (e) {
+          this.approvalError = e.message
+          this.approvalLines = ['Error: ' + e.message]
+        }
+      },
+      _restorePendingApproval(request) {
+        if (!approvalPending(request)) return false
+        let onApproved = null
+        if (request.action_cmd === 'job_cancel' && request.args?.job_id) {
+          this.tab = 'active'
+          onApproved = () => this._runKill(request.args.job_id)
+        } else if (request.action_cmd === 'history_delete' && request.args?.job_id) {
+          this.tab = 'history'
+          if (this.histList.length === 0 && !this.histLoading) this._loadHistory(0)
+          onApproved = () => this._runDeleteEntry(request.args.job_id)
+        } else if (request.action_cmd === 'history_purge' && request.args?.days) {
+          this.tab = 'history'
+          this.purgeDays = request.args.days
+          if (this.histList.length === 0 && !this.histLoading) this._loadHistory(0)
+          onApproved = () => this._runPurge(request.args.days)
+        } else {
+          return false
+        }
+        return _restorePendingApprovalState(
+          this,
+          request,
+          lines => { this.approvalLines = lines },
+          onApproved,
+        )
       },
       histHasMore() { return this.histOffset < this.histTotal },
       histRemaining() { return this.histTotal - this.histOffset },
@@ -2236,16 +2630,22 @@ ${labels}
     const FLUSH_MS = 80
     return {
       step: 'pretend', lines: [], running: false, returncode: null, ws: null,
-      _pending: [], _flushTimer: null,
+      approvalRequest: null, approvalCommand: '', approvalError: null,
+      _pending: [], _flushTimer: null, _approvalPollTimer: null,
       init() {
         const atom = Alpine.store('router').uninstallAtom
         if (atom) this._setupForAtom(atom)
         this.$watch('$store.router.uninstallAtom', atom => { if (atom) this._setupForAtom(atom) })
+        this.$watch('$store.approvalGate.active', request => {
+          const currentAtom = Alpine.store('router').uninstallAtom
+          if (currentAtom) this._restorePendingApproval(currentAtom, request)
+        })
       },
       async _setupForAtom(atom) {
         detachWs(this.ws); this.ws = null
         this._resetLines()
         this.step = 'pretend'; this.running = false; this.returncode = null
+        clearApprovalState(this, { syncGate: false })
         const savedId = _scopedStorageGet('arbor_uninstall_' + atom)
         if (savedId) {
           try {
@@ -2262,6 +2662,19 @@ ${labels}
           const running = active.find(j => j.status === 'running' && j.kind === 'uninstall')
           if (running) { _scopedStorageSet('arbor_uninstall_' + atom, running.job_id); this._attachToJob(atom, running.job_id); return }
         } catch (_) {}
+        this._restorePendingApproval(atom, _approvalGateStore().active)
+      },
+      _restorePendingApproval(atom, request) {
+        if (!approvalPending(request) || request.action_cmd !== 'emerge_uninstall' || _approvalAtomKey(request.args?.atom) !== _approvalAtomKey(atom)) return false
+        this.step = 'pretend'
+        this.returncode = 0
+        this._resetLines()
+        return _restorePendingApprovalState(
+          this,
+          request,
+          requestLines => { this._resetLines(); this.lines = requestLines },
+          () => this.runUninstall(),
+        )
       },
       _pushLine(l) {
         this._pending.push(l)
@@ -2283,14 +2696,35 @@ ${labels}
       },
       runPretend() {
         const atom = Alpine.store('router').uninstallAtom
+        clearApprovalState(this, { syncGate: false })
         this.step = 'pretend'; this.returncode = null; this._resetLines(); this.running = true
         this.ws = wsEmerge('uninstall-pretend', atom, (msg) => {
           if (msg.line !== undefined) this._pushLine(msg.line)
           if (msg.done) { this._flushLines(); this.running = false; this.returncode = msg.returncode ?? null; this.ws = null }
         })
       },
-      runUninstall() {
+      async runUninstall() {
         const atom = Alpine.store('router').uninstallAtom
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            this,
+            'emerge_uninstall',
+            { atom },
+            requestLines => { this._resetLines(); this.lines = requestLines },
+            () => this.runUninstall(),
+          )
+        } catch (e) {
+          this.approvalError = e.message
+          this._resetLines()
+          this.lines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) {
+          this.step = 'pretend'
+          this.running = false
+          return
+        }
         this.step = 'uninstall'; this.returncode = null; this._resetLines(); this.running = true
         this.ws = wsEmerge('uninstall', atom, (msg) => {
           if (msg.job_id) { _scopedStorageSet('arbor_uninstall_' + atom, msg.job_id); return }
@@ -2298,12 +2732,13 @@ ${labels}
           if (msg.done) {
             this._flushLines(); this.running = false; this.returncode = msg.returncode ?? null; this.ws = null
             _scopedStorageRemove('arbor_uninstall_' + atom)
+            clearApprovalState(this)
             if (this.returncode === 0) {
               invalidatePackageState(atom)
               this.step = 'done'
             }
           }
-        })
+        }, { approval_request_id: approval.request_id })
       },
       retry() { this.step === 'pretend' ? this.runPretend() : this.runUninstall() },
       _attachToJob(atom, id) {
@@ -2328,16 +2763,18 @@ ${labels}
         navigate('packages', Alpine.store('router').uninstallAtom)
       },
       closeDone() {
-        navigate('packages', Alpine.store('router').uninstallAtom)
+        navigate('packages')
       },
       stepTitle() {
         const atom = Alpine.store('router').uninstallAtom || ''
+        if (approvalPending(this.approvalRequest)) return 'Approval required — ' + atom
         if (this.step === 'pretend')   return 'Pretend uninstall — ' + atom
         if (this.step === 'uninstall') return 'Uninstalling — ' + atom
         return 'Done — ' + atom
       },
       statusClass() { return this.returncode === 0 ? 'ok' : this.returncode !== null ? 'err' : '' },
       statusText()  {
+        if (approvalPending(this.approvalRequest)) return 'run "' + this.approvalCommand + '" as root; Arbor will continue automatically'
         return this.returncode === 0
           ? 'removed successfully'
           : this.returncode !== null ? 'failed (exit ' + this.returncode + ')' : ''
@@ -2368,18 +2805,24 @@ ${labels}
     return {
       ...makeEmergeOptions('arbor_opts_install', INSTALL_OPTS_SCHEMA, 'emerge', ['--verbose', '--color=n']),
       step: 'pretend', lines: [], running: false, returncode: null, ws: null,
+      approvalRequest: null, approvalCommand: '', approvalError: null,
       needsUnmask: false, etcFiles: [],
-      _pending: [], _flushTimer: null, _attachRetries: 0,
+      _pending: [], _flushTimer: null, _attachRetries: 0, _approvalPollTimer: null,
       init() {
         this.eoLoad()
         const atom = Alpine.store('router').installAtom
         if (atom) this._setupForAtom(atom)
         this.$watch('$store.router.installAtom', atom => { if (atom) this._setupForAtom(atom) })
+        this.$watch('$store.approvalGate.active', request => {
+          const currentAtom = Alpine.store('router').installAtom
+          if (currentAtom) this._restorePendingApproval(currentAtom, request)
+        })
       },
       async _setupForAtom(atom) {
         detachWs(this.ws); this.ws = null
         this._resetLines()
         this.step = 'pretend'; this.running = false; this.returncode = null
+        clearApprovalState(this, { syncGate: false })
         this.needsUnmask = false; this.etcFiles = []; this._attachRetries = 0
         const savedId = _scopedStorageGet('arbor_job_' + atom)
         if (savedId) {
@@ -2398,6 +2841,28 @@ ${labels}
           const running = active.find(j => j.status === 'running')
           if (running) { _scopedStorageSet('arbor_job_' + atom, running.job_id); this._attachToJob(atom, running.job_id); return }
         } catch (_) {}
+        this._restorePendingApproval(atom, _approvalGateStore().active)
+      },
+      _restorePendingApproval(atom, request) {
+        if (!approvalPending(request) || _approvalAtomKey(request.args?.atom) !== _approvalAtomKey(atom)) return false
+        if (request.action_cmd === 'emerge_install') {
+          this.step = 'pretend'
+          this.returncode = 0
+          this.needsUnmask = false
+        } else if (request.action_cmd === 'emerge_autounmask') {
+          this.step = 'pretend'
+          this.returncode = 0
+          this.needsUnmask = true
+        } else {
+          return false
+        }
+        this._resetLines()
+        return _restorePendingApprovalState(
+          this,
+          request,
+          requestLines => { this._resetLines(); this.lines = requestLines },
+          () => request.action_cmd === 'emerge_autounmask' ? this.runAutounmask() : this.runInstall(),
+        )
       },
       _pushLine(l) {
         this._pending.push(l)
@@ -2419,6 +2884,7 @@ ${labels}
       },
       runPretend(clean) {
         const atom = Alpine.store('router').installAtom
+        clearApprovalState(this)
         this.step = 'pretend'; this.returncode = null; this.needsUnmask = false
         this._resetLines(); this.running = true
         const extra = { opts: this.eoOpts() }
@@ -2432,8 +2898,28 @@ ${labels}
           }
         }, extra)
       },
-      runAutounmask() {
+      async runAutounmask() {
         const atom = Alpine.store('router').installAtom
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            this,
+            'emerge_autounmask',
+            { atom },
+            requestLines => { this._resetLines(); this.lines = requestLines },
+            () => this.runAutounmask(),
+          )
+        } catch (e) {
+          this.approvalError = e.message
+          this._resetLines()
+          this.lines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) {
+          this.step = 'pretend'
+          this.running = false
+          return
+        }
         this.step = 'autounmask'; this.returncode = null
         this._resetLines(); this.running = true
         this.ws = wsEmerge('autounmask', atom, (msg) => {
@@ -2441,9 +2927,10 @@ ${labels}
           if (msg.done) {
             this._flushLines(); this.running = false
             this.returncode = msg.returncode ?? null; this.ws = null
+            clearApprovalState(this)
             setTimeout(() => this.runPretend(true), 600)
           }
-        })
+        }, { approval_request_id: approval.request_id })
       },
       async _afterInstallDone(rc) {
         if (rc === 0) {
@@ -2476,8 +2963,28 @@ ${labels}
           }
         })
       },
-      runInstall() {
+      async runInstall() {
         const atom = Alpine.store('router').installAtom
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            this,
+            'emerge_install',
+            { atom, opts: this.eoOpts() },
+            requestLines => { this._resetLines(); this.lines = requestLines },
+            () => this.runInstall(),
+          )
+        } catch (e) {
+          this.approvalError = e.message
+          this._resetLines()
+          this.lines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) {
+          this.step = 'pretend'
+          this.running = false
+          return
+        }
         this.step = 'install'; this.returncode = null
         this._resetLines(); this.running = true
         this.ws = wsEmerge('install', atom, async (msg) => {
@@ -2487,13 +2994,26 @@ ${labels}
             this._flushLines(); this.running = false
             this.returncode = msg.returncode ?? null; this.ws = null
             _scopedStorageRemove('arbor_job_' + atom)
+            clearApprovalState(this)
             await this._afterInstallDone(msg.returncode ?? -1)
           }
-        }, { opts: this.eoOpts() })
+        }, { opts: this.eoOpts(), approval_request_id: approval.request_id })
       },
       async resolveFile(file, action) {
         try {
-          await emerge.etcUpdateResolve(file.cfg_file, action)
+          const approval = await _approvalRequestReady(
+            this,
+            'etc_update_resolve',
+            { cfg_file: file.cfg_file, action },
+            requestLines => { this._resetLines(); this.lines = requestLines },
+            () => this.resolveFile(file, action),
+          )
+          if (!approval) {
+            this.step = 'install'
+            return
+          }
+          await emerge.etcUpdateResolve(file.cfg_file, action, approval)
+          clearApprovalState(this)
           this.etcFiles = this.etcFiles.map(f => f.cfg_file === file.cfg_file ? { ...f, resolved: true, action } : f)
           if (this.etcFiles.every(f => f.resolved)) {
             invalidatePackageState(Alpine.store('router').installAtom)
@@ -2506,6 +3026,7 @@ ${labels}
       closeDone() { navigate('packages', Alpine.store('router').installAtom) },
       stepTitle() {
         const atom = Alpine.store('router').installAtom || ''
+        if (approvalPending(this.approvalRequest)) return 'Approval required — ' + atom
         if (this.step === 'pretend')    return 'Pretend — ' + atom
         if (this.step === 'autounmask') return 'Accepting keywords — ' + atom
         if (this.step === 'install')    return 'Installing — ' + atom
@@ -2514,6 +3035,7 @@ ${labels}
       },
       statusClass() { return this.returncode === 0 ? 'ok' : this.returncode !== null ? 'err' : '' },
       statusText() {
+        if (approvalPending(this.approvalRequest)) return 'run "' + this.approvalCommand + '" as root; Arbor will continue automatically'
         return this.returncode === 0
           ? 'completed successfully'
           : this.returncode !== null ? 'failed (exit ' + this.returncode + ')' : ''
@@ -2597,7 +3119,7 @@ ${labels}
 
   function updatesComponent() {
     const MAX_LINES = 5000
-    const mkOp = (expanded) => ({ lines: [], running: false, rc: null, ws: null, expanded })
+    const mkOp = (expanded) => ({ lines: [], running: false, rc: null, ws: null, expanded, approvalRequest: null, approvalCommand: '', _approvalPollTimer: null })
     return {
       ...makeEmergeOptions('arbor_opts_world', UPDATE_OPTS_SCHEMA, 'emerge', ['--update', '--deep', '--newuse', '--with-bdeps=y', '--color=n']),
       sync:         mkOp(true),
@@ -2609,9 +3131,10 @@ ${labels}
       selectedAction: 'worldPretend',
       init() {
         this.eoLoad()
-        this.$watch('$store.router.view', v => { if (v === 'updates') { this._resumeAll(); this._loadSidebar() } })
+        this.$watch('$store.router.view', v => { if (v === 'updates') { this._resumeAll(); this._loadSidebar(); this._restorePendingApproval(_approvalGateStore().active) } })
+        this.$watch('$store.approvalGate.active', request => { this._restorePendingApproval(request) })
         this._loadSidebar()
-        this._resumeAll()
+        this._resumeAll().then(() => this._restorePendingApproval(_approvalGateStore().active))
       },
       async _loadSidebar() {
         try {
@@ -2660,6 +3183,8 @@ ${labels}
         return this[id] || null
       },
       actionSummary(id) {
+        const op = this.opFor(id)
+        if (op && approvalPending(op.approvalRequest)) return 'Shell approval required before this action can start.'
         return MAINTENANCE_ACTIONS[id]?.summary || ''
       },
       selectedActionMeta() {
@@ -2694,6 +3219,9 @@ ${labels}
       activityStatus(id = this.selectedActionMeta().id) {
         const op = this.opFor(id)
         if (!op) return { tone: 'muted', label: 'Idle', detail: 'No active job.' }
+        if (approvalPending(op.approvalRequest)) {
+          return { tone: 'warn', label: 'Awaiting approval', detail: 'Run "' + op.approvalCommand + '" as root; Arbor will continue automatically.' }
+        }
         if (id === 'depclean' && this.depclean.dcStep === 'confirm' && !op.running) {
           return { tone: 'warn', label: 'Awaiting confirmation', detail: 'Pretend completed. Review the removal set before starting depclean.' }
         }
@@ -2711,6 +3239,7 @@ ${labels}
       lastResultText(id = this.selectedActionMeta().id) {
         const op = this.opFor(id)
         if (!op) return 'No completed run yet.'
+        if (approvalPending(op.approvalRequest)) return 'Pending shell approval via ' + op.approvalCommand + '.'
         if (id === 'depclean' && this.depclean.dcStep === 'confirm' && !op.running) {
           return this.lastOutputLine(id) || 'Pretend finished successfully; removal has not started yet.'
         }
@@ -2732,6 +3261,7 @@ ${labels}
       cardState(id) {
         const op = this.opFor(id)
         if (!op) return { tone: 'muted', text: 'idle' }
+        if (approvalPending(op.approvalRequest)) return { tone: 'warn', text: 'approval' }
         if (id === 'depclean' && this.depclean.dcStep === 'confirm' && !op.running) return { tone: 'warn', text: 'review' }
         if (op.running) return { tone: 'info', text: 'running' }
         if (op.rc === 0) return { tone: 'ok', text: 'done' }
@@ -2769,6 +3299,47 @@ ${labels}
         if (op.lines.length > MAX_LINES) op.lines.splice(0, op.lines.length - MAX_LINES)
         this.$nextTick(() => { const el = this.$refs[refName]; if (el) el.scrollTop = el.scrollHeight })
       },
+      async _requestOpApproval(op, cmd, args) {
+        const approval = await _approvalRequestReady(op, cmd, args, (lines) => { op.lines = lines }, () => {
+          if (cmd === 'emerge_sync') return this._startSync()
+          if (cmd === 'emerge_world_update') return this._startWorldUpdate()
+          if (cmd === 'emerge_depclean') return this._startDepclean()
+          if (cmd === 'emerge_preserved_rebuild') return this._startPreserved()
+        })
+        op.expanded = true
+        op.running = false
+        op.rc = null
+        return approval
+      },
+      _restorePendingApproval(request) {
+        if (!approvalPending(request)) return false
+        let op = null
+        let onApproved = null
+        if (request.action_cmd === 'emerge_sync') {
+          this.selectAction('sync')
+          op = this.sync
+          onApproved = () => this._startSync()
+        } else if (request.action_cmd === 'emerge_world_update') {
+          this.selectAction('worldUpdate')
+          op = this.worldUpdate
+          onApproved = () => this._startWorldUpdate()
+        } else if (request.action_cmd === 'emerge_depclean') {
+          this.selectAction('depclean')
+          this.depclean.dcStep = 'confirm'
+          op = this.depclean
+          onApproved = () => this._startDepclean()
+        } else if (request.action_cmd === 'emerge_preserved_rebuild') {
+          this.selectAction('preserved')
+          op = this.preserved
+          onApproved = () => this._startPreserved()
+        } else {
+          return false
+        }
+        op.expanded = true
+        op.running = false
+        op.rc = null
+        return _restorePendingApprovalState(op, request, lines => { op.lines = lines }, onApproved)
+      },
       lineClass(l) {
         if (/^\[ebuild/.test(l) || /^>>> /.test(l) || /Completed/.test(l)) return 'hi-ok'
         if (/^!!!/.test(l) || /[Ee]rror/.test(l)) return 'hi-err'
@@ -2778,12 +3349,25 @@ ${labels}
       statusClass(rc) { return rc === null ? '' : rc === 0 ? 'ok' : 'err' },
       startSync() {
         this.selectAction('sync')
+        this._startSync()
+      },
+      async _startSync() {
         this.sync.lines = []; this.sync.rc = null; this.sync.running = true; this.sync.expanded = true
+        let approval
+        try {
+          approval = await this._requestOpApproval(this.sync, 'emerge_sync', {})
+        } catch (e) {
+          this.sync.lines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) return
+        clearApprovalState(this.sync)
+        this.sync.running = true
         this.sync.ws = wsGlobalEmerge('sync', (msg) => {
           if (msg.job_id) { _scopedStorageSet(_JOB_META.sync.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.sync, 'syncTerm', msg.line)
           if (msg.done) { this.sync.running = false; this.sync.rc = msg.returncode ?? null; this.sync.ws = null; _scopedStorageRemove(_JOB_META.sync.storage) }
-        })
+        }, { approval_request_id: approval.request_id })
       },
       _attachSync(id) {
         this.selectAction('sync')
@@ -2812,12 +3396,25 @@ ${labels}
       },
       startWorldUpdate() {
         this.selectAction('worldUpdate')
+        this._startWorldUpdate()
+      },
+      async _startWorldUpdate() {
         this.worldUpdate.lines = []; this.worldUpdate.rc = null; this.worldUpdate.running = true; this.worldUpdate.expanded = true
+        let approval
+        try {
+          approval = await this._requestOpApproval(this.worldUpdate, 'emerge_world_update', { opts: this.eoOpts() })
+        } catch (e) {
+          this.worldUpdate.lines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) return
+        clearApprovalState(this.worldUpdate)
+        this.worldUpdate.running = true
         this.worldUpdate.ws = wsGlobalEmerge('world-update', (msg) => {
           if (msg.job_id) { _scopedStorageSet(_JOB_META.worldUpdate.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.worldUpdate, 'wuTerm', msg.line)
           if (msg.done) { this.worldUpdate.running = false; this.worldUpdate.rc = msg.returncode ?? null; this.worldUpdate.ws = null; _scopedStorageRemove(_JOB_META.worldUpdate.storage) }
-        }, { opts: this.eoOpts() })
+        }, { opts: this.eoOpts(), approval_request_id: approval.request_id })
       },
       _attachWorldUpdate(id) {
         this.selectAction('worldUpdate')
@@ -2856,12 +3453,28 @@ ${labels}
       startDepclean() {
         this.selectAction('depclean')
         _scopedStorageSet('arbor_depclean_ran', '1')
+        this._startDepclean()
+      },
+      async _startDepclean() {
         this.depclean.lines = []; this.depclean.rc = null; this.depclean.running = true; this.depclean.expanded = true; this.depclean.dcStep = 'running'
+        let approval
+        try {
+          approval = await this._requestOpApproval(this.depclean, 'emerge_depclean', {})
+        } catch (e) {
+          this.depclean.lines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) {
+          this.depclean.dcStep = 'confirm'
+          return
+        }
+        clearApprovalState(this.depclean)
+        this.depclean.running = true
         this.depclean.ws = wsGlobalEmerge('depclean', (msg) => {
           if (msg.job_id) { _scopedStorageSet(_JOB_META.depclean.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.depclean, 'dcTerm', msg.line)
           if (msg.done) { this.depclean.running = false; this.depclean.rc = msg.returncode ?? null; this.depclean.ws = null; _scopedStorageRemove(_JOB_META.depclean.storage) }
-        })
+        }, { approval_request_id: approval.request_id })
       },
       _attachDepclean(id) {
         this.selectAction('depclean')
@@ -2873,12 +3486,25 @@ ${labels}
       },
       startPreserved() {
         this.selectAction('preserved')
+        this._startPreserved()
+      },
+      async _startPreserved() {
         this.preserved.lines = []; this.preserved.rc = null; this.preserved.running = true; this.preserved.expanded = true
+        let approval
+        try {
+          approval = await this._requestOpApproval(this.preserved, 'emerge_preserved_rebuild', {})
+        } catch (e) {
+          this.preserved.lines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) return
+        clearApprovalState(this.preserved)
+        this.preserved.running = true
         this.preserved.ws = wsGlobalEmerge('preserved-rebuild', (msg) => {
           if (msg.job_id) { _scopedStorageSet(_JOB_META.preserved.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.preserved, 'psTerm', msg.line)
           if (msg.done) { this.preserved.running = false; this.preserved.rc = msg.returncode ?? null; this.preserved.ws = null; _scopedStorageRemove(_JOB_META.preserved.storage) }
-        })
+        }, { approval_request_id: approval.request_id })
       },
       _attachPreserved(id) {
         this.selectAction('preserved')
@@ -2903,6 +3529,48 @@ ${labels}
                  : localStorage.removeItem('arbor_token')
       },
       logout() { this.set('') }
+    })
+
+    Alpine.store('approvalGate', {
+      active: null,
+      pending: [],
+      set(request) {
+        if (!approvalPending(request)) {
+          if (request && request.request_id) this.clear(request.request_id)
+          return
+        }
+        const next = this.pending.filter(item => item && item.request_id !== request.request_id)
+        next.unshift(request)
+        next.sort((a, b) => Number(b?.created_at || 0) - Number(a?.created_at || 0))
+        this.pending = next
+        this.active = request || null
+      },
+      sync(requests) {
+        const next = (Array.isArray(requests) ? requests : [])
+          .filter(approvalPending)
+          .sort((a, b) => Number(b?.created_at || 0) - Number(a?.created_at || 0))
+        this.pending = next
+        if (!next.length) {
+          this.active = null
+          return null
+        }
+        const currentId = this.active && this.active.request_id
+        this.active = next.find(item => item.request_id === currentId) || next[0]
+        return this.active
+      },
+      clear(requestId = '') {
+        if (!requestId) {
+          this.pending = []
+          this.active = null
+          return
+        }
+        this.pending = this.pending.filter(item => item && item.request_id !== requestId)
+        if (this.active && this.active.request_id === requestId) this.active = null
+        if (!this.active && this.pending.length > 0) this.active = this.pending[0]
+      },
+      pendingCount() {
+        return this.pending.length
+      },
     })
 
     Alpine.store('router', {
@@ -2944,14 +3612,19 @@ ${labels}
       list: [], loading: true, error: null,
       // add form
       addShow: false, addStep: 'form', addEnabled: null, addConfigError: null, addName: '', addSyncType: 'git', addSyncUri: '',
-      addBusy: false, addError: null, addInfo: null, addDisabledNotice: null, addDangerAck: false, addApprovalText: '',
+      addBusy: false, addError: null, addInfo: null, addDisabledNotice: null, addDangerAck: false,
       expanded: null,
       // flat top-level sync state (one active sync at a time)
       syncName: null, syncRunning: false, syncLines: [], syncRc: null,
+      // approval flow
+      approvalRequest: null, approvalCommand: '', approvalError: null, approvalLines: [],
+      _approvalPollTimer: null,
 
       init() {
         this._load()
-        this.$watch('$store.router.view', v => { if (v === 'overlays') this._load() })
+        this.$watch('$store.router.view', v => { if (v === 'overlays') { this._load(); this._restorePendingApproval(_approvalGateStore().active) } })
+        this.$watch('$store.approvalGate.active', request => { this._restorePendingApproval(request) })
+        this._restorePendingApproval(_approvalGateStore().active)
       },
       async _load() {
         this.loading = true; this.error = null; this.addConfigError = null; this.addEnabled = null
@@ -2977,7 +3650,17 @@ ${labels}
         this.addInfo = null
         this.addDisabledNotice = null
         this.addDangerAck = false
-        this.addApprovalText = ''
+      },
+      _applyAddRequest(request) {
+        const args = request?.args || {}
+        this.addShow = true
+        this.addStep = 'confirm'
+        this.addName = (args.name || '').trim()
+        this.addSyncType = (args.sync_type || 'git').trim() || 'git'
+        this.addSyncUri = (args.sync_uri || '').trim()
+        this.addDangerAck = !!args.approve_danger
+        this.addBusy = false
+        this.addError = null
       },
       toggleAdd() {
         this.addShow = !this.addShow
@@ -2989,9 +3672,6 @@ ${labels}
             ? 'Overlay add is disabled in the backend. You can review the form, but the server will reject the add until ARBOR_ENABLE_OVERLAY_ADD is enabled and Arbor is restarted.'
             : null
         }
-      },
-      addApprovalPhrase() {
-        return 'ADD ' + this.addName.trim() + ' ' + this.addSyncUri.trim()
       },
       reviewAdd() {
         this.addError = null
@@ -3008,15 +3688,21 @@ ${labels}
         this.addError = null
         this.addInfo = null
         if (!this.addDangerAck) { this.addError = 'You must acknowledge the root-equivalent trust warning'; return }
-        if (this.addApprovalText.trim() !== this.addApprovalPhrase()) {
-          this.addError = 'Confirmation text must exactly match the approval phrase'
-          return
-        }
         this.addBusy = true
         try {
           const name = this.addName.trim()
           const syncUri = this.addSyncUri.trim()
-          const res = await overlays.add(name, this.addSyncType, syncUri, this.addDangerAck, this.addApprovalText.trim())
+          const approval = await _approvalRequestReady(
+            this,
+            'overlay_add',
+            { name, sync_type: this.addSyncType, sync_uri: syncUri, approve_danger: this.addDangerAck, approval_text: '' },
+            lines => { this.approvalLines = lines },
+            () => this.add(),
+          )
+          if (!approval) return
+          const res = await overlays.add(name, this.addSyncType, syncUri, this.addDangerAck, '', approval)
+          clearApprovalState(this)
+          this.approvalLines = []
           this.addShow = false
           this._resetAdd()
           this.addInfo = res.warning || 'Overlay added. Run sync explicitly after reviewing it.'
@@ -3024,13 +3710,19 @@ ${labels}
         } catch(e) { this.addError = e.message }
         finally { this.addBusy = false }
       },
-      async remove(name, purge) {
-        const verb = purge ? 'PURGE' : 'REMOVE'
-        if (!confirm('Remove overlay "' + name + '"?' + (purge ? '\n\nThis will also delete the local files.' : ''))) return
-        const approvalText = prompt('Type "' + verb + ' ' + name + '" to confirm.')
-        if (approvalText === null) return
+      async _removeConfirmed(name, purge) {
         try {
-          await overlays.remove(name, purge, true, approvalText.trim())
+          const approval = await _approvalRequestReady(
+            this,
+            'overlay_remove',
+            { name, purge, approve_danger: true, approval_text: '' },
+            lines => { this.approvalLines = lines },
+            () => this._removeConfirmed(name, purge),
+          )
+          if (!approval) return
+          await overlays.remove(name, purge, true, '', approval)
+          clearApprovalState(this)
+          this.approvalLines = []
           if (this.expanded === name) this.expanded = null
           if (this.syncName === name) {
             if (_ws) { try { _ws.close() } catch(_) {} _ws = null }
@@ -3039,12 +3731,33 @@ ${labels}
           await this._load()
         } catch(e) { alert('Remove failed: ' + e.message) }
       },
+      async remove(name, purge) {
+        if (!confirm('Remove overlay "' + name + '"?' + (purge ? '\n\nThis will also delete the local files.' : ''))) return
+        await this._removeConfirmed(name, purge)
+      },
       toggleExpand(name) {
         this.expanded = this.expanded === name ? null : name
       },
-      sync(name) {
+      async sync(name) {
         if (this.syncRunning) return
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            this,
+            'overlay_sync',
+            { name },
+            lines => { this.approvalLines = lines },
+            () => this.sync(name),
+          )
+        } catch (e) {
+          this.error = e.message
+          this.approvalLines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) return
         if (_ws) { try { _ws.close() } catch(_) {} _ws = null }
+        clearApprovalState(this)
+        this.approvalLines = []
         this.syncName    = name
         this.syncRunning = true
         this.syncLines   = []
@@ -3066,7 +3779,43 @@ ${labels}
             _ws = null
             this._load()
           }
-        })
+        }, { approval_request_id: approval.request_id })
+      },
+      _restorePendingApproval(request) {
+        if (!approvalPending(request)) return false
+        if (request.action_cmd === 'overlay_add' && request.args?.name) {
+          this._applyAddRequest(request)
+          return _restorePendingApprovalState(
+            this,
+            request,
+            lines => { this.approvalLines = lines },
+            () => this.add(),
+          )
+        }
+        if (request.action_cmd === 'overlay_remove' && request.args?.name) {
+          this.addShow = false
+          return _restorePendingApprovalState(
+            this,
+            request,
+            lines => { this.approvalLines = lines },
+            () => this._removeConfirmed(request.args.name, !!request.args.purge),
+          )
+        }
+        if (request.action_cmd === 'overlay_sync' && request.args?.name) {
+          this.addShow = false
+          this.syncName = request.args.name
+          this.syncRunning = false
+          this.syncRc = null
+          this.syncLines = []
+          this.expanded = request.args.name
+          return _restorePendingApprovalState(
+            this,
+            request,
+            lines => { this.approvalLines = lines },
+            () => this.sync(request.args.name),
+          )
+        }
+        return false
       },
       lineClass(l) {
         if (/^\[ebuild/.test(l) || /^>>> /.test(l) || /Completed/.test(l)) return 'hi-ok'

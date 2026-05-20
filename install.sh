@@ -43,6 +43,7 @@ python3 -m venv --system-site-packages /usr/lib/arbor/.venv
 echo "==> Creating entry point symlinks in /usr/bin"
 ln -sf /usr/lib/arbor/.venv/bin/arbor        /usr/bin/arbor
 ln -sf /usr/lib/arbor/.venv/bin/arbor-daemon /usr/bin/arbor-daemon
+ln -sf /usr/lib/arbor/.venv/bin/arbor-approve /usr/bin/arbor-approve
 
 # --- frontend ---
 echo "==> Installing frontend"

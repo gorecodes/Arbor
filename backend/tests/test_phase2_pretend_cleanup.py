@@ -79,11 +79,18 @@ class PretendCleanupTests(unittest.IsolatedAsyncioTestCase):
             return created.pop(0)
 
         with patch.object(daemon_main, "_checked_atom", return_value="sys-apps/portage"):
-            with patch("daemon.main.asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec):
-                gen = daemon_main.cmd_emerge_autounmask({"atom": "sys-apps/portage"})
-                first = await gen.__anext__()
-                second = await gen.__anext__()
-                await gen.aclose()
+            with patch.object(daemon_main, "_require_approval", return_value=None):
+                with patch("daemon.main.asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+                    gen = daemon_main.cmd_emerge_autounmask(
+                        {
+                            "atom": "sys-apps/portage",
+                            "approval_request_id": "req-1",
+                            "approval_token": "tok-1",
+                        }
+                    )
+                    first = await gen.__anext__()
+                    second = await gen.__anext__()
+                    await gen.aclose()
 
         self.assertEqual(first, {"line": "-- scanning dependency tree for masked packages..."})
         self.assertEqual(second, {"line": "autounmask suggestion"})
