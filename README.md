@@ -72,6 +72,8 @@ The frontend is a no-build Alpine.js app in `frontend/alpine/`.
 
 This separation is intentional: the web UI stays unprivileged, while only the package-management backend requires root access.
 
+## Requirements
+
 - Gentoo Linux
 - Python 3.11+
 - `openssl`
