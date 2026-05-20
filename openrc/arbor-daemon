@@ -6,6 +6,7 @@ command_background=true
 pidfile="/run/arbor/daemon.pid"
 output_log="/var/log/arbor/daemon.log"
 error_log="/var/log/arbor/daemon.log"
+env_file="/etc/arbor/arbor.env"
 
 depend() {
     need localmount
@@ -14,5 +15,8 @@ depend() {
 
 start_pre() {
     checkpath --directory --owner root:arbor --mode 0750 /run/arbor
-    checkpath --directory --owner arbor:arbor --mode 0755 /var/log/arbor
+    checkpath --directory --owner arbor:arbor --mode 0750 /var/log/arbor
+    touch /var/log/arbor/daemon.log
+    chown root:arbor /var/log/arbor/daemon.log
+    chmod 0640 /var/log/arbor/daemon.log
 }

@@ -18,7 +18,8 @@
     <div class="login">
       <div class="card">
         <h1>Arbor</h1>
-        <p class="sub">Portage explorer</p>
+        <p class="sub">Local-first Portage admin UI</p>
+        <p class="sub">Use on localhost by default. Treat the access token like root.</p>
         <form @submit.prevent="submit">
           <input
             type="password"
@@ -1209,10 +1210,13 @@
             <h2>Overlays</h2>
             <button class="jv-btn-refresh" @click="toggleAdd()" x-text="addShow ? '✕ Cancel' : '+ Add overlay'"></button>
           </div>
+          <p class="muted" x-show="!loading && !error && addEnabled === false">Overlay add is disabled by default. Set <code>ARBOR_ENABLE_OVERLAY_ADD=1</code> to enable this dangerous admin action.</p>
+          <p class="jv-err-msg" x-show="addConfigError">Overlay add status could not be loaded from the backend: <span x-text="addConfigError"></span></p>
+          <p class="jv-err-msg" x-show="addDisabledNotice" x-text="addDisabledNotice"></p>
 
           <!-- Add form -->
           <div class="ov-add-form" x-show="addShow">
-            <div class="ov-add-row">
+            <div class="ov-add-row" x-show="addStep === 'form'">
               <input class="ov-input" type="text" placeholder="Name (e.g. my-overlay)" x-model="addName">
               <select class="ov-select" x-model="addSyncType">
                 <option value="git">git</option>
@@ -1220,12 +1224,34 @@
                 <option value="svn">svn</option>
               </select>
               <input class="ov-input ov-input-wide" type="text" placeholder="Sync URI (https://...)" x-model="addSyncUri">
-              <button class="jv-btn-open" :disabled="addBusy" @click="add()">
-                <span x-show="!addBusy">Add &amp; Sync</span>
-                <span x-show="addBusy">Adding…</span>
+              <button class="jv-btn-open" :disabled="addBusy" @click="reviewAdd()">
+                Review dangerous add
               </button>
             </div>
+            <div class="ov-confirm" x-show="addStep === 'confirm'">
+              <p class="jv-err-msg">Adding an overlay grants root-equivalent trust. Ebuilds from this repository can execute as root during install.</p>
+              <div class="ov-confirm-grid">
+                <div><span class="muted">Name</span><code x-text="addName.trim()"></code></div>
+                <div><span class="muted">Type</span><code x-text="addSyncType"></code></div>
+                <div class="ov-confirm-uri"><span class="muted">URL</span><code x-text="addSyncUri.trim()"></code></div>
+              </div>
+              <label class="ov-confirm-check">
+                <input type="checkbox" x-model="addDangerAck">
+                <span>I understand this is a dangerous admin action and trust this overlay with root-equivalent power.</span>
+              </label>
+              <p class="muted">Type this exact approval phrase to continue:</p>
+              <code class="ov-approval" x-text="addApprovalPhrase()"></code>
+              <input class="ov-input ov-input-wide" type="text" placeholder="Type the exact approval phrase" x-model="addApprovalText">
+              <div class="ov-add-row">
+                <button class="jv-btn-refresh" :disabled="addBusy" @click="editAdd()">Back</button>
+                <button class="jv-btn-open" :disabled="addBusy" @click="add()">
+                  <span x-show="!addBusy">Add overlay</span>
+                  <span x-show="addBusy">Adding…</span>
+                </button>
+              </div>
+            </div>
             <p class="jv-err-msg" x-show="addError" x-text="addError"></p>
+            <p class="muted" x-show="addInfo" x-text="addInfo"></p>
           </div>
 
           <p class="muted" x-show="loading">Loading…</p>

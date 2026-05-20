@@ -75,50 +75,46 @@
 
   const overlays = {
     list:   ()                             => _get('/overlays'),
-    add:    (name, sync_type, sync_uri)    => _post('/overlays', { name, sync_type, sync_uri }),
+    config: ()                             => _get('/overlays/config'),
+    add:    (name, sync_type, sync_uri, approve_danger, approval_text) =>
+      _post('/overlays', { name, sync_type, sync_uri, approve_danger, approval_text }),
     remove: (name, purge = false)          => _del('/overlays/' + encodeURIComponent(name) + (purge ? '?purge=1' : '')),
   }
 
   function _wsProto() { return location.protocol === 'https:' ? 'wss' : 'ws' }
 
-  function wsEmerge(cmd, atom, onMsg, extra = {}) {
-    const p = new URLSearchParams({ token: _getToken(), atom, ...extra })
-    const ws = new WebSocket(_wsProto() + '://' + location.host + '/ws/emerge/' + cmd + '?' + p)
+  function _withQuery(path, params) {
+    const qs = new URLSearchParams(params).toString()
+    return qs ? path + '?' + qs : path
+  }
+
+  function _openAuthedWebSocket(path, onMsg) {
+    const ws = new WebSocket(_wsProto() + '://' + location.host + path)
     let done = false
+    ws.onopen = () => {
+      // Send auth in the first frame so the token never appears in the URL.
+      ws.send(JSON.stringify({ type: 'auth', token: _getToken() }))
+    }
     ws.onmessage = e => { const m = JSON.parse(e.data); if (m.done) done = true; onMsg(m) }
     ws.onerror   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'WebSocket error' }) } }
     ws.onclose   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'connection closed' }) } }
     return ws
+  }
+
+  function wsEmerge(cmd, atom, onMsg, extra = {}) {
+    return _openAuthedWebSocket(_withQuery('/ws/emerge/' + cmd, { atom, ...extra }), onMsg)
   }
 
   function wsGlobalEmerge(cmd, onMsg, extra = {}) {
-    const p = new URLSearchParams({ token: _getToken(), ...extra })
-    const ws = new WebSocket(_wsProto() + '://' + location.host + '/ws/emerge/' + cmd + '?' + p)
-    let done = false
-    ws.onmessage = e => { const m = JSON.parse(e.data); if (m.done) done = true; onMsg(m) }
-    ws.onerror   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'WebSocket error' }) } }
-    ws.onclose   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'connection closed' }) } }
-    return ws
+    return _openAuthedWebSocket(_withQuery('/ws/emerge/' + cmd, extra), onMsg)
   }
 
   function wsJobAttach(jobId, onMsg) {
-    const p = new URLSearchParams({ token: _getToken() })
-    const ws = new WebSocket(_wsProto() + '://' + location.host + '/ws/jobs/' + encodeURIComponent(jobId) + '?' + p)
-    let done = false
-    ws.onmessage = e => { const m = JSON.parse(e.data); if (m.done) done = true; onMsg(m) }
-    ws.onerror   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'WebSocket error' }) } }
-    ws.onclose   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'connection closed' }) } }
-    return ws
+    return _openAuthedWebSocket('/ws/jobs/' + encodeURIComponent(jobId), onMsg)
   }
 
   function wsOverlaySync(name, onMsg) {
-    const p = new URLSearchParams({ token: _getToken() })
-    const ws = new WebSocket(_wsProto() + '://' + location.host + '/ws/overlays/sync/' + encodeURIComponent(name) + '?' + p)
-    let done = false
-    ws.onmessage = e => { const m = JSON.parse(e.data); if (m.done) done = true; onMsg(m) }
-    ws.onerror   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'WebSocket error' }) } }
-    ws.onclose   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'connection closed' }) } }
-    return ws
+    return _openAuthedWebSocket('/ws/overlays/sync/' + encodeURIComponent(name), onMsg)
   }
 
   function detachWs(ws) {
@@ -2823,7 +2819,8 @@ ${labels}
     return {
       list: [], loading: true, error: null,
       // add form
-      addShow: false, addName: '', addSyncType: 'git', addSyncUri: '', addBusy: false, addError: null,
+      addShow: false, addStep: 'form', addEnabled: null, addConfigError: null, addName: '', addSyncType: 'git', addSyncUri: '',
+      addBusy: false, addError: null, addInfo: null, addDisabledNotice: null, addDangerAck: false, addApprovalText: '',
       expanded: null,
       // flat top-level sync state (one active sync at a time)
       syncName: null, syncRunning: false, syncLines: [], syncRc: null,
@@ -2833,24 +2830,73 @@ ${labels}
         this.$watch('$store.router.view', v => { if (v === 'overlays') this._load() })
       },
       async _load() {
-        this.loading = true; this.error = null
-        try { this.list = await overlays.list() }
+        this.loading = true; this.error = null; this.addConfigError = null; this.addEnabled = null
+        try {
+          this.list = await overlays.list()
+          try {
+            const cfg = await overlays.config()
+            this.addEnabled = !!cfg.add_enabled
+          } catch (e) {
+            this.addConfigError = e.message
+          }
+          this.addDisabledNotice = null
+        }
         catch(e) { this.error = e.message }
         finally { this.loading = false }
       },
-      toggleAdd() { this.addShow = !this.addShow; this.addError = null },
-      async add() {
+      _resetAdd() {
+        this.addStep = 'form'
+        this.addName = ''
+        this.addSyncType = 'git'
+        this.addSyncUri = ''
         this.addError = null
+        this.addInfo = null
+        this.addDisabledNotice = null
+        this.addDangerAck = false
+        this.addApprovalText = ''
+      },
+      toggleAdd() {
+        this.addShow = !this.addShow
+        if (!this.addShow) this._resetAdd()
+        else {
+          this.addError = null
+          this.addInfo = null
+          this.addDisabledNotice = this.addEnabled === false
+            ? 'Overlay add is disabled in the backend. You can review the form, but the server will reject the add until ARBOR_ENABLE_OVERLAY_ADD is enabled and Arbor is restarted.'
+            : null
+        }
+      },
+      addApprovalPhrase() {
+        return 'ADD ' + this.addName.trim() + ' ' + this.addSyncUri.trim()
+      },
+      reviewAdd() {
+        this.addError = null
+        this.addInfo = null
         if (!this.addName.trim()) { this.addError = 'Name is required'; return }
         if (!this.addSyncUri.trim()) { this.addError = 'Sync URI is required'; return }
+        this.addStep = 'confirm'
+      },
+      editAdd() {
+        this.addStep = 'form'
+        this.addError = null
+      },
+      async add() {
+        this.addError = null
+        this.addInfo = null
+        if (!this.addDangerAck) { this.addError = 'You must acknowledge the root-equivalent trust warning'; return }
+        if (this.addApprovalText.trim() !== this.addApprovalPhrase()) {
+          this.addError = 'Confirmation text must exactly match the approval phrase'
+          return
+        }
         this.addBusy = true
         try {
           const name = this.addName.trim()
-          await overlays.add(name, this.addSyncType, this.addSyncUri.trim())
+          const syncUri = this.addSyncUri.trim()
+          const res = await overlays.add(name, this.addSyncType, syncUri, this.addDangerAck, this.addApprovalText.trim())
           this.addShow = false
-          this.addName = ''; this.addSyncUri = ''
+          this._resetAdd()
+          this.addInfo = res.warning || 'Overlay added. Run sync explicitly after reviewing it.'
           await this._load()
-          this._startSync(name)
         } catch(e) { this.addError = e.message }
         finally { this.addBusy = false }
       },
