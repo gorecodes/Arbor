@@ -14,7 +14,7 @@
 <body x-data>
 
   <!-- ── Login ──────────────────────────────────────────────────────────── -->
-  <div x-show="!$store.auth.isLoggedIn" x-cloak x-data="loginComponent()">
+  <div x-show="!$store.auth.isLoggedIn" x-cloak x-data="loginComponent">
     <div class="login">
       <div class="card">
         <h1>Arbor</h1>
@@ -39,7 +39,16 @@
   </div>
 
   <!-- ── App layout ─────────────────────────────────────────────────────── -->
-  <div x-show="$store.auth.isLoggedIn" x-cloak class="layout app-shell" x-data="appShellComponent()">
+  <div x-show="$store.auth.isLoggedIn" x-cloak class="layout app-shell" x-data="appShellComponent">
+
+    <div class="app-approval-lock" x-show="approvalPending()">
+      <div class="app-approval-card">
+        <div class="app-approval-title">Awaiting shell approval</div>
+        <template x-for="(line, i) in approvalDetailLines()" :key="i">
+          <div class="app-approval-line" x-text="line"></div>
+        </template>
+      </div>
+    </div>
 
     <header class="app-bar">
       <div class="app-bar-main">
@@ -104,7 +113,7 @@
       <div class="app-content">
 
       <!-- Install flow -->
-      <div x-show="$store.router.view === 'install'" x-data="installComponent()" class="ev-route-shell">
+      <div x-show="$store.router.view === 'install'" x-data="installComponent" class="ev-route-shell">
         <div class="ev-view-page">
           <div class="ev-page-header">
             <button class="ev-back" @click="goBack()">← <span x-text="$store.router.installAtom"></span></button>
@@ -137,7 +146,7 @@
                       <input type="checkbox" :checked="!!eoChecked[item.key]" @change="eoToggle(item.key)">
                       <span class="eo-flag" x-text="item.label"></span>
                       <input type="number" class="eo-num"
-                             :min="item.min ?? 1" :max="item.max ?? 100"
+                             :min="eoMin(item)" :max="eoMax(item)"
                              :value="item.type === 'int' ? _eoValueFor(item) : ''"
                              :disabled="!eoChecked[item.key]"
                              @input="item.type === 'int' && eoSetValue(item, $event.target.value)"
@@ -203,7 +212,7 @@
                 @click="retry()">Retry</button>
               <button class="ev-btn-primary"
                 x-show="step === 'done'"
-                @click="navigate('packages', $store.router.installAtom)">Close</button>
+                @click="closeDone()">Close</button>
               <button class="ev-btn-cancel" x-show="step !== 'done'"
                 :disabled="running && step === 'install'"
                 @click="goBack()"
@@ -215,7 +224,7 @@
       </div>
 
       <!-- Uninstall flow -->
-      <div x-show="$store.router.view === 'uninstall'" x-data="uninstallComponent()" class="ev-route-shell">
+      <div x-show="$store.router.view === 'uninstall'" x-data="uninstallComponent" class="ev-route-shell">
         <div class="ev-view-page">
           <div class="ev-page-header">
             <button class="ev-back" @click="goBack()">← <span x-text="$store.router.uninstallAtom"></span></button>
@@ -253,7 +262,7 @@
                 @click="retry()">Retry</button>
               <button class="ev-btn-primary"
                 x-show="step === 'done'"
-                @click="navigate('packages', $store.router.uninstallAtom)">Close</button>
+                @click="closeDone()">Close</button>
               <button class="ev-btn-cancel" x-show="step !== 'done'"
                 :disabled="running && step === 'uninstall'"
                 @click="goBack()"
@@ -265,7 +274,7 @@
       </div>
 
       <!-- Dashboard -->
-      <div x-show="$store.router.view === 'dashboard'" x-data="dashboardComponent()">
+      <div x-show="$store.router.view === 'dashboard'" x-data="dashboardComponent">
         <div class="dashboard">
           <p class="muted"  x-show="!status && !error">Loading…</p>
           <p class="error"  x-show="error" x-text="error"></p>
@@ -352,7 +361,7 @@
               <div class="dash-console-body dash-composition-console">
                 <div class="dash-pane dash-pane-visual">
                   <span class="dash-chart-title">Compile time by category</span>
-                  <div x-html="compileCatsSvg()"></div>
+                  <div x-ref="compileCatsHost"></div>
                 </div>
 
                 <div class="dash-pane-stack">
@@ -368,7 +377,7 @@
                         </div>
                         <div class="dash-inline-meter-bar" x-show="sourceBinaryMeter().segments.length">
                           <template x-for="segment in sourceBinaryMeter().segments" :key="segment.key">
-                            <span class="dash-inline-meter-segment" :class="segment.tone" :style="`width:${segment.pct}%`"></span>
+                            <span class="dash-inline-meter-segment" :class="segment.tone" :style="'width:' + segment.pct + '%'"></span>
                           </template>
                         </div>
                         <p class="dash-support-detail" x-text="sourceBinaryMeter().detail"></p>
@@ -381,7 +390,7 @@
                         </div>
                         <div class="dash-inline-meter-bar" x-show="keywordPostureMeter().segments.length">
                           <template x-for="segment in keywordPostureMeter().segments" :key="segment.key">
-                            <span class="dash-inline-meter-segment" :class="segment.tone" :style="`width:${segment.pct}%`"></span>
+                            <span class="dash-inline-meter-segment" :class="segment.tone" :style="'width:' + segment.pct + '%'"></span>
                           </template>
                         </div>
                         <p class="dash-support-detail" x-text="keywordPostureMeter().detail"></p>
@@ -427,8 +436,8 @@
 
       <!-- Package detail -->
       <div x-show="$store.router.selectedPackage && $store.router.view === 'packages'"
-           x-data="packageDetailComponent()">
-        <button class="pd-back" @click="navigateBack()">← Back</button>
+           x-data="packageDetailComponent">
+        <button class="pd-back" @click="goBack()">← Back</button>
 
         <p class="error" x-show="error" x-text="error"></p>
         <p class="muted"  x-show="!error && !info">Loading…</p>
@@ -436,23 +445,23 @@
         <div x-show="info">
           <div class="pd-header">
             <div class="pd-header-row">
-              <h2 x-text="info?.cpv"></h2>
+              <h2 x-text="packageCpv()"></h2>
               <button class="pd-btn-install"   x-show="info && !info.installed"
-                @click="navigate('install',   $store.router.selectedPackage)">⬇ Install</button>
+                @click="openInstall()">⬇ Install</button>
               <span   class="pd-installed-badge" x-show="info && info.installed">✓ installed</span>
               <button class="pd-btn-uninstall" x-show="info && info.installed"
-                @click="navigate('uninstall', $store.router.selectedPackage)">✕ Uninstall</button>
+                @click="openUninstall()">✕ Uninstall</button>
             </div>
-            <p class="pd-desc" x-text="info?.DESCRIPTION"></p>
-            <a x-show="validHomepage()" :href="info?.HOMEPAGE" target="_blank" rel="noopener noreferrer"
-               x-text="info?.HOMEPAGE"></a>
+            <p class="pd-desc" x-text="packageDescription()"></p>
+            <a x-show="validHomepage()" :href="homepageUrl()" target="_blank" rel="noopener noreferrer"
+               x-text="homepageUrl()"></a>
           </div>
 
           <div class="pd-meta">
-            <span class="pd-badge" x-text="'slot ' + (info?.SLOT || '0')"></span>
-            <span class="pd-badge" x-text="info?.LICENSE"></span>
-            <span class="pd-badge pd-muted" x-show="info?.installed" x-text="'built ' + fmtDate(info?.BUILD_TIME)"></span>
-            <span class="pd-badge pd-muted" x-show="info?.installed" x-text="fmtSize(info?.SIZE)"></span>
+            <span class="pd-badge" x-text="slotLabel()"></span>
+            <span class="pd-badge" x-text="licenseText()"></span>
+            <span class="pd-badge pd-muted" x-show="isInstalled()" x-text="buildTimeText()"></span>
+            <span class="pd-badge pd-muted" x-show="isInstalled()" x-text="installedSizeText()"></span>
           </div>
 
           <div class="pd-tabs">
@@ -502,7 +511,7 @@
             </p>
           </div>
 
-          <div x-show="tab === 'deps'" x-data="depGraphComponent()">
+          <div x-show="tab === 'deps'" x-data="depGraphComponent">
             <p class="error" x-show="error && !loading" x-text="error"></p>
             <p class="muted"  x-show="loading">Resolving…</p>
             <div class="dg-tree" x-ref="treeRoot" x-show="root && !loading"></div>
@@ -512,7 +521,7 @@
 
       <!-- Installed packages list -->
       <div x-show="$store.router.view === 'packages' && !$store.router.selectedPackage"
-           x-data="packageListComponent()">
+           x-data="packageListComponent">
         <div class="pkg-toolbar">
           <h2 x-text="title()"></h2>
           <input type="search" x-model="search" @input="onInput()" :placeholder="placeholder()">
@@ -541,7 +550,7 @@
       </div>
 
       <!-- USE flags -->
-      <section x-show="$store.router.view === 'use-flags'" x-data="useFlagsExplorerComponent()" class="ufi-view">
+      <section x-show="$store.router.view === 'use-flags'" x-data="useFlagsExplorerComponent" class="ufi-view">
         <div x-show="!selectedFlagName()">
           <div class="pkg-toolbar">
             <h2>USE Flags</h2>
@@ -617,13 +626,13 @@
             <div x-show="selectedFlag()">
             <header class="ufi-flag-detail-header">
               <div class="ufi-flag-detail-copy">
-                <h3 x-text="selectedFlag()?.name"></h3>
-                <p class="ufi-package-description" x-text="selectedFlag()?.description || 'No description available for this USE flag.'"></p>
+                <h3 x-text="selectedFlagLabel()"></h3>
+                <p class="ufi-package-description" x-text="selectedFlagDescription()"></p>
               </div>
             </header>
 
             <div class="ufi-chip-row">
-              <template x-for="badge in detailBadges(selectedFlag())" :key="selectedFlag()?.name + ':' + badge.text">
+              <template x-for="badge in detailBadges(selectedFlag())" :key="selectedFlagKey('badge') + ':' + badge.text">
                 <span class="ufi-inline-chip" :class="'is-' + badge.tone" x-text="badge.text"></span>
               </template>
             </div>
@@ -636,7 +645,7 @@
               <div>
                 <dt>Source</dt>
                 <dd x-text="globalSourceLabel(selectedFlag())"></dd>
-                <p class="ufi-summary-sub" x-show="selectedFlag()?.global_origin_file" x-text="selectedFlag()?.global_origin_file"></p>
+                <p class="ufi-summary-sub" x-show="selectedFlagOriginFile()" x-text="selectedFlagOriginFile()"></p>
               </div>
               <div>
                 <dt>Overrides <span class="ufi-term-help" tabindex="0" :title="termHelp('override')" aria-label="Override help">?</span></dt>
@@ -696,10 +705,10 @@
                 <section class="ufi-package-section">
                   <h5 x-text="packageOverrideSectionTitle(selectedFlag(), true)"></h5>
                   <ul class="ufi-related-package-list" x-show="overridePackagesEnabled(selectedFlag()).length">
-                    <template x-for="pkg in visiblePackages(selectedFlag(), 'override-enabled', overridePackagesEnabled(selectedFlag()))" :key="selectedFlag()?.name + ':override:on:' + pkg.cp">
+                    <template x-for="pkg in visiblePackages(selectedFlag(), 'override-enabled', overridePackagesEnabled(selectedFlag()))" :key="selectedFlagKey('override:on') + ':' + pkg.cp">
                       <li class="ufi-related-package-card">
                         <div class="ufi-related-package-top">
-                          <button type="button" class="ufi-related-package-link" @click="navigateTo(pkg.cpv)" x-text="pkg.cp"></button>
+                          <button type="button" class="ufi-related-package-link" @click="openPackage(pkg.cpv)" x-text="pkg.cp"></button>
                           <span class="ufi-inline-chip" :class="'is-' + packageStateTone(pkg)" x-text="packageStateLabel(pkg)"></span>
                         </div>
                         <div class="ufi-related-package-meta">
@@ -717,10 +726,10 @@
                 <section class="ufi-package-section">
                   <h5 x-text="packageOverrideSectionTitle(selectedFlag(), false)"></h5>
                   <ul class="ufi-related-package-list" x-show="overridePackagesDisabled(selectedFlag()).length">
-                    <template x-for="pkg in visiblePackages(selectedFlag(), 'override-disabled', overridePackagesDisabled(selectedFlag()))" :key="selectedFlag()?.name + ':override:off:' + pkg.cp">
+                    <template x-for="pkg in visiblePackages(selectedFlag(), 'override-disabled', overridePackagesDisabled(selectedFlag()))" :key="selectedFlagKey('override:off') + ':' + pkg.cp">
                       <li class="ufi-related-package-card">
                         <div class="ufi-related-package-top">
-                          <button type="button" class="ufi-related-package-link" @click="navigateTo(pkg.cpv)" x-text="pkg.cp"></button>
+                          <button type="button" class="ufi-related-package-link" @click="openPackage(pkg.cpv)" x-text="pkg.cp"></button>
                           <span class="ufi-inline-chip" :class="'is-' + packageStateTone(pkg)" x-text="packageStateLabel(pkg)"></span>
                         </div>
                         <div class="ufi-related-package-meta">
@@ -744,10 +753,10 @@
                   </div>
                 </header>
                 <ul class="ufi-related-package-list" x-show="installedPackagesEnabled(selectedFlag()).length">
-                  <template x-for="pkg in visiblePackages(selectedFlag(), 'installed-enabled', installedPackagesEnabled(selectedFlag()))" :key="selectedFlag()?.name + ':installed:on:' + pkg.cp">
+                  <template x-for="pkg in visiblePackages(selectedFlag(), 'installed-enabled', installedPackagesEnabled(selectedFlag()))" :key="selectedFlagKey('installed:on') + ':' + pkg.cp">
                     <li class="ufi-related-package-card" :class="{ 'is-mismatch': pkg.mismatch }">
                       <div class="ufi-related-package-top">
-                        <button type="button" class="ufi-related-package-link" @click="navigateTo(pkg.cpv)" x-text="pkg.cp"></button>
+                        <button type="button" class="ufi-related-package-link" @click="openPackage(pkg.cpv)" x-text="pkg.cp"></button>
                         <div class="ufi-chip-row">
                           <span class="ufi-inline-chip" :class="'is-' + installedPackageStateTone(pkg)" x-text="installedPackageStateLabel(pkg)"></span>
                           <span class="ufi-inline-chip" :class="'is-' + configuredPackageStateTone(pkg)" x-text="configuredPackageStateLabel(pkg)"></span>
@@ -771,10 +780,10 @@
                   </div>
                 </header>
                 <ul class="ufi-related-package-list" x-show="installedPackagesDisabled(selectedFlag()).length">
-                  <template x-for="pkg in visiblePackages(selectedFlag(), 'installed-disabled', installedPackagesDisabled(selectedFlag()))" :key="selectedFlag()?.name + ':installed:off:' + pkg.cp">
+                  <template x-for="pkg in visiblePackages(selectedFlag(), 'installed-disabled', installedPackagesDisabled(selectedFlag()))" :key="selectedFlagKey('installed:off') + ':' + pkg.cp">
                     <li class="ufi-related-package-card" :class="{ 'is-mismatch': pkg.mismatch }">
                       <div class="ufi-related-package-top">
-                        <button type="button" class="ufi-related-package-link" @click="navigateTo(pkg.cpv)" x-text="pkg.cp"></button>
+                        <button type="button" class="ufi-related-package-link" @click="openPackage(pkg.cpv)" x-text="pkg.cp"></button>
                         <div class="ufi-chip-row">
                           <span class="ufi-inline-chip" :class="'is-' + installedPackageStateTone(pkg)" x-text="installedPackageStateLabel(pkg)"></span>
                           <span class="ufi-inline-chip" :class="'is-' + configuredPackageStateTone(pkg)" x-text="configuredPackageStateLabel(pkg)"></span>
@@ -793,10 +802,10 @@
               <details class="ufi-advanced-details" x-show="hasAdvancedDetails(selectedFlag())">
                 <summary>Advanced details</summary>
                 <div class="ufi-advanced-body">
-                  <section class="ufi-package-section" x-show="selectedFlag()?.global_history?.length">
-                    <h5 x-text="'Global configuration history (' + selectedFlag()?.global_history?.length + ')'"></h5>
+                  <section class="ufi-package-section" x-show="selectedFlagHistoryLength()">
+                    <h5 x-text="'Global configuration history (' + selectedFlagHistoryLength() + ')'"></h5>
                     <div class="pd-use-history-list">
-                      <template x-for="(step, idx) in selectedFlag()?.global_history || []" :key="selectedFlag()?.name + ':global-history:' + idx">
+                      <template x-for="(step, idx) in selectedFlagHistory()" :key="selectedFlagKey('global-history') + ':' + idx">
                         <div class="pd-use-history-item">
                           <span class="pd-use-history-token" x-text="step.token"></span>
                           <span class="pd-use-history-state" x-text="flagHistoryState(step)"></span>
@@ -815,7 +824,7 @@
       </section>
 
       <!-- Search -->
-      <div x-show="$store.router.view === 'search'" x-data="searchComponent()">
+      <div x-show="$store.router.view === 'search'" x-data="searchComponent">
         <div class="pkg-toolbar">
           <h2>Search Portage Tree</h2>
           <input type="search" x-model="query" @input="onInput()" placeholder="package name…" style="width:300px">
@@ -832,7 +841,7 @@
           </thead>
           <tbody>
             <template x-for="r in results" :key="r.cp">
-              <tr class="clickable" @click="navigateTo(r.best || r.cp)">
+              <tr class="clickable" @click="openResult(r)">
                 <td class="td-pkg" x-text="r.cp"></td>
                 <td class="td-ver" x-text="r.best || '—'"></td>
                 <td class="td-desc" x-text="r.description"></td>
@@ -843,7 +852,7 @@
       </div>
 
       <!-- Maintenance / world-update / sync -->
-      <div x-show="$store.router.view === 'updates'" x-data="updatesComponent()">
+      <div x-show="$store.router.view === 'updates'" x-data="updatesComponent">
         <div class="mv-view">
           <header class="mv-header">
             <div class="mv-header-copy">
@@ -947,7 +956,7 @@
                           <input type="checkbox" :checked="!!eoChecked[item.key]" @change="eoToggle(item.key)">
                           <span class="eo-flag" x-text="item.label"></span>
                           <input type="number" class="eo-num"
-                                 :min="item.min ?? 1" :max="item.max ?? 100"
+                                 :min="eoMin(item)" :max="eoMax(item)"
                                  :value="item.type === 'int' ? _eoValueFor(item) : ''"
                                  :disabled="!eoChecked[item.key]"
                                  @input="item.type === 'int' && eoSetValue(item, $event.target.value)"
@@ -1083,15 +1092,21 @@
       </div>
 
       <!-- Background jobs -->
-      <div x-show="$store.router.view === 'jobs'" x-data="jobsViewComponent()">
-        <div class="jv-view">
-          <div class="jv-header">
-            <h2>Jobs</h2>
-            <div class="jv-tabs">
-              <button class="jv-tab" :class="{ active: tab === 'active' }" @click="switchTab('active')">Active</button>
-              <button class="jv-tab" :class="{ active: tab === 'history' }" @click="switchTab('history')">History</button>
+        <div x-show="$store.router.view === 'jobs'" x-data="jobsViewComponent">
+          <div class="jv-view">
+            <div class="jv-header">
+              <h2>Jobs</h2>
+              <div class="jv-tabs">
+                <button class="jv-tab" :class="{ active: tab === 'active' }" @click="switchTab('active')">Active</button>
+                <button class="jv-tab" :class="{ active: tab === 'history' }" @click="switchTab('history')">History</button>
+              </div>
             </div>
-          </div>
+
+            <div class="terminal" x-show="approvalLines.length > 0">
+              <template x-for="(line, i) in approvalLines" :key="i">
+                <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+              </template>
+            </div>
 
           <!-- ── Active tab ─────────────────────────────────────────────── -->
           <div x-show="tab === 'active'">
@@ -1204,11 +1219,16 @@
       </div>
 
       <!-- Overlays -->
-      <div x-show="$store.router.view === 'overlays'" x-data="overlayViewComponent()">
+      <div x-show="$store.router.view === 'overlays'" x-data="overlayViewComponent">
         <div class="jv-view">
           <div class="jv-header">
             <h2>Overlays</h2>
             <button class="jv-btn-refresh" @click="toggleAdd()" x-text="addShow ? '✕ Cancel' : '+ Add overlay'"></button>
+          </div>
+          <div class="terminal" x-show="approvalLines.length > 0">
+            <template x-for="(line, i) in approvalLines" :key="i">
+              <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+            </template>
           </div>
           <p class="muted" x-show="!loading && !error && addEnabled === false">Overlay add is disabled by default. Set <code>ARBOR_ENABLE_OVERLAY_ADD=1</code> to enable this dangerous admin action.</p>
           <p class="jv-err-msg" x-show="addConfigError">Overlay add status could not be loaded from the backend: <span x-text="addConfigError"></span></p>
@@ -1239,9 +1259,7 @@
                 <input type="checkbox" x-model="addDangerAck">
                 <span>I understand this is a dangerous admin action and trust this overlay with root-equivalent power.</span>
               </label>
-              <p class="muted">Type this exact approval phrase to continue:</p>
-              <code class="ov-approval" x-text="addApprovalPhrase()"></code>
-              <input class="ov-input ov-input-wide" type="text" placeholder="Type the exact approval phrase" x-model="addApprovalText">
+              <p class="muted">Review the repository carefully before continuing. Arbor will still require a separate root approval in the shell before the overlay is added.</p>
               <div class="ov-add-row">
                 <button class="jv-btn-refresh" :disabled="addBusy" @click="editAdd()">Back</button>
                 <button class="jv-btn-open" :disabled="addBusy" @click="add()">

@@ -5,6 +5,7 @@ All portage calls run in a thread executor to avoid event loop conflicts.
 
 import asyncio
 import errno
+import hashlib
 import json
 import os
 import re
@@ -16,15 +17,19 @@ import time
 import uuid
 import logging
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
+from arbor.action_security import action_metadata, infer_job_action
 from arbor.ipc_auth import IPCAuthError, load_ipc_key, verify_request
 
 SOCKET_PATH = "/run/arbor/daemon.sock"
 MAX_JOB_LOG_BYTES = 512 * 1024
 MAX_HISTORY_LOG_BYTES = 1024 * 1024
+RUNNING_HISTORY_FLUSH_SECONDS = 30.0
+RUNNING_HISTORY_FLUSH_LINES = 100
 _ENV_FILE = Path(os.environ.get("ARBOR_ENV_FILE", "/etc/arbor/arbor.env"))
 _ENABLED_VALUES = {"1", "true", "yes", "on"}
 _STATE_DIR = Path("/var/lib/arbor/jobs")
@@ -40,6 +45,9 @@ _HISTORY_TAIL_BYTES = max(
     0,
 )
 ALLOWED_COMMANDS = {
+    "approval_request_create",
+    "approval_request_list",
+    "approval_request_show",
     "world_updates",
     "installed_packages",
     "pkg_stats",
@@ -177,9 +185,13 @@ class _Job:
         created_at: float | None = None,
         started_at: float | None = None,
         pid: int | None = None,
+        pid_started_at: int | None = None,
         recovered: bool = False,
         status_note: str | None = None,
         status_updated_at: float | None = None,
+        action_cmd: str = "",
+        action_class: str = "",
+        action_target: str = "",
     ):
         self.atom = atom
         self.kind = kind
@@ -191,13 +203,23 @@ class _Job:
         self.created_at: float = now if created_at is None else created_at
         self.started_at: float = self.created_at if started_at is None else started_at
         self.pid: int | None = pid if pid is not None else getattr(proc, "pid", None)
+        self.pid_started_at: int | None = pid_started_at
         self.recovered = recovered
         self.status_note = status_note
         self.status_updated_at: float = now if status_updated_at is None else status_updated_at
+        inferred_cmd, inferred_args = infer_job_action(kind, atom)
+        if not action_cmd:
+            action_cmd = inferred_cmd
+        inferred_meta = action_metadata(action_cmd, inferred_args) if action_cmd else {}
+        self.action_cmd = action_cmd
+        self.action_class = action_class or inferred_meta.get("action_class", "")
+        self.action_target = action_target or inferred_meta.get("action_target", atom)
         self._queues: list = []
         self._log_bytes = 0
         self._log_truncated = False
         self._history_log = _HistoryLogBuffer()
+        self._history_checkpointed_at: float = self.created_at
+        self._history_lines_since_flush = 0
 
     def set_status(self, status: str, *, returncode=None, note: str | None = None, when: float | None = None):
         self.status = status
@@ -220,6 +242,7 @@ class _Job:
             self._log_truncated = True
         if "line" in stored:
             self._history_log.append_line(stored["line"])
+            self._history_lines_since_flush += 1
         for q in self._queues:
             q.put_nowait(chunk)
 
@@ -296,12 +319,37 @@ def _maybe_reload_portage():
 
 _DB_PATH = "/var/lib/arbor/history.db"
 _db_lock = threading.Lock()
+_APPROVAL_REQUEST_TTL_SECONDS = 3600
+_APPROVAL_APPROVED_GRACE_SECONDS = 300
+_APPROVAL_MAX_PENDING_REQUESTS = 25
+_APPROVAL_ARG_KEYS = {"approval_request_id", "approval_token"}
+
+
+@contextmanager
+def _db_conn(*, begin_immediate: bool = False):
+    conn = sqlite3.connect(_DB_PATH, timeout=30.0)
+    try:
+        if begin_immediate:
+            conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _db_ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str):
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def _db_init():
     Path(_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS job_history (
                     job_id TEXT PRIMARY KEY,
@@ -311,38 +359,160 @@ def _db_init():
                     returncode INTEGER,
                     created_at REAL NOT NULL,
                     finished_at REAL,
-                    log TEXT
+                    log TEXT,
+                    action_cmd TEXT NOT NULL DEFAULT '',
+                    action_class TEXT NOT NULL DEFAULT '',
+                    action_target TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS job_history_checkpoints (
+                    job_id TEXT PRIMARY KEY,
+                    atom TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    log TEXT,
+                    action_cmd TEXT NOT NULL DEFAULT '',
+                    action_class TEXT NOT NULL DEFAULT '',
+                    action_target TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            _db_ensure_column(conn, "job_history", "action_cmd", "TEXT NOT NULL DEFAULT ''")
+            _db_ensure_column(conn, "job_history", "action_class", "TEXT NOT NULL DEFAULT ''")
+            _db_ensure_column(conn, "job_history", "action_target", "TEXT NOT NULL DEFAULT ''")
+            _db_ensure_column(conn, "job_history_checkpoints", "action_cmd", "TEXT NOT NULL DEFAULT ''")
+            _db_ensure_column(conn, "job_history_checkpoints", "action_class", "TEXT NOT NULL DEFAULT ''")
+            _db_ensure_column(conn, "job_history_checkpoints", "action_target", "TEXT NOT NULL DEFAULT ''")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS approval_requests (
+                    request_id TEXT PRIMARY KEY,
+                    action_cmd TEXT NOT NULL,
+                    action_class TEXT NOT NULL,
+                    action_target TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    args_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    approved_at REAL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS approval_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    action_cmd TEXT NOT NULL,
+                    action_class TEXT NOT NULL,
+                    action_target TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}'
                 )
             """)
 
 
-def _history_save(job_id: str, atom: str, kind: str, status: str, returncode, created_at: float, finished_at: float, log_text: str):
+def _history_save(
+    job_id: str,
+    atom: str,
+    kind: str,
+    status: str,
+    returncode,
+    created_at: float,
+    finished_at: float,
+    log_text: str,
+    action_cmd: str = "",
+    action_class: str = "",
+    action_target: str = "",
+):
     log_text, _ = _truncate_history_text(log_text)
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO job_history "
-                "(job_id, atom, kind, status, returncode, created_at, finished_at, log) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (job_id, atom, kind, status, returncode, created_at, finished_at, log_text),
+                "(job_id, atom, kind, status, returncode, created_at, finished_at, log, action_cmd, action_class, action_target) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    job_id,
+                    atom,
+                    kind,
+                    status,
+                    returncode,
+                    created_at,
+                    finished_at,
+                    log_text,
+                    action_cmd,
+                    action_class,
+                    action_target,
+                ),
             )
+
+
+def _history_checkpoint_save(
+    job_id: str,
+    atom: str,
+    kind: str,
+    created_at: float,
+    updated_at: float,
+    log_text: str,
+    action_cmd: str = "",
+    action_class: str = "",
+    action_target: str = "",
+):
+    log_text, _ = _truncate_history_text(log_text)
+    with _db_lock:
+        with _db_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO job_history_checkpoints "
+                "(job_id, atom, kind, created_at, updated_at, log, action_cmd, action_class, action_target) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    job_id,
+                    atom,
+                    kind,
+                    created_at,
+                    updated_at,
+                    log_text,
+                    action_cmd,
+                    action_class,
+                    action_target,
+                ),
+            )
+
+
+def _history_checkpoint_load(job_id: str) -> dict | None:
+    with _db_lock:
+        with _db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT job_id, atom, kind, created_at, updated_at, log, action_cmd, action_class, action_target "
+                "FROM job_history_checkpoints WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+
+def _history_checkpoint_delete(job_id: str):
+    with _db_lock:
+        with _db_conn() as conn:
+            conn.execute("DELETE FROM job_history_checkpoints WHERE job_id=?", (job_id,))
 
 
 def _history_list(limit: int, offset: int, kind: str) -> dict:
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             conn.row_factory = sqlite3.Row
             if kind:
                 total = conn.execute("SELECT COUNT(*) FROM job_history WHERE kind=?", (kind,)).fetchone()[0]
                 rows = conn.execute(
-                    "SELECT job_id, atom, kind, status, returncode, created_at, finished_at "
+                    "SELECT job_id, atom, kind, status, returncode, created_at, finished_at, action_cmd, action_class, action_target "
                     "FROM job_history WHERE kind=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                     (kind, limit, offset),
                 ).fetchall()
             else:
                 total = conn.execute("SELECT COUNT(*) FROM job_history").fetchone()[0]
                 rows = conn.execute(
-                    "SELECT job_id, atom, kind, status, returncode, created_at, finished_at "
+                    "SELECT job_id, atom, kind, status, returncode, created_at, finished_at, action_cmd, action_class, action_target "
                     "FROM job_history ORDER BY created_at DESC LIMIT ? OFFSET ?",
                     (limit, offset),
                 ).fetchall()
@@ -351,7 +521,7 @@ def _history_list(limit: int, offset: int, kind: str) -> dict:
 
 def _history_log(job_id: str) -> dict:
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             row = conn.execute("SELECT log FROM job_history WHERE job_id=?", (job_id,)).fetchone()
             if row is None:
                 return {"error": "not found"}
@@ -362,7 +532,7 @@ def _history_log(job_id: str) -> dict:
 
 def _history_delete(job_id: str) -> dict:
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             deleted = conn.execute("DELETE FROM job_history WHERE job_id=?", (job_id,)).rowcount
             if deleted == 0:
                 return {"error": "not found"}
@@ -372,7 +542,7 @@ def _history_delete(job_id: str) -> dict:
 def _history_purge(days: int) -> dict:
     cutoff = time.time() - days * 86400
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             deleted = conn.execute("DELETE FROM job_history WHERE created_at < ?", (cutoff,)).rowcount
             return {"deleted": deleted}
 
@@ -380,7 +550,7 @@ def _history_purge(days: int) -> dict:
 def _history_stats() -> dict:
     cutoff_30d = time.time() - 30 * 86400
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             conn.row_factory = sqlite3.Row
 
             rows = conn.execute(
@@ -437,6 +607,322 @@ def _get_jobs_lock() -> asyncio.Lock:
     return _jobs_lock
 
 
+def _approval_args(args: dict | None) -> dict:
+    data = dict(args or {})
+    for key in _APPROVAL_ARG_KEYS:
+        data.pop(key, None)
+    return data
+
+
+def _approval_request_hash(action_cmd: str, args: dict | None) -> str:
+    payload = {"cmd": action_cmd, "args": _approval_args(args)}
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _approval_confirmation_phrase(action_target: str, request_id: str) -> str:
+    target = action_target.strip()
+    if target:
+        return f"APPROVE {target}"
+    return f"APPROVE {request_id}"
+
+
+def _approval_event_log(
+    conn: sqlite3.Connection,
+    request_id: str,
+    event_type: str,
+    action_cmd: str,
+    action_class: str,
+    action_target: str,
+    now: float,
+    details: dict | None = None,
+):
+    details_json = json.dumps(details or {}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    conn.execute(
+        "INSERT INTO approval_events "
+        "(request_id, event_type, action_cmd, action_class, action_target, created_at, details_json) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (request_id, event_type, action_cmd, action_class, action_target, now, details_json),
+    )
+    target = action_target.strip()
+    suffix = f" target={target}" if target else ""
+    log.info(
+        "approval event=%s request_id=%s action=%s class=%s%s",
+        event_type,
+        request_id,
+        action_cmd,
+        action_class,
+        suffix,
+    )
+
+
+def _approval_expire_stale(conn: sqlite3.Connection, now: float):
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT request_id, action_cmd, action_class, action_target, status "
+        "FROM approval_requests WHERE status IN ('pending', 'approved') AND expires_at < ?",
+        (now,),
+    ).fetchall()
+    if not rows:
+        return
+    conn.execute(
+        "UPDATE approval_requests SET status='expired' WHERE status IN ('pending', 'approved') AND expires_at < ?",
+        (now,),
+    )
+    for row in rows:
+        _approval_event_log(
+            conn,
+            row["request_id"],
+            "expired",
+            row["action_cmd"],
+            row["action_class"],
+            row["action_target"],
+            now,
+            {"status_from": row["status"], "status_to": "expired"},
+        )
+
+
+def _approval_request_row_to_dict(row: sqlite3.Row | None) -> dict | None:
+    if row is None:
+        return None
+    data = dict(row)
+    try:
+        data["args"] = json.loads(data.pop("args_json"))
+    except (KeyError, json.JSONDecodeError):
+        data["args"] = {}
+    data["confirmation_phrase"] = _approval_confirmation_phrase(
+        data.get("action_target", ""),
+        data["request_id"],
+    )
+    return data
+
+
+def _approval_request_create(action_cmd: str, args: dict | None) -> dict:
+    clean_args = _canonical_approval_args(action_cmd, args)
+    meta = action_metadata(action_cmd, clean_args)
+    if not meta["approval_required"]:
+        return {"error": "approval is not required for this action"}
+    request_id = str(uuid.uuid4())
+    now = time.time()
+    expires_at = now + _APPROVAL_REQUEST_TTL_SECONDS
+    request_hash = _approval_request_hash(action_cmd, clean_args)
+    args_json = json.dumps(clean_args, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    with _db_lock:
+        with _db_conn(begin_immediate=True) as conn:
+            _approval_expire_stale(conn, now)
+            conn.row_factory = sqlite3.Row
+            existing = conn.execute(
+                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                "FROM approval_requests WHERE status='pending' AND action_cmd=? AND request_hash=? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (action_cmd, request_hash),
+            ).fetchone()
+            if existing is not None:
+                return _approval_request_row_to_dict(existing) or {"error": "could not reuse approval request"}
+            pending_count = conn.execute(
+                "SELECT COUNT(*) FROM approval_requests WHERE status='pending'"
+            ).fetchone()[0]
+            if pending_count >= _APPROVAL_MAX_PENDING_REQUESTS:
+                return {
+                    "error": (
+                        f"too many pending approval requests ({pending_count}); "
+                        "resolve existing approvals before creating more"
+                    )
+                }
+            conn.execute(
+                "INSERT INTO approval_requests "
+                "(request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    request_id,
+                    action_cmd,
+                    meta["action_class"],
+                    meta.get("action_target", ""),
+                    request_hash,
+                    args_json,
+                    "pending",
+                    now,
+                    expires_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                "FROM approval_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            _approval_event_log(
+                conn,
+                request_id,
+                "created",
+                action_cmd,
+                meta["action_class"],
+                meta.get("action_target", ""),
+                now,
+                {"status_to": "pending"},
+            )
+    return _approval_request_row_to_dict(row) or {"error": "could not create approval request"}
+
+
+def _approval_request_list(status: str = "pending") -> list[dict]:
+    allowed_statuses = {"pending", "approved", "consumed", "expired", "cancelled", "all"}
+    status = status if status in allowed_statuses else "pending"
+    now = time.time()
+    with _db_lock:
+        with _db_conn() as conn:
+            _approval_expire_stale(conn, now)
+            conn.row_factory = sqlite3.Row
+            if status == "all":
+                rows = conn.execute(
+                    "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                    "FROM approval_requests ORDER BY created_at DESC"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                    "FROM approval_requests WHERE status=? ORDER BY created_at DESC",
+                    (status,),
+                ).fetchall()
+    return [_approval_request_row_to_dict(row) for row in rows]
+
+
+def _approval_request_get(request_id: str) -> dict | None:
+    now = time.time()
+    with _db_lock:
+        with _db_conn() as conn:
+            _approval_expire_stale(conn, now)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                "FROM approval_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+    return _approval_request_row_to_dict(row)
+
+
+def _approval_issue_token(request_id: str) -> dict:
+    now = time.time()
+    with _db_lock:
+        with _db_conn(begin_immediate=True) as conn:
+            _approval_expire_stale(conn, now)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT request_id, action_cmd, action_class, action_target, status, expires_at "
+                "FROM approval_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return {"error": "approval request not found"}
+            if row["status"] != "pending":
+                return {"error": f"approval request is not pending (status={row['status']})"}
+            expires_at = max(float(row["expires_at"]), now + _APPROVAL_APPROVED_GRACE_SECONDS)
+            conn.execute(
+                "UPDATE approval_requests SET status='approved', approved_at=?, expires_at=? WHERE request_id=?",
+                (now, expires_at, request_id),
+            )
+            _approval_event_log(
+                conn,
+                request_id,
+                "approved",
+                row["action_cmd"],
+                row["action_class"],
+                row["action_target"],
+                now,
+                {"status_from": row["status"], "status_to": "approved", "expires_at": expires_at},
+            )
+    return {"request_id": request_id, "approval_token": "", "approved_at": now, "expires_at": expires_at}
+
+
+def _approval_cancel(request_id: str) -> dict:
+    now = time.time()
+    with _db_lock:
+        with _db_conn(begin_immediate=True) as conn:
+            _approval_expire_stale(conn, now)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT request_id, action_cmd, action_class, action_target, status FROM approval_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return {"error": "approval request not found"}
+            if row["status"] != "pending":
+                return {"error": f"approval request is not pending (status={row['status']})"}
+            conn.execute(
+                "UPDATE approval_requests SET status='cancelled', approved_at=NULL WHERE request_id=?",
+                (request_id,),
+            )
+            _approval_event_log(
+                conn,
+                request_id,
+                "cancelled",
+                row["action_cmd"],
+                row["action_class"],
+                row["action_target"],
+                now,
+                {"status_from": row["status"], "status_to": "cancelled"},
+            )
+    return {"request_id": request_id, "status": "cancelled"}
+
+
+def _require_approval(action_cmd: str, args: dict) -> dict | None:
+    clean_args = _canonical_approval_args(action_cmd, args)
+    meta = action_metadata(action_cmd, clean_args)
+    if not meta["approval_required"]:
+        return None
+    request_id = str(args.get("approval_request_id", "")).strip()
+    if not request_id:
+        return {
+            "error": "approval required",
+            "approval_required": True,
+            "action_cmd": action_cmd,
+            "action_class": meta["action_class"],
+            "action_target": meta.get("action_target", ""),
+        }
+    now = time.time()
+    request_hash = _approval_request_hash(action_cmd, clean_args)
+    with _db_lock:
+        with _db_conn(begin_immediate=True) as conn:
+            _approval_expire_stale(conn, now)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT request_id, action_cmd, action_class, action_target, request_hash, status, expires_at "
+                "FROM approval_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return {"error": "approval request not found"}
+            if row["status"] == "pending":
+                return {
+                    "error": "approval pending",
+                    "approval_required": True,
+                    "approval_request_id": request_id,
+                    "action_cmd": action_cmd,
+                    "action_class": meta["action_class"],
+                    "action_target": meta.get("action_target", ""),
+                }
+            if row["status"] != "approved":
+                return {"error": f"approval request is not usable (status={row['status']})"}
+            if row["action_cmd"] != action_cmd:
+                return {"error": "approval request command does not match"}
+            if row["action_class"] != meta["action_class"]:
+                return {"error": "approval request class does not match"}
+            if row["request_hash"] != request_hash:
+                return {"error": "approval request no longer matches the requested plan"}
+            if row["expires_at"] < now:
+                return {"error": "approval request has expired"}
+            conn.execute("UPDATE approval_requests SET status='consumed' WHERE request_id=?", (request_id,))
+            _approval_event_log(
+                conn,
+                request_id,
+                "consumed",
+                row["action_cmd"],
+                row["action_class"],
+                row["action_target"],
+                now,
+                {"status_from": row["status"], "status_to": "consumed"},
+            )
+    return None
+
+
 def _job_state_path(job_id: str) -> Path:
     return _STATE_DIR / f"{job_id}.json"
 
@@ -447,6 +933,7 @@ def _job_state_payload(job_id: str, job: _Job) -> dict:
         "kind": job.kind,
         "atom": job.atom,
         "pid": job.pid,
+        "pid_started_at": job.pid_started_at,
         "status": job.status,
         "created_at": job.created_at,
         "started_at": job.started_at,
@@ -456,6 +943,12 @@ def _job_state_payload(job_id: str, job: _Job) -> dict:
         payload["status_note"] = job.status_note
     if job.recovered:
         payload["recovered"] = True
+    if job.action_cmd:
+        payload["action_cmd"] = job.action_cmd
+    if job.action_class:
+        payload["action_class"] = job.action_class
+    if job.action_target:
+        payload["action_target"] = job.action_target
     return payload
 
 
@@ -490,6 +983,25 @@ def _pid_is_running(pid: int | None) -> bool:
     return True
 
 
+def _pid_start_time(pid: int | None) -> int | None:
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        after_comm = stat_text.rsplit(") ", 1)[1]
+        return int(after_comm.split()[19])
+    except (IndexError, OSError, ValueError):
+        return None
+
+
+def _pid_matches(pid: int | None, pid_started_at: int | None) -> bool:
+    if not _pid_is_running(pid):
+        return False
+    if pid_started_at is None:
+        return True
+    return _pid_start_time(pid) == pid_started_at
+
+
 def _load_recovered_jobs() -> dict[str, _Job]:
     recovered: dict[str, _Job] = {}
     if not _STATE_DIR.exists():
@@ -504,12 +1016,29 @@ def _load_recovered_jobs() -> dict[str, _Job]:
             started_at = float(raw.get("started_at", created_at))
             pid = raw.get("pid")
             pid = int(pid) if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit()) else None
+            pid_started_at = raw.get("pid_started_at")
+            pid_started_at = (
+                int(pid_started_at)
+                if isinstance(pid_started_at, int) or (isinstance(pid_started_at, str) and pid_started_at.isdigit())
+                else None
+            )
+            action_cmd = str(raw.get("action_cmd", "")).strip()
+            action_class = str(raw.get("action_class", "")).strip()
+            action_target = str(raw.get("action_target", "")).strip()
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             log.warning("ignoring corrupt job state %s: %s", path, exc)
             continue
 
         recovered_at = time.time()
-        if _pid_is_running(pid):
+        inferred_cmd, inferred_args = infer_job_action(kind, atom)
+        if not action_cmd:
+            action_cmd = inferred_cmd
+        inferred_meta = action_metadata(action_cmd, inferred_args) if action_cmd else {}
+        if not action_class:
+            action_class = inferred_meta.get("action_class", "")
+        if not action_target:
+            action_target = inferred_meta.get("action_target", atom)
+        if _pid_matches(pid, pid_started_at):
             status = "orphaned"
             note = "job process still exists after daemon restart, but live output cannot be reattached"
         else:
@@ -523,15 +1052,21 @@ def _load_recovered_jobs() -> dict[str, _Job]:
             created_at=created_at,
             started_at=started_at,
             pid=pid,
+            pid_started_at=pid_started_at,
             recovered=True,
             status_note=note,
             status_updated_at=recovered_at,
+            action_cmd=action_cmd,
+            action_class=action_class,
+            action_target=action_target,
         )
         recovered[job_id] = job
         try:
             _persist_job_state(job_id, job)
         except OSError as exc:
             log.warning("failed to refresh recovered state for %s: %s", job_id, exc)
+        if status == "unknown":
+            _finalize_recovered_job_history(job_id, job, finished_at=recovered_at)
     return recovered
 
 _ANSI = re.compile(r'\x1b\[[0-9;]*[mKJH]|\x1b\].*?(?:\x07|\x1b\\)')
@@ -608,6 +1143,21 @@ async def in_thread(fn, *args):
     return await loop.run_in_executor(_executor, fn, *args)
 
 
+async def _terminate_subprocess(proc, timeout: float = 5.0):
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        await proc.wait()
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+
+
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
         raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
@@ -618,7 +1168,15 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             await send(writer, {"error": f"command '{cmd}' not allowed"})
             return
 
-        log.info("cmd=%s args=%s", cmd, args)
+        meta = action_metadata(cmd, args)
+        log.info(
+            "cmd=%s class=%s approval_required=%s target=%s args=%s",
+            cmd,
+            meta["action_class"],
+            meta["approval_required"],
+            meta.get("action_target", ""),
+            args,
+        )
         handler = HANDLERS.get(cmd)
         async for chunk in handler(args):
             await send(writer, chunk)
@@ -1282,6 +1840,62 @@ def _parse_opts(opts_str: str, whitelist: dict) -> list[str]:
     return out
 
 
+def _canonical_approval_args(action_cmd: str, args: dict | None) -> dict:
+    data = _approval_args(args)
+    if action_cmd in {"emerge_install", "emerge_autounmask", "emerge_uninstall"}:
+        atom = _checked_atom(data.get("atom", ""))
+        canonical = {"atom": atom} if atom else {}
+        if action_cmd == "emerge_install":
+            opts = ",".join(_parse_opts(str(data.get("opts", "")), _INSTALL_OPTS))
+            if opts:
+                canonical["opts"] = opts
+        return canonical
+    if action_cmd == "emerge_world_update":
+        opts = ",".join(_parse_opts(str(data.get("opts", "")), _UPDATE_OPTS))
+        return {"opts": opts} if opts else {}
+    if action_cmd in {"emerge_depclean", "emerge_preserved_rebuild", "emerge_sync"}:
+        return {}
+    if action_cmd == "overlay_sync":
+        return {"name": str(data.get("name", "")).strip()}
+    if action_cmd == "overlay_add":
+        return {
+            "name": str(data.get("name", "")).strip(),
+            "sync_type": str(data.get("sync_type", "git")).strip(),
+            "sync_uri": str(data.get("sync_uri", "")).strip(),
+            "approve_danger": bool(data.get("approve_danger", False)),
+        }
+    if action_cmd == "overlay_remove":
+        return {
+            "name": str(data.get("name", "")).strip(),
+            "purge": bool(data.get("purge", False)),
+            "approve_danger": bool(data.get("approve_danger", False)),
+        }
+    if action_cmd == "etc_update_resolve":
+        return {
+            "cfg_file": str(data.get("cfg_file", "")),
+            "action": str(data.get("action", "")),
+        }
+    if action_cmd in {"job_cancel", "history_delete"}:
+        return {"job_id": str(data.get("job_id", "")).strip()}
+    if action_cmd == "history_purge":
+        try:
+            days = max(int(data.get("days", 30)), 1)
+        except (TypeError, ValueError):
+            days = data.get("days", 30)
+        return {"days": days}
+    return data
+
+
+def _approval_payload(action_cmd: str, args: dict | None, overrides: dict | None = None) -> dict:
+    source = dict(args or {})
+    if overrides:
+        source.update(overrides)
+    payload = _canonical_approval_args(action_cmd, source)
+    payload["approval_request_id"] = str(source.get("approval_request_id", "")).strip()
+    payload["approval_token"] = str(source.get("approval_token", "")).strip()
+    return payload
+
+
 def _write_keywords(entries: list) -> tuple:
     """Write [(atom, keyword), ...] to package.accept_keywords/arbor-accepted.
 
@@ -1328,29 +1942,33 @@ async def cmd_emerge_pretend(args):
     if not clean:
         cmd.append("--autounmask=y")
     cmd.append(atom)
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=_EMERGE_ENV,
-    )
-    lines = []
-    async for raw in proc.stdout:
-        line = _ANSI.sub("", raw.decode(errors="replace").rstrip())
-        lines.append(line)
-        yield {"line": line}
-    await proc.wait()
-    full = "\n".join(lines)
-    # Only flag needs_unmask when emerge actually failed due to masking
-    needs_unmask = proc.returncode != 0 and any(s in full for s in [
-        "autounmask-write",
-        "package.accept_keywords",
-        "package.license",
-        "package.unmask",
-        "missing keyword",
-        "masked by: ~",
-    ])
-    yield {"done": True, "returncode": proc.returncode, "needs_unmask": needs_unmask}
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        lines = []
+        async for raw in proc.stdout:
+            line = _ANSI.sub("", raw.decode(errors="replace").rstrip())
+            lines.append(line)
+            yield {"line": line}
+        await proc.wait()
+        full = "\n".join(lines)
+        # Only flag needs_unmask when emerge actually failed due to masking
+        needs_unmask = proc.returncode != 0 and any(s in full for s in [
+            "autounmask-write",
+            "package.accept_keywords",
+            "package.license",
+            "package.unmask",
+            "missing keyword",
+            "masked by: ~",
+        ])
+        yield {"done": True, "returncode": proc.returncode, "needs_unmask": needs_unmask}
+    finally:
+        await _terminate_subprocess(proc)
 
 
 _MASKED_RE = re.compile(
@@ -1364,55 +1982,137 @@ async def cmd_emerge_autounmask(args):
     if not atom:
         yield {"error": "invalid atom"}
         return
-
-    # Step 1 — plain pretend to collect ALL masked packages (shows "masked by:" lines).
-    yield {"line": "-- scanning dependency tree for masked packages..."}
-    proc1 = await asyncio.create_subprocess_exec(
-        "emerge", "--pretend", "--color=n", atom,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=_EMERGE_ENV,
+    approval_error = await in_thread(
+        _require_approval,
+        "emerge_autounmask",
+        _approval_payload("emerge_autounmask", args, {"atom": atom}),
     )
-    scan_lines = []
-    async for raw in proc1.stdout:
-        scan_lines.append(_ANSI.sub("", raw.decode(errors="replace").rstrip()))
-    await proc1.wait()
-    scan_full = "\n".join(scan_lines)
+    if approval_error:
+        yield approval_error
+        return
 
-    # Step 2 — run a plain --autounmask=y pretend so portage prints the full
-    # autounmask report (without --autounmask-write — we never want emerge to
-    # write into /etc/portage behind the user's back).
-    proc2 = await asyncio.create_subprocess_exec(
-        "emerge", "--pretend", "--autounmask=y", "--color=n", atom,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=_EMERGE_ENV,
+    proc1 = None
+    proc2 = None
+    try:
+        # Step 1 — plain pretend to collect ALL masked packages (shows "masked by:" lines).
+        yield {"line": "-- scanning dependency tree for masked packages..."}
+        proc1 = await asyncio.create_subprocess_exec(
+            "emerge", "--pretend", "--color=n", atom,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        scan_lines = []
+        async for raw in proc1.stdout:
+            scan_lines.append(_ANSI.sub("", raw.decode(errors="replace").rstrip()))
+        await proc1.wait()
+        scan_full = "\n".join(scan_lines)
+
+        # Step 2 — run a plain --autounmask=y pretend so portage prints the full
+        # autounmask report (without --autounmask-write — we never want emerge to
+        # write into /etc/portage behind the user's back).
+        proc2 = await asyncio.create_subprocess_exec(
+            "emerge", "--pretend", "--autounmask=y", "--color=n", atom,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        async for raw in proc2.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc2.wait()
+
+        # Step 3 — parse the plain-pretend output for "masked by" lines and write
+        # keyword entries to our own file under /etc/portage/package.accept_keywords.
+        # We never touch any other portage config file: USE/license/mask changes
+        # the user must apply manually.
+        entries = []
+        for m in _MASKED_RE.finditer(scan_full):
+            cpv_raw, kw_raw = m.group(1), m.group(2)
+            kw = "**" if kw_raw == "missing" else kw_raw
+            entries.append((_normalize_atom(cpv_raw), kw))
+        entries.append((atom, "**"))  # always accept the main atom
+
+        kw_file, written, rejected = await in_thread(_write_keywords, entries)
+        if written:
+            for w in written:
+                yield {"line": f"-- wrote '{w}' → {kw_file}"}
+        else:
+            yield {"line": f"-- no new keyword entries needed in {kw_file}"}
+        for r in rejected:
+            yield {"line": f"-- rejected invalid entry: {r}"}
+
+        yield {"done": True, "returncode": 0}
+    finally:
+        await _terminate_subprocess(proc2)
+        await _terminate_subprocess(proc1)
+
+
+def _checkpoint_running_job(job_id: str, job: _Job, *, force: bool = False, now: float | None = None):
+    now = time.time() if now is None else now
+    if not force:
+        if job._history_lines_since_flush < RUNNING_HISTORY_FLUSH_LINES:
+            if now - job._history_checkpointed_at < RUNNING_HISTORY_FLUSH_SECONDS:
+                return
+    log_text, _ = job.history_log_text()
+    if not log_text:
+        return
+    _history_checkpoint_save(
+        job_id,
+        job.atom,
+        job.kind,
+        job.created_at,
+        now,
+        log_text,
+        job.action_cmd,
+        job.action_class,
+        job.action_target,
     )
-    async for raw in proc2.stdout:
-        yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
-    await proc2.wait()
+    job._history_checkpointed_at = now
+    job._history_lines_since_flush = 0
 
-    # Step 3 — parse the plain-pretend output for "masked by" lines and write
-    # keyword entries to our own file under /etc/portage/package.accept_keywords.
-    # We never touch any other portage config file: USE/license/mask changes
-    # the user must apply manually.
-    entries = []
-    for m in _MASKED_RE.finditer(scan_full):
-        cpv_raw, kw_raw = m.group(1), m.group(2)
-        kw = "**" if kw_raw == "missing" else kw_raw
-        entries.append((_normalize_atom(cpv_raw), kw))
-    entries.append((atom, "**"))  # always accept the main atom
 
-    kw_file, written, rejected = await in_thread(_write_keywords, entries)
-    if written:
-        for w in written:
-            yield {"line": f"-- wrote '{w}' → {kw_file}"}
-    else:
-        yield {"line": f"-- no new keyword entries needed in {kw_file}"}
-    for r in rejected:
-        yield {"line": f"-- rejected invalid entry: {r}"}
+def _finalize_recovered_job_history(job_id: str, job: _Job, finished_at: float):
+    checkpoint = _history_checkpoint_load(job_id)
+    if checkpoint is None:
+        return
+    _history_save(
+        job_id,
+        checkpoint["atom"],
+        checkpoint["kind"],
+        job.status,
+        job.returncode,
+        checkpoint["created_at"],
+        finished_at,
+        checkpoint.get("log") or "",
+        checkpoint.get("action_cmd", ""),
+        checkpoint.get("action_class", ""),
+        checkpoint.get("action_target", ""),
+    )
+    _history_checkpoint_delete(job_id)
 
-    yield {"done": True, "returncode": 0}
+
+async def _reconcile_recovered_jobs_once():
+    for job_id, job in list(_jobs.items()):
+        if not job.recovered or job.status != "orphaned":
+            continue
+        if _pid_matches(job.pid, job.pid_started_at):
+            continue
+        finished_at = time.time()
+        job.set_status("unknown", note="job process exited after daemon restart, but its final state is unknown", when=finished_at)
+        try:
+            await in_thread(_persist_job_state, job_id, job)
+        except Exception as exc:
+            log.warning("failed to persist reconciled recovered state for %s: %s", job_id, exc)
+        try:
+            await in_thread(_finalize_recovered_job_history, job_id, job, finished_at)
+        except Exception as exc:
+            log.warning("failed to finalize recovered history for %s: %s", job_id, exc)
+
+
+async def _reconcile_recovered_jobs():
+    while True:
+        await asyncio.sleep(30)
+        await _reconcile_recovered_jobs_once()
 
 
 async def _run_job(job_id: str):
@@ -1420,6 +2120,7 @@ async def _run_job(job_id: str):
     try:
         async for raw in job.proc.stdout:
             job._push({"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())})
+            await in_thread(_checkpoint_running_job, job_id, job)
         await job.proc.wait()
         job.set_status("done" if job.proc.returncode == 0 else "failed", returncode=job.proc.returncode)
         job._push({"done": True, "returncode": job.proc.returncode})
@@ -1434,10 +2135,26 @@ async def _run_job(job_id: str):
         finished_at = time.time()
         log_text, _ = job.history_log_text()
         try:
-            await in_thread(_history_save, job_id, job.atom, job.kind, job.status,
-                            job.returncode, job.created_at, finished_at, log_text)
+            await in_thread(
+                _history_save,
+                job_id,
+                job.atom,
+                job.kind,
+                job.status,
+                job.returncode,
+                job.created_at,
+                finished_at,
+                log_text,
+                job.action_cmd,
+                job.action_class,
+                job.action_target,
+            )
         except Exception as exc:
             log.warning("failed to persist history for job %s: %s", job_id, exc)
+        try:
+            await in_thread(_history_checkpoint_delete, job_id)
+        except Exception as exc:
+            log.warning("failed to remove checkpoint for job %s: %s", job_id, exc)
         try:
             await in_thread(_remove_job_state, job_id)
         except Exception as exc:
@@ -1467,7 +2184,16 @@ async def cmd_emerge_install(args):
     if not atom:
         yield {"error": "invalid atom"}
         return
+    approval_error = await in_thread(
+        _require_approval,
+        "emerge_install",
+        _approval_payload("emerge_install", args, {"atom": atom, "opts": args.get("opts", "")}),
+    )
+    if approval_error:
+        yield approval_error
+        return
     user_opts = _parse_opts(args.get("opts", ""), _INSTALL_OPTS)
+    meta = action_metadata("emerge_install", {"atom": atom})
 
     async with _get_jobs_lock():
         # Return existing running job for the same atom instead of spawning a duplicate
@@ -1484,7 +2210,15 @@ async def cmd_emerge_install(args):
             env=_EMERGE_ENV,
         )
         job_id = str(uuid.uuid4())
-        _jobs[job_id] = _Job(atom, proc, kind="install")
+        _jobs[job_id] = _Job(
+            atom,
+            proc,
+            kind="install",
+            pid_started_at=_pid_start_time(proc.pid),
+            action_cmd=meta["action_cmd"],
+            action_class=meta["action_class"],
+            action_target=meta.get("action_target", atom),
+        )
         await in_thread(_persist_job_state, job_id, _jobs[job_id])
 
     asyncio.create_task(_run_job(job_id))
@@ -1492,7 +2226,15 @@ async def cmd_emerge_install(args):
     yield {"job_id": job_id}
 
 
-async def _start_background_job(key: str, cmd: list, kind: str = "task"):
+async def _start_background_job(
+    key: str,
+    cmd: list,
+    kind: str = "task",
+    *,
+    action_cmd: str = "",
+    action_args: dict | None = None,
+):
+    meta = action_metadata(action_cmd, action_args or {}) if action_cmd else {}
     async with _get_jobs_lock():
         for jid, job in _jobs.items():
             if job.atom == key and job.status == "running":
@@ -1506,7 +2248,15 @@ async def _start_background_job(key: str, cmd: list, kind: str = "task"):
             env=_EMERGE_ENV,
         )
         job_id = str(uuid.uuid4())
-        _jobs[job_id] = _Job(key, proc, kind=kind)
+        _jobs[job_id] = _Job(
+            key,
+            proc,
+            kind=kind,
+            pid_started_at=_pid_start_time(proc.pid),
+            action_cmd=meta.get("action_cmd", action_cmd),
+            action_class=meta.get("action_class", ""),
+            action_target=meta.get("action_target", key),
+        )
         await in_thread(_persist_job_state, job_id, _jobs[job_id])
 
     asyncio.create_task(_run_job(job_id))
@@ -1519,16 +2269,20 @@ async def cmd_emerge_uninstall_pretend(args):
     if not atom:
         yield {"error": "invalid atom"}
         return
-    proc = await asyncio.create_subprocess_exec(
-        "emerge", "--pretend", "--unmerge", "--verbose", "--color=n", atom,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=_EMERGE_ENV,
-    )
-    async for raw in proc.stdout:
-        yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
-    await proc.wait()
-    yield {"done": True, "returncode": proc.returncode}
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "emerge", "--pretend", "--unmerge", "--verbose", "--color=n", atom,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        async for raw in proc.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc.wait()
+        yield {"done": True, "returncode": proc.returncode}
+    finally:
+        await _terminate_subprocess(proc)
 
 
 async def cmd_emerge_uninstall(args):
@@ -1536,21 +2290,41 @@ async def cmd_emerge_uninstall(args):
     if not atom:
         yield {"error": "invalid atom"}
         return
+    approval_error = await in_thread(
+        _require_approval,
+        "emerge_uninstall",
+        _approval_payload("emerge_uninstall", args, {"atom": atom}),
+    )
+    if approval_error:
+        yield approval_error
+        return
     async for item in _start_background_job(
         f"uninstall:{atom}",
         ["emerge", "--unmerge", "--verbose", "--color=n", atom],
         kind="uninstall",
+        action_cmd="emerge_uninstall",
+        action_args={"atom": atom},
     ):
         yield item
 
 
 async def cmd_emerge_world_update(args):
+    approval_error = await in_thread(
+        _require_approval,
+        "emerge_world_update",
+        _approval_payload("emerge_world_update", args, {"opts": args.get("opts", "")}),
+    )
+    if approval_error:
+        yield approval_error
+        return
     user_opts = _parse_opts(args.get("opts", ""), _UPDATE_OPTS)
     async for item in _start_background_job(
         "@world",
         ["emerge", "--update", "--deep", "--newuse", "--with-bdeps=y", "--color=n",
          *user_opts, "@world"],
         kind="world",
+        action_cmd="emerge_world_update",
+        action_args={},
     ):
         yield item
 
@@ -1560,33 +2334,57 @@ async def cmd_emerge_depclean_pretend(_args):
         "@depclean-pretend",
         ["emerge", "--depclean", "--pretend", "--color=n"],
         kind="depclean-pretend",
+        action_cmd="emerge_depclean_pretend",
+        action_args={},
     ):
         yield item
 
 
 async def cmd_emerge_depclean(_args):
+    approval_error = await in_thread(_require_approval, "emerge_depclean", _approval_payload("emerge_depclean", _args))
+    if approval_error:
+        yield approval_error
+        return
     async for item in _start_background_job(
         "@depclean",
         ["emerge", "--depclean", "--color=n"],
         kind="depclean",
+        action_cmd="emerge_depclean",
+        action_args={},
     ):
         yield item
 
 
 async def cmd_emerge_preserved_rebuild(_args):
+    approval_error = await in_thread(
+        _require_approval,
+        "emerge_preserved_rebuild",
+        _approval_payload("emerge_preserved_rebuild", _args),
+    )
+    if approval_error:
+        yield approval_error
+        return
     async for item in _start_background_job(
         "@preserved-rebuild",
         ["emerge", "@preserved-rebuild", "--color=n"],
         kind="preserved-rebuild",
+        action_cmd="emerge_preserved_rebuild",
+        action_args={},
     ):
         yield item
 
 
 async def cmd_emerge_sync(_args):
+    approval_error = await in_thread(_require_approval, "emerge_sync", _approval_payload("emerge_sync", _args))
+    if approval_error:
+        yield approval_error
+        return
     async for item in _start_background_job(
         "@sync",
         ["emaint", "sync", "-a"],
         kind="sync",
+        action_cmd="emerge_sync",
+        action_args={},
     ):
         yield item
 
@@ -1629,6 +2427,9 @@ def _job_summary(job_id: str, job: _Job) -> dict:
         "created_at": job.created_at,
         "started_at": job.started_at,
         "pid": job.pid,
+        "action_cmd": job.action_cmd,
+        "action_class": job.action_class,
+        "action_target": job.action_target,
     }
     if job.recovered:
         summary["recovered"] = True
@@ -1658,6 +2459,10 @@ async def cmd_job_cancel(args):
     if not job_id or job_id not in _jobs:
         yield {"error": "job not found"}
         return
+    approval_error = await in_thread(_require_approval, "job_cancel", _approval_payload("job_cancel", args, {"job_id": job_id}))
+    if approval_error:
+        yield approval_error
+        return
     job = _jobs[job_id]
     if job.status == "running" and job.proc:
         try:
@@ -1679,11 +2484,20 @@ async def cmd_job_cancel(args):
 
 def _etc_update_check():
     import subprocess, difflib
-    result = subprocess.run(
-        ["find", "/etc", "-name", "._cfg*", "-type", "f"],
-        capture_output=True, text=True,
-    )
-    cfg_files = [f for f in result.stdout.strip().splitlines() if f]
+    warning = None
+    try:
+        result = subprocess.run(
+            ["find", "/etc", "-name", "._cfg*", "-type", "f"],
+            capture_output=True, text=True, timeout=15,
+        )
+        stdout = result.stdout
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        warning = "etc-update scan timed out after 15s; showing partial results"
+        log.warning("%s", warning)
+    cfg_files = [f for f in stdout.strip().splitlines() if f]
     pending = []
     for cfg in cfg_files:
         real = re.sub(r"/\._cfg\d+_", "/", cfg)
@@ -1708,6 +2522,9 @@ def _etc_update_check():
             })
         except Exception as e:
             log.warning("etc_update_check error %s: %s", cfg, e)
+    if warning and pending:
+        for item in pending:
+            item["warning"] = warning
     return pending
 
 
@@ -1759,6 +2576,7 @@ def _etc_update_resolve(cfg_file: str, action: str):
 
     real_basename = re.sub(r"^\._cfg\d+_", "", cfg_path.name)
     real_path = cfg_path.with_name(real_basename)
+    wrote_real = False
 
     try:
         if action == "replace":
@@ -1774,7 +2592,18 @@ def _etc_update_resolve(cfg_file: str, action: str):
             else:
                 create_mode = stat.S_IMODE(cfg_path.stat().st_mode)
             _write_bytes_nofollow(real_path, cfg_path.read_bytes(), create_mode)
-        cfg_path.unlink()
+            wrote_real = True
+        try:
+            cfg_path.unlink()
+        except OSError as e:
+            if wrote_real:
+                return [{
+                    "error": f"updated {real_path} but could not remove pending file {cfg_path}: {e}",
+                    "cfg_file": str(cfg_path),
+                    "real_file": str(real_path),
+                    "action": action,
+                }]
+            raise
     except OSError as e:
         if e.errno == errno.ELOOP:
             return [{"error": f"refusing to overwrite symlink target: {real_path}"}]
@@ -1787,6 +2616,14 @@ async def cmd_etc_update_resolve(args):
     action = args.get("action", "")
     if not cfg_file or action not in ("keep", "replace"):
         yield {"error": "cfg_file and action (keep|replace) required"}
+        return
+    approval_error = await in_thread(
+        _require_approval,
+        "etc_update_resolve",
+        _approval_payload("etc_update_resolve", args, {"cfg_file": cfg_file, "action": action}),
+    )
+    if approval_error:
+        yield approval_error
         return
     for item in await in_thread(_etc_update_resolve, cfg_file, action):
         yield item
@@ -1804,11 +2641,20 @@ async def cmd_history_log(args):
 
 
 async def cmd_history_delete(args):
-    yield await in_thread(_history_delete, args.get("job_id", ""))
+    job_id = args.get("job_id", "")
+    approval_error = await in_thread(_require_approval, "history_delete", _approval_payload("history_delete", args, {"job_id": job_id}))
+    if approval_error:
+        yield approval_error
+        return
+    yield await in_thread(_history_delete, job_id)
 
 
 async def cmd_history_purge(args):
     days = max(int(args.get("days", 30)), 1)
+    approval_error = await in_thread(_require_approval, "history_purge", _approval_payload("history_purge", args, {"days": days}))
+    if approval_error:
+        yield approval_error
+        return
     yield await in_thread(_history_purge, days)
 
 
@@ -1848,10 +2694,6 @@ def _env_enabled(name: str) -> bool:
 
 def _overlay_add_enabled() -> bool:
     return _env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
-
-
-def _overlay_approval_text(name: str, sync_uri: str) -> str:
-    return f"ADD {name} {sync_uri}"
 
 
 def _validate_overlay_uri(sync_type: str, sync_uri: str) -> str | None:
@@ -1961,12 +2803,25 @@ async def cmd_overlay_add(args):
     sync_type = args.get("sync_type", "git").strip()
     sync_uri  = args.get("sync_uri", "").strip()
     approve_danger = bool(args.get("approve_danger", False))
-    approval_text = args.get("approval_text", "").strip()
     if not approve_danger:
         yield {"error": "overlay add requires an explicit dangerous-action confirmation"}
         return
-    if approval_text != _overlay_approval_text(name, sync_uri):
-        yield {"error": "overlay add confirmation text does not match the requested name and URL"}
+    approval_error = await in_thread(
+        _require_approval,
+        "overlay_add",
+        _approval_payload(
+            "overlay_add",
+            args,
+            {
+                "name": name,
+                "sync_type": sync_type,
+                "sync_uri": sync_uri,
+                "approve_danger": approve_danger,
+            },
+        ),
+    )
+    if approval_error:
+        yield approval_error
         return
     result = await in_thread(_overlay_add, name, sync_type, sync_uri)
     if "error" in result:
@@ -1981,6 +2836,27 @@ async def cmd_overlay_remove(args):
     global _repos_conf_mtime
     name  = args.get("name", "").strip()
     purge = bool(args.get("purge", False))
+    approve_danger = bool(args.get("approve_danger", False))
+    if not approve_danger:
+        action = "purge" if purge else "remove"
+        yield {"error": f"overlay {action} requires an explicit dangerous-action confirmation"}
+        return
+    approval_error = await in_thread(
+        _require_approval,
+        "overlay_remove",
+        _approval_payload(
+            "overlay_remove",
+            args,
+            {
+                "name": name,
+                "purge": purge,
+                "approve_danger": approve_danger,
+            },
+        ),
+    )
+    if approval_error:
+        yield approval_error
+        return
     result = await in_thread(_overlay_remove, name, purge)
     yield result
     if "ok" in result:
@@ -1993,15 +2869,59 @@ async def cmd_overlay_sync(args):
     if not _OVERLAY_NAME_RE.match(name):
         yield {"error": "invalid overlay name"}
         return
+    approval_error = await in_thread(_require_approval, "overlay_sync", _approval_payload("overlay_sync", args, {"name": name}))
+    if approval_error:
+        yield approval_error
+        return
     async for item in _start_background_job(
         f"@sync:{name}",
         ["emaint", "sync", "-r", name],
         kind="sync",
+        action_cmd="overlay_sync",
+        action_args={"name": name},
     ):
         yield item
 
 
+async def cmd_approval_request_create(args):
+    action_cmd = str(args.get("cmd", "")).strip()
+    action_args = args.get("args", {})
+    if not action_cmd:
+        yield {"error": "cmd is required"}
+        return
+    if not isinstance(action_args, dict):
+        yield {"error": "args must be an object"}
+        return
+    if action_cmd not in ALLOWED_COMMANDS:
+        yield {"error": f"command '{action_cmd}' not allowed"}
+        return
+    yield await in_thread(_approval_request_create, action_cmd, action_args)
+
+
+async def cmd_approval_request_list(args):
+    status = str(args.get("status", "pending")).strip() or "pending"
+    items = await in_thread(_approval_request_list, status)
+    for item in items:
+        yield item
+    yield {"done": True}
+
+
+async def cmd_approval_request_show(args):
+    request_id = str(args.get("request_id", "")).strip()
+    if not request_id:
+        yield {"error": "request_id is required"}
+        return
+    result = await in_thread(_approval_request_get, request_id)
+    if result is None:
+        yield {"error": "approval request not found"}
+        return
+    yield result
+
+
 HANDLERS = {
+    "approval_request_create": cmd_approval_request_create,
+    "approval_request_list":   cmd_approval_request_list,
+    "approval_request_show":   cmd_approval_request_show,
     "system_status":      cmd_system_status,
     "installed_packages": cmd_installed_packages,
     "pkg_stats":          cmd_pkg_stats,
@@ -2076,6 +2996,7 @@ async def main():
     _jobs.update(_load_recovered_jobs())
     if _jobs:
         log.warning("recovered %d non-live job snapshot(s) after restart", len(_jobs))
+    asyncio.create_task(_reconcile_recovered_jobs())
     asyncio.create_task(_cleanup_jobs())
     log.info("listening on %s", SOCKET_PATH)
     async with server:

@@ -3,6 +3,9 @@
 description="Arbor privilege daemon"
 command="/usr/bin/arbor-daemon"
 command_background=true
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=10
 pidfile="/run/arbor/daemon.pid"
 output_log="/var/log/arbor/daemon.log"
 error_log="/var/log/arbor/daemon.log"

@@ -6,17 +6,36 @@ A local-first web UI for managing Portage from a browser on the same machine.
 
 Designed for Gentoo systems in a local environment. Not intended to be exposed to the internet.
 
+## Root approval flow
+
+**Arbor now uses a shell-first approval model for privileged actions. This is a major part of the safety model, not an optional extra.**
+
+For actions such as install, uninstall, world update, sync, preserved-rebuild, depclean, and other root-backed destructive/admin operations:
+
+1. Start the action in the browser as usual.
+2. Arbor creates a pending approval request and locks the UI.
+3. On a root shell, run `arbor-approve approve <request_id>`.
+4. The browser notices the approval and starts the action automatically.
+
+If you answer **No** in `arbor-approve`, the request is cancelled, the frontend unlocks, and you can retry without reloading the page.
+
+This means:
+
+- the browser can **request** dangerous actions, but it does not directly self-authorize them
+- the approval decision happens in a **root shell**
+- refreshing the UI does **not** lose a pending approval request; Arbor restores it and reopens the relevant page
+
 ## Features
 
 - **Dashboard** — summary cards, recent job activity, compile time by category, source/binary mix, keyword posture, top enabled USE flags, and multi-slot package summaries
 - **Installed packages** — filter installed packages, open package details, inspect metadata, USE state, and runtime dependencies
 - **Search packages** — search the Portage tree and jump to the selected package
 - **USE flags** — inspect global USE state, package-specific overrides, installed build state, and mismatch indicators
-- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and launch install or uninstall from package details
+- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and require shell approval before the real root action starts
 - **Autounmask flow** — for masked install targets, Arbor can write accepted keywords to `/etc/portage/package.accept_keywords`
 - **etc-update review** — after successful installs, pending `._cfg*` files can be reviewed and resolved in the UI
-- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with a separate pretend/confirm flow
-- **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with an explicit danger confirmation flow
+- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with shell approval on privileged steps
+- **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with explicit danger acknowledgement plus shell approval
 - **Jobs** — view active jobs, reopen live output, browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`), and surface recovered orphaned/unknown jobs after daemon restart
 
 ## Screenshots
@@ -51,15 +70,25 @@ Two processes run with separate privileges:
 - **`arbor`** (unprivileged `arbor` user) — FastAPI/uvicorn web server, serves the frontend, and proxies requests to the daemon
 
 The frontend is a no-build Alpine.js app in `frontend/alpine/`.
+That directory is the canonical UI source and the one served in development and install-script deployments; there is no separate frontend build step to run for normal development.
 
 ## Security hardening
 
 - Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over HTTPS on port `8443`, and it is **not intended for internet exposure**.
 - Treat the Arbor token as **root-equivalent**. Arbor now authenticates web-to-daemon IPC requests and avoids putting WebSocket tokens in URLs, but an authenticated session can still trigger root-backed Portage actions.
+- Root-backed actions are now intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
 - Safer defaults are enabled out of the box: localhost bind, tighter token/key handling, response security headers, and overlay add disabled by default.
 - Overlay add remains a dangerous admin action. If you enable `ARBOR_ENABLE_OVERLAY_ADD=1`, Arbor requires an explicit approval flow, but adding an untrusted overlay still means trusting it with root-level package build execution.
 - The etc-update resolve path now refuses unsafe symlinked overwrite targets, and job handling is more honest after restarts: active jobs are snapshotted to disk and may come back as `orphaned` or `unknown` rather than being treated as live.
 - Live job buffers and stored history logs are intentionally bounded. Very large jobs may show truncated live output or truncated saved logs.
+
+## Recent fixes
+
+- Install and uninstall runs now keep the browser-boundary checks aligned with the actual default loopback deployment: WebSocket/CORS allow `localhost`, `127.0.0.1`, and `[::1]` on port `8443` by default.
+- The Alpine frontend was migrated to the CSP-safe build and the template surface was refactored away from unsupported inline syntax such as template literals, optional chaining, and nullish coalescing in `x-*` expressions.
+- Overlay removal now requires an explicit confirmation phrase, and overlay add remains opt-in behind `ARBOR_ENABLE_OVERLAY_ADD=1`.
+- Background job recovery now records checkpoints and PID identity metadata so daemon restarts report `orphaned` / `unknown` states honestly instead of pretending a lost job is still fully attached.
+- OpenRC services now use respawn supervision by default; systemd already had restart-on-failure behavior.
 
 ## Prerequisites
 
@@ -103,7 +132,7 @@ The installer will:
 1. Install the backend to `/usr/lib/arbor/`
 2. Create a Python virtual environment with Arbor installed into it
 3. Install the Alpine frontend to `/usr/lib/arbor/frontend/`
-4. Create `/usr/local/bin/arbor` and `/usr/local/bin/arbor-daemon`
+4. Create `/usr/bin/arbor` and `/usr/bin/arbor-daemon`
 5. Install OpenRC or systemd service files, depending on the detected init system
 6. Create the `arbor` system user
 7. Generate a self-signed TLS certificate in `/etc/arbor/` if one does not already exist
@@ -124,9 +153,18 @@ rc-service arbor start
 systemctl start arbor-daemon arbor
 ```
 
-Open `https://localhost:8443` in your browser, accept the self-signed certificate warning, and enter the token from `/etc/arbor/token`.
+Open `https://localhost:8443` or `https://127.0.0.1:8443` in your browser, accept the self-signed certificate warning, and enter the token from `/etc/arbor/token`.
 
 For a first install, keep Arbor on localhost until you are comfortable with the model: the bearer token unlocks root-backed package actions, and LAN exposure is still a deliberate tradeoff rather than the default.
+
+When you start a privileged action from the UI, expect Arbor to pause and ask for shell approval. Open a root shell and run:
+
+```bash
+arbor-approve list
+arbor-approve approve <request_id>
+```
+
+If you reject the prompt in `arbor-approve`, the request is cancelled and the browser unlocks immediately.
 
 ## Start at boot
 
@@ -157,7 +195,7 @@ Run the web server without TLS for local development:
 ARBOR_ALLOW_PLAINTEXT=1 .venv/bin/arbor
 ```
 
-The frontend does not need a build step; it is served directly from `frontend/alpine/`.
+The frontend does not need a build step; it is served directly from `frontend/alpine/`, which is the canonical frontend source tree for this repository.
 
 The daemon still requires root privileges and a working Portage environment.
 
@@ -233,7 +271,8 @@ systemctl daemon-reload
 ```
 
 ```bash
-rm -f /usr/local/bin/arbor /usr/local/bin/arbor-daemon
+rm -f /usr/bin/arbor /usr/bin/arbor-daemon /usr/bin/arbor-approve \
+      /usr/local/bin/arbor /usr/local/bin/arbor-daemon /usr/local/bin/arbor-approve
 rm -rf /usr/lib/arbor
 userdel arbor
 ```
@@ -265,14 +304,28 @@ rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 | `ARBOR_IPC_KEY` | unset | Optional env override for the shared HMAC key used to authenticate web-to-daemon IPC requests |
 | `ARBOR_IPC_KEY_FILE` | `/etc/arbor/ipc.key` | Shared HMAC key file, generated by setup by default |
 | `ARBOR_ALLOW_PLAINTEXT` | unset | Set to `1` to allow plain HTTP when cert/key are missing |
-| `ARBOR_CORS_ORIGINS` | `https://localhost:8443,http://localhost:5173` | Comma-separated allowed origins |
+| `ARBOR_CORS_ORIGINS` | loopback `http(s)` on `localhost`, `127.0.0.1`, `[::1]` (port `8443`) | Comma-separated allowed origins |
 | `ARBOR_STATIC_DIR` | auto-detected | Override the frontend static directory |
 
 Overlay add is disabled by default. To enable it, set `ARBOR_ENABLE_OVERLAY_ADD=1` in `/etc/arbor/arbor.env`, restart the services, and use the two-step confirmation flow in the UI. Adding an overlay is equivalent to trusting that repository with root-level code execution during package builds.
 
 ## LAN access
 
-LAN access exists, but it is still not the recommended deployment mode. Arbor now ships with several hardening changes for safer local use, but it still binds only to loopback by default and should not be treated as an internet-facing service. If you still need LAN access, set `ARBOR_HOST` explicitly in `/etc/arbor/arbor.env` (for example `ARBOR_HOST=0.0.0.0` or a specific LAN IP), restart the services, and then use:
+LAN access exists, but it is still not the recommended deployment mode. Arbor now ships with several hardening changes for safer local use, but it still binds only to loopback by default and should not be treated as an internet-facing service.
+
+For LAN access you must configure both:
+
+1. `ARBOR_HOST` so the web server listens on a LAN-reachable address.
+2. `ARBOR_CORS_ORIGINS` so browser requests and WebSocket origins from that LAN address are accepted.
+
+Example `/etc/arbor/arbor.env`:
+
+```bash
+ARBOR_HOST=0.0.0.0
+ARBOR_CORS_ORIGINS=https://arbor.lan:8443,https://192.168.1.10:8443
+```
+
+Then restart the services and open:
 
 ```bash
 https://<hostname>:8443

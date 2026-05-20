@@ -26,13 +26,12 @@ logging.basicConfig(
 
 app = FastAPI(title="Arbor", version="0.1.0", docs_url=None, redoc_url=None)
 
-# The current Alpine frontend evaluates template expressions at runtime and uses
-# inline style attributes/bindings, so CSP cannot drop unsafe-eval or
-# unsafe-inline for styles without breaking the UI.
+# The frontend uses Alpine's CSP-friendly build, so script-src can omit
+# unsafe-eval. Inline styles are still used by the current UI.
 _SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-eval'; "
+        "script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self' ws: wss:; "
@@ -54,11 +53,22 @@ async def add_security_headers(request: Request, call_next):
         response.headers.setdefault(header, value)
     return response
 
-# CORS — default to loopback only. Set ARBOR_CORS_ORIGINS to a comma-separated
-# list to override (e.g. "https://arbor.lan,http://localhost:5173").
-_default_cors = "https://localhost:8443,http://localhost:5173"
+def _default_loopback_origins() -> list[str]:
+    origins: list[str] = []
+    for scheme in ("https", "http"):
+        origins.extend([
+            f"{scheme}://localhost:8443",
+            f"{scheme}://127.0.0.1:8443",
+            f"{scheme}://[::1]:8443",
+        ])
+    return origins
+
+
+# CORS — default to local loopback origins only. Set ARBOR_CORS_ORIGINS to a
+# comma-separated list to override.
 _cors_origins = [
-    o.strip() for o in os.environ.get("ARBOR_CORS_ORIGINS", _default_cors).split(",")
+    o.strip()
+    for o in os.environ.get("ARBOR_CORS_ORIGINS", ",".join(_default_loopback_origins())).split(",")
     if o.strip()
 ]
 app.add_middleware(
@@ -102,6 +112,19 @@ def _overlay_add_enabled() -> bool:
     return _env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
 
 
+async def _json_object_body(request: Request, *, allow_empty: bool = True) -> dict | JSONResponse:
+    raw_body = await request.body()
+    if not raw_body:
+        return {} if allow_empty else JSONResponse(status_code=400, content={"error": "request body must be a JSON object"})
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "request body must be an object"})
+    return body
+
+
 # ---------------------------------------------------------------------------
 # REST endpoints
 # ---------------------------------------------------------------------------
@@ -121,7 +144,12 @@ async def installed_packages(auth: Auth, search: str = Query(default="")):
 
 @app.get("/api/package")
 async def package_info(auth: Auth, atom: str = Query(min_length=1)):
-    results = await query_all("package_info", {"atom": atom})
+    try:
+        results = await query_all("package_info", {"atom": atom})
+    except RuntimeError as exc:
+        if str(exc) == "not found":
+            return JSONResponse(status_code=404, content={"error": "not found"})
+        raise
     packages = [r for r in results if "cpv" in r]
     if not packages:
         return JSONResponse(status_code=404, content={"error": "not found"})
@@ -177,6 +205,35 @@ async def dep_graph(auth: Auth, atom: str = Query(min_length=1), depth: int = Qu
     return data
 
 
+@app.get("/api/approval-requests")
+async def approval_request_list(auth: Auth, status: str = Query(default="pending")):
+    results = await query_all("approval_request_list", {"status": status})
+    return [r for r in results if "request_id" in r]
+
+
+@app.get("/api/approval-requests/{request_id}")
+async def approval_request_show(auth: Auth, request_id: str):
+    data = await query_one("approval_request_show", {"request_id": request_id})
+    if "error" in data:
+        return JSONResponse(status_code=404, content=data)
+    return data
+
+
+@app.post("/api/approval-requests")
+async def approval_request_create(auth: Auth, request: Request):
+    body = await _json_object_body(request, allow_empty=False)
+    if isinstance(body, JSONResponse):
+        return body
+    cmd = str(body.get("cmd", "")).strip()
+    args = body.get("args", {})
+    if not isinstance(args, dict):
+        return JSONResponse(status_code=400, content={"error": "args must be an object"})
+    data = await query_one("approval_request_create", {"cmd": cmd, "args": args})
+    if "error" in data:
+        return JSONResponse(status_code=400, content=data)
+    return data
+
+
 # ---------------------------------------------------------------------------
 # emerge — REST + WebSocket endpoints
 # ---------------------------------------------------------------------------
@@ -190,6 +247,12 @@ async def _ws_fail(websocket: WebSocket, code: int, error: str):
         await websocket.close(code=code, reason=error)
     except Exception:
         pass
+
+
+def _ws_origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return True
+    return origin in _cors_origins
 
 
 async def _ws_require_auth(websocket: WebSocket) -> bool:
@@ -215,6 +278,10 @@ async def _ws_require_auth(websocket: WebSocket) -> bool:
     token = payload.get("token") if isinstance(payload, dict) else None
     if not isinstance(payload, dict) or payload.get("type") != "auth" or not verify_token(token):
         await _ws_fail(websocket, 4401, "invalid or missing token")
+        return False
+    origin = websocket.headers.get("origin")
+    if not _ws_origin_allowed(origin):
+        await _ws_fail(websocket, 4403, "origin not allowed")
         return False
     return True
 
@@ -285,8 +352,23 @@ async def ws_emerge_pretend(websocket: WebSocket, atom: str = Query(default=""),
 
 
 @app.websocket("/ws/emerge/install")
-async def ws_emerge_install(websocket: WebSocket, atom: str = Query(default=""), opts: str = Query(default="")):
-    await _ws_job_cmd(websocket, "emerge_install", {"atom": atom, "opts": opts})
+async def ws_emerge_install(
+    websocket: WebSocket,
+    atom: str = Query(default=""),
+    opts: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "emerge_install",
+        {
+            "atom": atom,
+            "opts": opts,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
 
 
 @app.websocket("/ws/emerge/uninstall-pretend")
@@ -295,13 +377,39 @@ async def ws_emerge_uninstall_pretend(websocket: WebSocket, atom: str = Query(de
 
 
 @app.websocket("/ws/emerge/uninstall")
-async def ws_emerge_uninstall(websocket: WebSocket, atom: str = Query(default="")):
-    await _ws_job_cmd(websocket, "emerge_uninstall", {"atom": atom})
+async def ws_emerge_uninstall(
+    websocket: WebSocket,
+    atom: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "emerge_uninstall",
+        {
+            "atom": atom,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
 
 
 @app.websocket("/ws/emerge/world-update")
-async def ws_emerge_world_update(websocket: WebSocket, opts: str = Query(default="")):
-    await _ws_job_cmd(websocket, "emerge_world_update", {"opts": opts})
+async def ws_emerge_world_update(
+    websocket: WebSocket,
+    opts: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "emerge_world_update",
+        {
+            "opts": opts,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
 
 
 @app.websocket("/ws/emerge/depclean-pretend")
@@ -310,13 +418,35 @@ async def ws_emerge_depclean_pretend(websocket: WebSocket):
 
 
 @app.websocket("/ws/emerge/depclean")
-async def ws_emerge_depclean(websocket: WebSocket):
-    await _ws_job_cmd(websocket, "emerge_depclean", {})
+async def ws_emerge_depclean(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "emerge_depclean",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
 
 
 @app.websocket("/ws/emerge/preserved-rebuild")
-async def ws_emerge_preserved_rebuild(websocket: WebSocket):
-    await _ws_job_cmd(websocket, "emerge_preserved_rebuild", {})
+async def ws_emerge_preserved_rebuild(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "emerge_preserved_rebuild",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
 
 
 @app.websocket("/ws/emerge/world-pretend")
@@ -325,8 +455,19 @@ async def ws_emerge_world_pretend(websocket: WebSocket):
 
 
 @app.websocket("/ws/emerge/sync")
-async def ws_emerge_sync(websocket: WebSocket):
-    await _ws_job_cmd(websocket, "emerge_sync", {})
+async def ws_emerge_sync(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "emerge_sync",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
 
 
 @app.websocket("/ws/jobs/{job_id}")
@@ -380,16 +521,39 @@ async def job_status(auth: Auth, job_id: str):
 
 
 @app.post("/api/jobs/{job_id}/cancel")
-async def job_cancel(auth: Auth, job_id: str):
-    data = await query_one("job_cancel", {"job_id": job_id})
+async def job_cancel(auth: Auth, job_id: str, request: Request):
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    data = await query_one(
+        "job_cancel",
+        {
+            "job_id": job_id,
+            "approval_request_id": str(body.get("approval_request_id", "")).strip(),
+            "approval_token": str(body.get("approval_token", "")).strip(),
+        },
+    )
     if "error" in data:
-        return JSONResponse(status_code=404, content=data)
+        return JSONResponse(status_code=404 if data["error"] == "job not found" else 400, content=data)
     return data
 
 
 @app.websocket("/ws/emerge/autounmask")
-async def ws_emerge_autounmask(websocket: WebSocket, atom: str = Query(default="")):
-    await _ws_emerge(websocket, "emerge_autounmask", atom)
+async def ws_emerge_autounmask(
+    websocket: WebSocket,
+    atom: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_emerge(
+        websocket,
+        "emerge_autounmask",
+        atom,
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
 
 
 @app.get("/api/emerge/etc-update")
@@ -418,18 +582,40 @@ async def history_log(auth: Auth, job_id: str):
 
 
 @app.delete("/api/history/{job_id}")
-async def history_delete(auth: Auth, job_id: str):
-    data = await query_one("history_delete", {"job_id": job_id})
+async def history_delete(auth: Auth, job_id: str, request: Request):
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    data = await query_one(
+        "history_delete",
+        {
+            "job_id": job_id,
+            "approval_request_id": str(body.get("approval_request_id", "")).strip(),
+            "approval_token": str(body.get("approval_token", "")).strip(),
+        },
+    )
     if "error" in data:
-        return JSONResponse(status_code=404, content=data)
+        return JSONResponse(status_code=404 if data["error"] == "not found" else 400, content=data)
     return data
 
 
 @app.post("/api/history/purge")
 async def history_purge(auth: Auth, request: Request):
-    body = await request.json()
-    days = max(int(body.get("days", 30)), 1)
-    data = await query_one("history_purge", {"days": days})
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    try:
+        days = max(int(body.get("days", 30)), 1)
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "days must be an integer"})
+    data = await query_one(
+        "history_purge",
+        {
+            "days": days,
+            "approval_request_id": str(body.get("approval_request_id", "")).strip(),
+            "approval_token": str(body.get("approval_token", "")).strip(),
+        },
+    )
     return data
 
 
@@ -457,10 +643,20 @@ async def analytics_compile_time(auth: Auth):
 
 @app.post("/api/emerge/etc-update/resolve")
 async def etc_update_resolve(auth: Auth, request: Request):
-    body = await request.json()
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
     cfg_file = body.get("cfg_file", "")
     action = body.get("action", "")
-    data = await query_one("etc_update_resolve", {"cfg_file": cfg_file, "action": action})
+    data = await query_one(
+        "etc_update_resolve",
+        {
+            "cfg_file": cfg_file,
+            "action": action,
+            "approval_request_id": str(body.get("approval_request_id", "")).strip(),
+            "approval_token": str(body.get("approval_token", "")).strip(),
+        },
+    )
     return data
 
 
@@ -483,7 +679,9 @@ async def overlay_config(auth: Auth):
 async def overlay_add(auth: Auth, request: Request):
     if not _overlay_add_enabled():
         return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
-    body = await request.json()
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
     name      = str(body.get("name", "")).strip()
     sync_type = str(body.get("sync_type", "git")).strip()
     sync_uri  = str(body.get("sync_uri", "")).strip()
@@ -495,6 +693,8 @@ async def overlay_add(auth: Auth, request: Request):
         "sync_uri": sync_uri,
         "approve_danger": approve_danger,
         "approval_text": approval_text,
+        "approval_request_id": str(body.get("approval_request_id", "")).strip(),
+        "approval_token": str(body.get("approval_token", "")).strip(),
     })
     if "error" in data:
         return JSONResponse(status_code=400, content=data)
@@ -502,20 +702,42 @@ async def overlay_add(auth: Auth, request: Request):
 
 
 @app.delete("/api/overlays/{name}")
-async def overlay_remove(auth: Auth, name: str, purge: int = Query(default=0)):
-    data = await query_one("overlay_remove", {"name": name, "purge": bool(purge)})
+async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Query(default=0)):
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    data = await query_one("overlay_remove", {
+        "name": name,
+        "purge": bool(purge),
+        "approve_danger": bool(body.get("approve_danger", False)),
+        "approval_text": str(body.get("approval_text", "")).strip(),
+        "approval_request_id": str(body.get("approval_request_id", "")).strip(),
+        "approval_token": str(body.get("approval_token", "")).strip(),
+    })
     if "error" in data:
         return JSONResponse(status_code=400, content=data)
     return data
 
 
 @app.websocket("/ws/overlays/sync/{name}")
-async def ws_overlay_sync(websocket: WebSocket, name: str):
+async def ws_overlay_sync(
+    websocket: WebSocket,
+    name: str,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
     if not await _ws_require_auth(websocket):
         return
     try:
         job_id = None
-        async for chunk in query("overlay_sync", {"name": name}):
+        async for chunk in query(
+            "overlay_sync",
+            {
+                "name": name,
+                "approval_request_id": approval_request_id,
+                "approval_token": approval_token,
+            },
+        ):
             await websocket.send_text(json.dumps(chunk))
             if "job_id" in chunk:
                 job_id = chunk["job_id"]
@@ -567,12 +789,13 @@ async def ws_world_updates(websocket: WebSocket):
 
 
 # ---------------------------------------------------------------------------
-# Serve frontend static files (populated by Svelte build)
+# Serve frontend static files
 # ---------------------------------------------------------------------------
 
 # Search order: ARBOR_STATIC_DIR env, install paths, repo dev paths.
-# Alpine (no-build) layout has files directly in /usr/lib/arbor/frontend/.
-# The old dist/ layout is kept as a fallback during transition.
+# Alpine (no-build) layout has files directly in /usr/lib/arbor/frontend/ and
+# in the repository under frontend/alpine/. The old dist/ layout is kept as a
+# compatibility fallback.
 _static_candidates = [
     os.environ.get("ARBOR_STATIC_DIR"),
     "/usr/share/arbor/frontend",                                       # Portage-installed (ebuild)
