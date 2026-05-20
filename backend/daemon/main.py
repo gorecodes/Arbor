@@ -16,6 +16,7 @@ import time
 import uuid
 import logging
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
@@ -25,6 +26,8 @@ from arbor.ipc_auth import IPCAuthError, load_ipc_key, verify_request
 SOCKET_PATH = "/run/arbor/daemon.sock"
 MAX_JOB_LOG_BYTES = 512 * 1024
 MAX_HISTORY_LOG_BYTES = 1024 * 1024
+RUNNING_HISTORY_FLUSH_SECONDS = 30.0
+RUNNING_HISTORY_FLUSH_LINES = 100
 _ENV_FILE = Path(os.environ.get("ARBOR_ENV_FILE", "/etc/arbor/arbor.env"))
 _ENABLED_VALUES = {"1", "true", "yes", "on"}
 _STATE_DIR = Path("/var/lib/arbor/jobs")
@@ -177,6 +180,7 @@ class _Job:
         created_at: float | None = None,
         started_at: float | None = None,
         pid: int | None = None,
+        pid_started_at: int | None = None,
         recovered: bool = False,
         status_note: str | None = None,
         status_updated_at: float | None = None,
@@ -191,6 +195,7 @@ class _Job:
         self.created_at: float = now if created_at is None else created_at
         self.started_at: float = self.created_at if started_at is None else started_at
         self.pid: int | None = pid if pid is not None else getattr(proc, "pid", None)
+        self.pid_started_at: int | None = pid_started_at
         self.recovered = recovered
         self.status_note = status_note
         self.status_updated_at: float = now if status_updated_at is None else status_updated_at
@@ -198,6 +203,8 @@ class _Job:
         self._log_bytes = 0
         self._log_truncated = False
         self._history_log = _HistoryLogBuffer()
+        self._history_checkpointed_at: float = self.created_at
+        self._history_lines_since_flush = 0
 
     def set_status(self, status: str, *, returncode=None, note: str | None = None, when: float | None = None):
         self.status = status
@@ -220,6 +227,7 @@ class _Job:
             self._log_truncated = True
         if "line" in stored:
             self._history_log.append_line(stored["line"])
+            self._history_lines_since_flush += 1
         for q in self._queues:
             q.put_nowait(chunk)
 
@@ -298,10 +306,23 @@ _DB_PATH = "/var/lib/arbor/history.db"
 _db_lock = threading.Lock()
 
 
+@contextmanager
+def _db_conn():
+    conn = sqlite3.connect(_DB_PATH)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def _db_init():
     Path(_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS job_history (
                     job_id TEXT PRIMARY KEY,
@@ -314,12 +335,22 @@ def _db_init():
                     log TEXT
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS job_history_checkpoints (
+                    job_id TEXT PRIMARY KEY,
+                    atom TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    log TEXT
+                )
+            """)
 
 
 def _history_save(job_id: str, atom: str, kind: str, status: str, returncode, created_at: float, finished_at: float, log_text: str):
     log_text, _ = _truncate_history_text(log_text)
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO job_history "
                 "(job_id, atom, kind, status, returncode, created_at, finished_at, log) "
@@ -328,9 +359,39 @@ def _history_save(job_id: str, atom: str, kind: str, status: str, returncode, cr
             )
 
 
+def _history_checkpoint_save(job_id: str, atom: str, kind: str, created_at: float, updated_at: float, log_text: str):
+    log_text, _ = _truncate_history_text(log_text)
+    with _db_lock:
+        with _db_conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO job_history_checkpoints "
+                "(job_id, atom, kind, created_at, updated_at, log) "
+                "VALUES (?,?,?,?,?,?)",
+                (job_id, atom, kind, created_at, updated_at, log_text),
+            )
+
+
+def _history_checkpoint_load(job_id: str) -> dict | None:
+    with _db_lock:
+        with _db_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT job_id, atom, kind, created_at, updated_at, log "
+                "FROM job_history_checkpoints WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+
+def _history_checkpoint_delete(job_id: str):
+    with _db_lock:
+        with _db_conn() as conn:
+            conn.execute("DELETE FROM job_history_checkpoints WHERE job_id=?", (job_id,))
+
+
 def _history_list(limit: int, offset: int, kind: str) -> dict:
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             conn.row_factory = sqlite3.Row
             if kind:
                 total = conn.execute("SELECT COUNT(*) FROM job_history WHERE kind=?", (kind,)).fetchone()[0]
@@ -351,7 +412,7 @@ def _history_list(limit: int, offset: int, kind: str) -> dict:
 
 def _history_log(job_id: str) -> dict:
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             row = conn.execute("SELECT log FROM job_history WHERE job_id=?", (job_id,)).fetchone()
             if row is None:
                 return {"error": "not found"}
@@ -362,7 +423,7 @@ def _history_log(job_id: str) -> dict:
 
 def _history_delete(job_id: str) -> dict:
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             deleted = conn.execute("DELETE FROM job_history WHERE job_id=?", (job_id,)).rowcount
             if deleted == 0:
                 return {"error": "not found"}
@@ -372,7 +433,7 @@ def _history_delete(job_id: str) -> dict:
 def _history_purge(days: int) -> dict:
     cutoff = time.time() - days * 86400
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             deleted = conn.execute("DELETE FROM job_history WHERE created_at < ?", (cutoff,)).rowcount
             return {"deleted": deleted}
 
@@ -380,7 +441,7 @@ def _history_purge(days: int) -> dict:
 def _history_stats() -> dict:
     cutoff_30d = time.time() - 30 * 86400
     with _db_lock:
-        with sqlite3.connect(_DB_PATH) as conn:
+        with _db_conn() as conn:
             conn.row_factory = sqlite3.Row
 
             rows = conn.execute(
@@ -447,6 +508,7 @@ def _job_state_payload(job_id: str, job: _Job) -> dict:
         "kind": job.kind,
         "atom": job.atom,
         "pid": job.pid,
+        "pid_started_at": job.pid_started_at,
         "status": job.status,
         "created_at": job.created_at,
         "started_at": job.started_at,
@@ -490,6 +552,25 @@ def _pid_is_running(pid: int | None) -> bool:
     return True
 
 
+def _pid_start_time(pid: int | None) -> int | None:
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        after_comm = stat_text.rsplit(") ", 1)[1]
+        return int(after_comm.split()[19])
+    except (IndexError, OSError, ValueError):
+        return None
+
+
+def _pid_matches(pid: int | None, pid_started_at: int | None) -> bool:
+    if not _pid_is_running(pid):
+        return False
+    if pid_started_at is None:
+        return True
+    return _pid_start_time(pid) == pid_started_at
+
+
 def _load_recovered_jobs() -> dict[str, _Job]:
     recovered: dict[str, _Job] = {}
     if not _STATE_DIR.exists():
@@ -504,12 +585,18 @@ def _load_recovered_jobs() -> dict[str, _Job]:
             started_at = float(raw.get("started_at", created_at))
             pid = raw.get("pid")
             pid = int(pid) if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit()) else None
+            pid_started_at = raw.get("pid_started_at")
+            pid_started_at = (
+                int(pid_started_at)
+                if isinstance(pid_started_at, int) or (isinstance(pid_started_at, str) and pid_started_at.isdigit())
+                else None
+            )
         except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
             log.warning("ignoring corrupt job state %s: %s", path, exc)
             continue
 
         recovered_at = time.time()
-        if _pid_is_running(pid):
+        if _pid_matches(pid, pid_started_at):
             status = "orphaned"
             note = "job process still exists after daemon restart, but live output cannot be reattached"
         else:
@@ -523,6 +610,7 @@ def _load_recovered_jobs() -> dict[str, _Job]:
             created_at=created_at,
             started_at=started_at,
             pid=pid,
+            pid_started_at=pid_started_at,
             recovered=True,
             status_note=note,
             status_updated_at=recovered_at,
@@ -532,6 +620,8 @@ def _load_recovered_jobs() -> dict[str, _Job]:
             _persist_job_state(job_id, job)
         except OSError as exc:
             log.warning("failed to refresh recovered state for %s: %s", job_id, exc)
+        if status == "unknown":
+            _finalize_recovered_job_history(job_id, job, finished_at=recovered_at)
     return recovered
 
 _ANSI = re.compile(r'\x1b\[[0-9;]*[mKJH]|\x1b\].*?(?:\x07|\x1b\\)')
@@ -606,6 +696,21 @@ _executor = ThreadPoolExecutor(max_workers=4)
 async def in_thread(fn, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, fn, *args)
+
+
+async def _terminate_subprocess(proc, timeout: float = 5.0):
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        await proc.wait()
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -1328,29 +1433,33 @@ async def cmd_emerge_pretend(args):
     if not clean:
         cmd.append("--autounmask=y")
     cmd.append(atom)
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=_EMERGE_ENV,
-    )
-    lines = []
-    async for raw in proc.stdout:
-        line = _ANSI.sub("", raw.decode(errors="replace").rstrip())
-        lines.append(line)
-        yield {"line": line}
-    await proc.wait()
-    full = "\n".join(lines)
-    # Only flag needs_unmask when emerge actually failed due to masking
-    needs_unmask = proc.returncode != 0 and any(s in full for s in [
-        "autounmask-write",
-        "package.accept_keywords",
-        "package.license",
-        "package.unmask",
-        "missing keyword",
-        "masked by: ~",
-    ])
-    yield {"done": True, "returncode": proc.returncode, "needs_unmask": needs_unmask}
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        lines = []
+        async for raw in proc.stdout:
+            line = _ANSI.sub("", raw.decode(errors="replace").rstrip())
+            lines.append(line)
+            yield {"line": line}
+        await proc.wait()
+        full = "\n".join(lines)
+        # Only flag needs_unmask when emerge actually failed due to masking
+        needs_unmask = proc.returncode != 0 and any(s in full for s in [
+            "autounmask-write",
+            "package.accept_keywords",
+            "package.license",
+            "package.unmask",
+            "missing keyword",
+            "masked by: ~",
+        ])
+        yield {"done": True, "returncode": proc.returncode, "needs_unmask": needs_unmask}
+    finally:
+        await _terminate_subprocess(proc)
 
 
 _MASKED_RE = re.compile(
@@ -1365,54 +1474,115 @@ async def cmd_emerge_autounmask(args):
         yield {"error": "invalid atom"}
         return
 
-    # Step 1 — plain pretend to collect ALL masked packages (shows "masked by:" lines).
-    yield {"line": "-- scanning dependency tree for masked packages..."}
-    proc1 = await asyncio.create_subprocess_exec(
-        "emerge", "--pretend", "--color=n", atom,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=_EMERGE_ENV,
+    proc1 = None
+    proc2 = None
+    try:
+        # Step 1 — plain pretend to collect ALL masked packages (shows "masked by:" lines).
+        yield {"line": "-- scanning dependency tree for masked packages..."}
+        proc1 = await asyncio.create_subprocess_exec(
+            "emerge", "--pretend", "--color=n", atom,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        scan_lines = []
+        async for raw in proc1.stdout:
+            scan_lines.append(_ANSI.sub("", raw.decode(errors="replace").rstrip()))
+        await proc1.wait()
+        scan_full = "\n".join(scan_lines)
+
+        # Step 2 — run a plain --autounmask=y pretend so portage prints the full
+        # autounmask report (without --autounmask-write — we never want emerge to
+        # write into /etc/portage behind the user's back).
+        proc2 = await asyncio.create_subprocess_exec(
+            "emerge", "--pretend", "--autounmask=y", "--color=n", atom,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        async for raw in proc2.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc2.wait()
+
+        # Step 3 — parse the plain-pretend output for "masked by" lines and write
+        # keyword entries to our own file under /etc/portage/package.accept_keywords.
+        # We never touch any other portage config file: USE/license/mask changes
+        # the user must apply manually.
+        entries = []
+        for m in _MASKED_RE.finditer(scan_full):
+            cpv_raw, kw_raw = m.group(1), m.group(2)
+            kw = "**" if kw_raw == "missing" else kw_raw
+            entries.append((_normalize_atom(cpv_raw), kw))
+        entries.append((atom, "**"))  # always accept the main atom
+
+        kw_file, written, rejected = await in_thread(_write_keywords, entries)
+        if written:
+            for w in written:
+                yield {"line": f"-- wrote '{w}' → {kw_file}"}
+        else:
+            yield {"line": f"-- no new keyword entries needed in {kw_file}"}
+        for r in rejected:
+            yield {"line": f"-- rejected invalid entry: {r}"}
+
+        yield {"done": True, "returncode": 0}
+    finally:
+        await _terminate_subprocess(proc2)
+        await _terminate_subprocess(proc1)
+
+
+def _checkpoint_running_job(job_id: str, job: _Job, *, force: bool = False, now: float | None = None):
+    now = time.time() if now is None else now
+    if not force:
+        if job._history_lines_since_flush < RUNNING_HISTORY_FLUSH_LINES:
+            if now - job._history_checkpointed_at < RUNNING_HISTORY_FLUSH_SECONDS:
+                return
+    log_text, _ = job.history_log_text()
+    if not log_text:
+        return
+    _history_checkpoint_save(job_id, job.atom, job.kind, job.created_at, now, log_text)
+    job._history_checkpointed_at = now
+    job._history_lines_since_flush = 0
+
+
+def _finalize_recovered_job_history(job_id: str, job: _Job, finished_at: float):
+    checkpoint = _history_checkpoint_load(job_id)
+    if checkpoint is None:
+        return
+    _history_save(
+        job_id,
+        checkpoint["atom"],
+        checkpoint["kind"],
+        job.status,
+        job.returncode,
+        checkpoint["created_at"],
+        finished_at,
+        checkpoint.get("log") or "",
     )
-    scan_lines = []
-    async for raw in proc1.stdout:
-        scan_lines.append(_ANSI.sub("", raw.decode(errors="replace").rstrip()))
-    await proc1.wait()
-    scan_full = "\n".join(scan_lines)
+    _history_checkpoint_delete(job_id)
 
-    # Step 2 — run a plain --autounmask=y pretend so portage prints the full
-    # autounmask report (without --autounmask-write — we never want emerge to
-    # write into /etc/portage behind the user's back).
-    proc2 = await asyncio.create_subprocess_exec(
-        "emerge", "--pretend", "--autounmask=y", "--color=n", atom,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=_EMERGE_ENV,
-    )
-    async for raw in proc2.stdout:
-        yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
-    await proc2.wait()
 
-    # Step 3 — parse the plain-pretend output for "masked by" lines and write
-    # keyword entries to our own file under /etc/portage/package.accept_keywords.
-    # We never touch any other portage config file: USE/license/mask changes
-    # the user must apply manually.
-    entries = []
-    for m in _MASKED_RE.finditer(scan_full):
-        cpv_raw, kw_raw = m.group(1), m.group(2)
-        kw = "**" if kw_raw == "missing" else kw_raw
-        entries.append((_normalize_atom(cpv_raw), kw))
-    entries.append((atom, "**"))  # always accept the main atom
+async def _reconcile_recovered_jobs_once():
+    for job_id, job in list(_jobs.items()):
+        if not job.recovered or job.status != "orphaned":
+            continue
+        if _pid_matches(job.pid, job.pid_started_at):
+            continue
+        finished_at = time.time()
+        job.set_status("unknown", note="job process exited after daemon restart, but its final state is unknown", when=finished_at)
+        try:
+            await in_thread(_persist_job_state, job_id, job)
+        except Exception as exc:
+            log.warning("failed to persist reconciled recovered state for %s: %s", job_id, exc)
+        try:
+            await in_thread(_finalize_recovered_job_history, job_id, job, finished_at)
+        except Exception as exc:
+            log.warning("failed to finalize recovered history for %s: %s", job_id, exc)
 
-    kw_file, written, rejected = await in_thread(_write_keywords, entries)
-    if written:
-        for w in written:
-            yield {"line": f"-- wrote '{w}' → {kw_file}"}
-    else:
-        yield {"line": f"-- no new keyword entries needed in {kw_file}"}
-    for r in rejected:
-        yield {"line": f"-- rejected invalid entry: {r}"}
 
-    yield {"done": True, "returncode": 0}
+async def _reconcile_recovered_jobs():
+    while True:
+        await asyncio.sleep(30)
+        await _reconcile_recovered_jobs_once()
 
 
 async def _run_job(job_id: str):
@@ -1420,6 +1590,7 @@ async def _run_job(job_id: str):
     try:
         async for raw in job.proc.stdout:
             job._push({"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())})
+            await in_thread(_checkpoint_running_job, job_id, job)
         await job.proc.wait()
         job.set_status("done" if job.proc.returncode == 0 else "failed", returncode=job.proc.returncode)
         job._push({"done": True, "returncode": job.proc.returncode})
@@ -1438,6 +1609,10 @@ async def _run_job(job_id: str):
                             job.returncode, job.created_at, finished_at, log_text)
         except Exception as exc:
             log.warning("failed to persist history for job %s: %s", job_id, exc)
+        try:
+            await in_thread(_history_checkpoint_delete, job_id)
+        except Exception as exc:
+            log.warning("failed to remove checkpoint for job %s: %s", job_id, exc)
         try:
             await in_thread(_remove_job_state, job_id)
         except Exception as exc:
@@ -1484,7 +1659,7 @@ async def cmd_emerge_install(args):
             env=_EMERGE_ENV,
         )
         job_id = str(uuid.uuid4())
-        _jobs[job_id] = _Job(atom, proc, kind="install")
+        _jobs[job_id] = _Job(atom, proc, kind="install", pid_started_at=_pid_start_time(proc.pid))
         await in_thread(_persist_job_state, job_id, _jobs[job_id])
 
     asyncio.create_task(_run_job(job_id))
@@ -1506,7 +1681,7 @@ async def _start_background_job(key: str, cmd: list, kind: str = "task"):
             env=_EMERGE_ENV,
         )
         job_id = str(uuid.uuid4())
-        _jobs[job_id] = _Job(key, proc, kind=kind)
+        _jobs[job_id] = _Job(key, proc, kind=kind, pid_started_at=_pid_start_time(proc.pid))
         await in_thread(_persist_job_state, job_id, _jobs[job_id])
 
     asyncio.create_task(_run_job(job_id))
@@ -1519,16 +1694,20 @@ async def cmd_emerge_uninstall_pretend(args):
     if not atom:
         yield {"error": "invalid atom"}
         return
-    proc = await asyncio.create_subprocess_exec(
-        "emerge", "--pretend", "--unmerge", "--verbose", "--color=n", atom,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=_EMERGE_ENV,
-    )
-    async for raw in proc.stdout:
-        yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
-    await proc.wait()
-    yield {"done": True, "returncode": proc.returncode}
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "emerge", "--pretend", "--unmerge", "--verbose", "--color=n", atom,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        async for raw in proc.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc.wait()
+        yield {"done": True, "returncode": proc.returncode}
+    finally:
+        await _terminate_subprocess(proc)
 
 
 async def cmd_emerge_uninstall(args):
@@ -1679,11 +1858,20 @@ async def cmd_job_cancel(args):
 
 def _etc_update_check():
     import subprocess, difflib
-    result = subprocess.run(
-        ["find", "/etc", "-name", "._cfg*", "-type", "f"],
-        capture_output=True, text=True,
-    )
-    cfg_files = [f for f in result.stdout.strip().splitlines() if f]
+    warning = None
+    try:
+        result = subprocess.run(
+            ["find", "/etc", "-name", "._cfg*", "-type", "f"],
+            capture_output=True, text=True, timeout=15,
+        )
+        stdout = result.stdout
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors="replace")
+        warning = "etc-update scan timed out after 15s; showing partial results"
+        log.warning("%s", warning)
+    cfg_files = [f for f in stdout.strip().splitlines() if f]
     pending = []
     for cfg in cfg_files:
         real = re.sub(r"/\._cfg\d+_", "/", cfg)
@@ -1708,6 +1896,9 @@ def _etc_update_check():
             })
         except Exception as e:
             log.warning("etc_update_check error %s: %s", cfg, e)
+    if warning and pending:
+        for item in pending:
+            item["warning"] = warning
     return pending
 
 
@@ -1759,6 +1950,7 @@ def _etc_update_resolve(cfg_file: str, action: str):
 
     real_basename = re.sub(r"^\._cfg\d+_", "", cfg_path.name)
     real_path = cfg_path.with_name(real_basename)
+    wrote_real = False
 
     try:
         if action == "replace":
@@ -1774,7 +1966,18 @@ def _etc_update_resolve(cfg_file: str, action: str):
             else:
                 create_mode = stat.S_IMODE(cfg_path.stat().st_mode)
             _write_bytes_nofollow(real_path, cfg_path.read_bytes(), create_mode)
-        cfg_path.unlink()
+            wrote_real = True
+        try:
+            cfg_path.unlink()
+        except OSError as e:
+            if wrote_real:
+                return [{
+                    "error": f"updated {real_path} but could not remove pending file {cfg_path}: {e}",
+                    "cfg_file": str(cfg_path),
+                    "real_file": str(real_path),
+                    "action": action,
+                }]
+            raise
     except OSError as e:
         if e.errno == errno.ELOOP:
             return [{"error": f"refusing to overwrite symlink target: {real_path}"}]
@@ -1852,6 +2055,10 @@ def _overlay_add_enabled() -> bool:
 
 def _overlay_approval_text(name: str, sync_uri: str) -> str:
     return f"ADD {name} {sync_uri}"
+
+
+def _overlay_remove_approval_text(name: str, purge: bool) -> str:
+    return f"{'PURGE' if purge else 'REMOVE'} {name}"
 
 
 def _validate_overlay_uri(sync_type: str, sync_uri: str) -> str | None:
@@ -1981,6 +2188,16 @@ async def cmd_overlay_remove(args):
     global _repos_conf_mtime
     name  = args.get("name", "").strip()
     purge = bool(args.get("purge", False))
+    approve_danger = bool(args.get("approve_danger", False))
+    approval_text = args.get("approval_text", "").strip()
+    if not approve_danger:
+        action = "purge" if purge else "remove"
+        yield {"error": f"overlay {action} requires an explicit dangerous-action confirmation"}
+        return
+    if approval_text != _overlay_remove_approval_text(name, purge):
+        action = "purge" if purge else "remove"
+        yield {"error": f"overlay {action} confirmation text does not match the requested repository"}
+        return
     result = await in_thread(_overlay_remove, name, purge)
     yield result
     if "ok" in result:
@@ -2076,6 +2293,7 @@ async def main():
     _jobs.update(_load_recovered_jobs())
     if _jobs:
         log.warning("recovered %d non-live job snapshot(s) after restart", len(_jobs))
+    asyncio.create_task(_reconcile_recovered_jobs())
     asyncio.create_task(_cleanup_jobs())
     log.info("listening on %s", SOCKET_PATH)
     async with server:

@@ -40,9 +40,9 @@ echo "==> Setting up Python venv (with system site-packages for portage access)"
 python3 -m venv --system-site-packages /usr/lib/arbor/.venv
 /usr/lib/arbor/.venv/bin/pip install --quiet /usr/lib/arbor/
 
-echo "==> Creating entry point symlinks in /usr/local/bin"
-ln -sf /usr/lib/arbor/.venv/bin/arbor        /usr/local/bin/arbor
-ln -sf /usr/lib/arbor/.venv/bin/arbor-daemon /usr/local/bin/arbor-daemon
+echo "==> Creating entry point symlinks in /usr/bin"
+ln -sf /usr/lib/arbor/.venv/bin/arbor        /usr/bin/arbor
+ln -sf /usr/lib/arbor/.venv/bin/arbor-daemon /usr/bin/arbor-daemon
 
 # --- frontend ---
 echo "==> Installing frontend"

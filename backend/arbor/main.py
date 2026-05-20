@@ -26,13 +26,12 @@ logging.basicConfig(
 
 app = FastAPI(title="Arbor", version="0.1.0", docs_url=None, redoc_url=None)
 
-# The current Alpine frontend evaluates template expressions at runtime and uses
-# inline style attributes/bindings, so CSP cannot drop unsafe-eval or
-# unsafe-inline for styles without breaking the UI.
+# The frontend uses Alpine's CSP-friendly build, so script-src can omit
+# unsafe-eval. Inline styles are still used by the current UI.
 _SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-eval'; "
+        "script-src 'self'; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "connect-src 'self' ws: wss:; "
@@ -54,11 +53,22 @@ async def add_security_headers(request: Request, call_next):
         response.headers.setdefault(header, value)
     return response
 
-# CORS — default to loopback only. Set ARBOR_CORS_ORIGINS to a comma-separated
-# list to override (e.g. "https://arbor.lan,http://localhost:5173").
-_default_cors = "https://localhost:8443,http://localhost:5173"
+def _default_loopback_origins() -> list[str]:
+    origins: list[str] = []
+    for scheme in ("https", "http"):
+        origins.extend([
+            f"{scheme}://localhost:8443",
+            f"{scheme}://127.0.0.1:8443",
+            f"{scheme}://[::1]:8443",
+        ])
+    return origins
+
+
+# CORS — default to local loopback origins only. Set ARBOR_CORS_ORIGINS to a
+# comma-separated list to override.
 _cors_origins = [
-    o.strip() for o in os.environ.get("ARBOR_CORS_ORIGINS", _default_cors).split(",")
+    o.strip()
+    for o in os.environ.get("ARBOR_CORS_ORIGINS", ",".join(_default_loopback_origins())).split(",")
     if o.strip()
 ]
 app.add_middleware(
@@ -100,6 +110,19 @@ def _env_enabled(name: str) -> bool:
 
 def _overlay_add_enabled() -> bool:
     return _env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
+
+
+async def _json_object_body(request: Request, *, allow_empty: bool = True) -> dict | JSONResponse:
+    raw_body = await request.body()
+    if not raw_body:
+        return {} if allow_empty else JSONResponse(status_code=400, content={"error": "request body must be a JSON object"})
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=400, content={"error": "request body must be an object"})
+    return body
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +215,12 @@ async def _ws_fail(websocket: WebSocket, code: int, error: str):
         pass
 
 
+def _ws_origin_allowed(origin: str | None) -> bool:
+    if not origin:
+        return True
+    return origin in _cors_origins
+
+
 async def _ws_require_auth(websocket: WebSocket) -> bool:
     await websocket.accept()
     try:
@@ -215,6 +244,10 @@ async def _ws_require_auth(websocket: WebSocket) -> bool:
     token = payload.get("token") if isinstance(payload, dict) else None
     if not isinstance(payload, dict) or payload.get("type") != "auth" or not verify_token(token):
         await _ws_fail(websocket, 4401, "invalid or missing token")
+        return False
+    origin = websocket.headers.get("origin")
+    if not _ws_origin_allowed(origin):
+        await _ws_fail(websocket, 4403, "origin not allowed")
         return False
     return True
 
@@ -427,8 +460,13 @@ async def history_delete(auth: Auth, job_id: str):
 
 @app.post("/api/history/purge")
 async def history_purge(auth: Auth, request: Request):
-    body = await request.json()
-    days = max(int(body.get("days", 30)), 1)
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    try:
+        days = max(int(body.get("days", 30)), 1)
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=400, content={"error": "days must be an integer"})
     data = await query_one("history_purge", {"days": days})
     return data
 
@@ -457,7 +495,9 @@ async def analytics_compile_time(auth: Auth):
 
 @app.post("/api/emerge/etc-update/resolve")
 async def etc_update_resolve(auth: Auth, request: Request):
-    body = await request.json()
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
     cfg_file = body.get("cfg_file", "")
     action = body.get("action", "")
     data = await query_one("etc_update_resolve", {"cfg_file": cfg_file, "action": action})
@@ -483,7 +523,9 @@ async def overlay_config(auth: Auth):
 async def overlay_add(auth: Auth, request: Request):
     if not _overlay_add_enabled():
         return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
-    body = await request.json()
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
     name      = str(body.get("name", "")).strip()
     sync_type = str(body.get("sync_type", "git")).strip()
     sync_uri  = str(body.get("sync_uri", "")).strip()
@@ -502,8 +544,16 @@ async def overlay_add(auth: Auth, request: Request):
 
 
 @app.delete("/api/overlays/{name}")
-async def overlay_remove(auth: Auth, name: str, purge: int = Query(default=0)):
-    data = await query_one("overlay_remove", {"name": name, "purge": bool(purge)})
+async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Query(default=0)):
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    data = await query_one("overlay_remove", {
+        "name": name,
+        "purge": bool(purge),
+        "approve_danger": bool(body.get("approve_danger", False)),
+        "approval_text": str(body.get("approval_text", "")).strip(),
+    })
     if "error" in data:
         return JSONResponse(status_code=400, content=data)
     return data
@@ -567,12 +617,13 @@ async def ws_world_updates(websocket: WebSocket):
 
 
 # ---------------------------------------------------------------------------
-# Serve frontend static files (populated by Svelte build)
+# Serve frontend static files
 # ---------------------------------------------------------------------------
 
 # Search order: ARBOR_STATIC_DIR env, install paths, repo dev paths.
-# Alpine (no-build) layout has files directly in /usr/lib/arbor/frontend/.
-# The old dist/ layout is kept as a fallback during transition.
+# Alpine (no-build) layout has files directly in /usr/lib/arbor/frontend/ and
+# in the repository under frontend/alpine/. The old dist/ layout is kept as a
+# compatibility fallback.
 _static_candidates = [
     os.environ.get("ARBOR_STATIC_DIR"),
     "/usr/share/arbor/frontend",                                       # Portage-installed (ebuild)

@@ -12,6 +12,33 @@
     return (localStorage.getItem('arbor_token') || '').trim()
   }
 
+  function _storageScope() {
+    const token = _getToken()
+    if (!token) return 'anon'
+    let hash = 2166136261
+    for (let i = 0; i < token.length; i++) {
+      hash ^= token.charCodeAt(i)
+      hash = Math.imul(hash, 16777619)
+    }
+    return 't' + (hash >>> 0).toString(16)
+  }
+
+  function _scopedStorageKey(key) {
+    return key + ':' + _storageScope()
+  }
+
+  function _scopedStorageGet(key) {
+    return localStorage.getItem(_scopedStorageKey(key))
+  }
+
+  function _scopedStorageSet(key, value) {
+    localStorage.setItem(_scopedStorageKey(key), value)
+  }
+
+  function _scopedStorageRemove(key) {
+    localStorage.removeItem(_scopedStorageKey(key))
+  }
+
   function _hdr() {
     return { 'Authorization': 'Bearer ' + _getToken(), 'Content-Type': 'application/json' }
   }
@@ -30,8 +57,10 @@
     return res.json()
   }
 
-  async function _del(path) {
-    const res = await fetch(BASE + path, { method: 'DELETE', headers: _hdr() })
+  async function _del(path, body) {
+    const opts = { method: 'DELETE', headers: _hdr() }
+    if (body !== undefined) opts.body = JSON.stringify(body)
+    const res = await fetch(BASE + path, opts)
     if (res.status === 401) throw new Error('Unauthorized')
     if (!res.ok) throw new Error('HTTP ' + res.status)
     return res.json()
@@ -78,7 +107,8 @@
     config: ()                             => _get('/overlays/config'),
     add:    (name, sync_type, sync_uri, approve_danger, approval_text) =>
       _post('/overlays', { name, sync_type, sync_uri, approve_danger, approval_text }),
-    remove: (name, purge = false)          => _del('/overlays/' + encodeURIComponent(name) + (purge ? '?purge=1' : '')),
+    remove: (name, purge = false, approve_danger = false, approval_text = '') =>
+      _del('/overlays/' + encodeURIComponent(name) + (purge ? '?purge=1' : ''), { approve_danger, approval_text }),
   }
 
   function _wsProto() { return location.protocol === 'https:' ? 'wss' : 'ws' }
@@ -511,6 +541,7 @@
       error: null,
       _timer: null,
       init() {
+        this.$nextTick(() => this._renderCompileCats())
         this._load()
         this.$watch('$store.router.view', v => {
           if (v === 'dashboard') { this._load(); this._scheduleRefresh() }
@@ -541,6 +572,12 @@
           this.runningJobs = jobsRes.status === 'fulfilled' && Array.isArray(jobsRes.value) ? jobsRes.value : []
           this.recentHistory = historyRes.status === 'fulfilled' && Array.isArray(historyRes.value?.items) ? historyRes.value.items : []
         } catch(e) { this.error = e.message }
+        finally { this.$nextTick(() => this._renderCompileCats()) }
+      },
+      _renderCompileCats() {
+        const host = this.$refs.compileCatsHost
+        if (!host) return
+        host.innerHTML = this.compileCatsSvg()
       },
       fmtBytes(b) {
         if (!b) return '0 B'
@@ -1008,7 +1045,7 @@
         return `The system is idle, the tree sync looks ${this.syncFreshnessLabel()}, and CPU, memory, and root disk usage are within normal operating range.`
       },
       _esc(s) {
-        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')
       },
       _fmtDur(s) {
         s = Math.round(s)
@@ -1365,10 +1402,36 @@ ${labels}
         const name = this.selectedFlagName()
         return this._allFlags().find(flag => flag.name === name) || null
       },
+      selectedFlagLabel() {
+        const flag = this.selectedFlag()
+        return flag ? flag.name : ''
+      },
+      selectedFlagDescription() {
+        const flag = this.selectedFlag()
+        return (flag && flag.description) || 'No description available for this USE flag.'
+      },
+      selectedFlagOriginFile() {
+        const flag = this.selectedFlag()
+        return (flag && flag.global_origin_file) || ''
+      },
+      selectedFlagHistory() {
+        const flag = this.selectedFlag()
+        return Array.isArray(flag && flag.global_history) ? flag.global_history : []
+      },
+      selectedFlagHistoryLength() {
+        return this.selectedFlagHistory().length
+      },
+      selectedFlagKey(suffix) {
+        const flag = this.selectedFlag()
+        return (flag && flag.name ? flag.name : 'flag') + ':' + suffix
+      },
       onSearchInput() {
         Alpine.store('router').useFlagsQuery = this.search
         clearTimeout(this._timer)
         this._timer = setTimeout(() => this._ensureSelection(), 120)
+      },
+      openPackage(cpv) {
+        navigateTo(cpv)
       },
       toggleStateFilter(value) {
         if (value === 'all') {
@@ -1666,7 +1729,10 @@ ${labels}
         this.loading = true; this.searched = true
         try { this.results = await api.search(this.query) }
         finally { this.loading = false }
-      }
+      },
+      openResult(result) {
+        navigateTo(result.best || result.cp)
+      },
     }
   }
 
@@ -1700,6 +1766,12 @@ ${labels}
         const v = this.eoValues[item.key]
         return v === undefined || v === null || v === '' ? item.default : v
       },
+      eoMin(item) {
+        return item && item.min !== undefined && item.min !== null ? item.min : 1
+      },
+      eoMax(item) {
+        return item && item.max !== undefined && item.max !== null ? item.max : 100
+      },
       eoSetValue(item, raw) {
         this.eoValues = { ...this.eoValues, [item.key]: raw }
         this.eoSave()
@@ -1707,8 +1779,8 @@ ${labels}
       _eoClamped(item) {
         let n = parseInt(this._eoValueFor(item), 10)
         if (!Number.isFinite(n)) n = item.default
-        if (n < item.min) n = item.min
-        if (n > item.max) n = item.max
+        if (n < this.eoMin(item)) n = this.eoMin(item)
+        if (n > this.eoMax(item)) n = this.eoMax(item)
         return n
       },
       _eoFlagFor(item) {
@@ -1901,6 +1973,39 @@ ${labels}
         this.error = null; this.flagsError = null; this.flagsNotice = null; this.depsError = null
         this.tab = Alpine.store('router').view === 'use-flags' ? 'use flags' : 'info'
       },
+      packageCpv() {
+        return this.info && this.info.cpv ? this.info.cpv : ''
+      },
+      packageDescription() {
+        return this.info && this.info.DESCRIPTION ? this.info.DESCRIPTION : ''
+      },
+      homepageUrl() {
+        return this.info && this.info.HOMEPAGE ? this.info.HOMEPAGE : ''
+      },
+      slotLabel() {
+        return 'slot ' + ((this.info && this.info.SLOT) || '0')
+      },
+      licenseText() {
+        return (this.info && this.info.LICENSE) || ''
+      },
+      isInstalled() {
+        return !!(this.info && this.info.installed)
+      },
+      buildTimeText() {
+        return 'built ' + this.fmtDate(this.info && this.info.BUILD_TIME)
+      },
+      installedSizeText() {
+        return this.fmtSize(this.info && this.info.SIZE)
+      },
+      goBack() {
+        navigateBack()
+      },
+      openInstall() {
+        navigate('install', Alpine.store('router').selectedPackage)
+      },
+      openUninstall() {
+        navigate('uninstall', Alpine.store('router').selectedPackage)
+      },
       async _load(atom) {
         this._reset()
         const [infoRes, plainFlagsRes, originFlagsRes, depsRes] = await Promise.allSettled([
@@ -1944,7 +2049,7 @@ ${labels}
       flagHistoryState(step) {
         return step?.enabled ? 'enabled' : 'disabled'
       },
-      validHomepage() { return this.info?.HOMEPAGE && /^https?:\/\//.test(this.info.HOMEPAGE) },
+      validHomepage() { return !!(this.homepageUrl() && /^https?:\/\//.test(this.homepageUrl())) },
       fmtSize(b) {
         if (!b) return '—'
         const kb = parseInt(b) / 1024
@@ -2141,21 +2246,21 @@ ${labels}
         detachWs(this.ws); this.ws = null
         this._resetLines()
         this.step = 'pretend'; this.running = false; this.returncode = null
-        const savedId = localStorage.getItem('arbor_uninstall_' + atom)
+        const savedId = _scopedStorageGet('arbor_uninstall_' + atom)
         if (savedId) {
           try {
             const st = await jobs.status(savedId)
             if (st.status === 'running') { this._attachToJob(atom, savedId); return }
             if (st.status === 'done' && st.returncode === 0) {
-              localStorage.removeItem('arbor_uninstall_' + atom); this.step = 'done'; return
+              _scopedStorageRemove('arbor_uninstall_' + atom); this.step = 'done'; return
             }
           } catch (_) {}
-          localStorage.removeItem('arbor_uninstall_' + atom)
+          _scopedStorageRemove('arbor_uninstall_' + atom)
         }
         try {
           const active = await jobs.listByAtom(atom)
           const running = active.find(j => j.status === 'running' && j.kind === 'uninstall')
-          if (running) { localStorage.setItem('arbor_uninstall_' + atom, running.job_id); this._attachToJob(atom, running.job_id); return }
+          if (running) { _scopedStorageSet('arbor_uninstall_' + atom, running.job_id); this._attachToJob(atom, running.job_id); return }
         } catch (_) {}
       },
       _pushLine(l) {
@@ -2188,11 +2293,11 @@ ${labels}
         const atom = Alpine.store('router').uninstallAtom
         this.step = 'uninstall'; this.returncode = null; this._resetLines(); this.running = true
         this.ws = wsEmerge('uninstall', atom, (msg) => {
-          if (msg.job_id) { localStorage.setItem('arbor_uninstall_' + atom, msg.job_id); return }
+          if (msg.job_id) { _scopedStorageSet('arbor_uninstall_' + atom, msg.job_id); return }
           if (msg.line !== undefined) this._pushLine(msg.line)
           if (msg.done) {
             this._flushLines(); this.running = false; this.returncode = msg.returncode ?? null; this.ws = null
-            localStorage.removeItem('arbor_uninstall_' + atom)
+            _scopedStorageRemove('arbor_uninstall_' + atom)
             if (this.returncode === 0) {
               invalidatePackageState(atom)
               this.step = 'done'
@@ -2208,7 +2313,7 @@ ${labels}
           if (msg.line !== undefined) { this._pushLine(msg.line); gotLines = true }
           if (msg.done) {
             this._flushLines(); this.running = false; this.returncode = msg.returncode ?? -1; this.ws = null
-            localStorage.removeItem('arbor_uninstall_' + atom)
+            _scopedStorageRemove('arbor_uninstall_' + atom)
             if (msg.connectionLost || (this.returncode !== 0 && !gotLines)) {
               this.returncode = null; this.runUninstall()
             } else if (this.returncode === 0) {
@@ -2220,6 +2325,9 @@ ${labels}
       },
       goBack() {
         detachWs(this.ws); this.ws = null
+        navigate('packages', Alpine.store('router').uninstallAtom)
+      },
+      closeDone() {
         navigate('packages', Alpine.store('router').uninstallAtom)
       },
       stepTitle() {
@@ -2273,22 +2381,22 @@ ${labels}
         this._resetLines()
         this.step = 'pretend'; this.running = false; this.returncode = null
         this.needsUnmask = false; this.etcFiles = []; this._attachRetries = 0
-        const savedId = localStorage.getItem('arbor_job_' + atom)
+        const savedId = _scopedStorageGet('arbor_job_' + atom)
         if (savedId) {
           try {
             const st = await jobs.status(savedId)
             if (st.status === 'running') { this._attachToJob(atom, savedId); return }
             if (st.status === 'done' && st.returncode === 0) {
-              localStorage.removeItem('arbor_job_' + atom)
+              _scopedStorageRemove('arbor_job_' + atom)
               await this._afterInstallDone(0); return
             }
           } catch (_) {}
-          localStorage.removeItem('arbor_job_' + atom)
+          _scopedStorageRemove('arbor_job_' + atom)
         }
         try {
           const active = await jobs.listByAtom(atom)
           const running = active.find(j => j.status === 'running')
-          if (running) { localStorage.setItem('arbor_job_' + atom, running.job_id); this._attachToJob(atom, running.job_id); return }
+          if (running) { _scopedStorageSet('arbor_job_' + atom, running.job_id); this._attachToJob(atom, running.job_id); return }
         } catch (_) {}
       },
       _pushLine(l) {
@@ -2358,7 +2466,7 @@ ${labels}
           if (msg.done) {
             this._flushLines(); this.running = false
             this.returncode = msg.returncode ?? -1; this.ws = null
-            localStorage.removeItem('arbor_job_' + atom)
+            _scopedStorageRemove('arbor_job_' + atom)
             if (this.returncode !== 0 && !gotLines && this._attachRetries < 1) {
               this._attachRetries++; this.returncode = null; this.runInstall()
             } else {
@@ -2373,12 +2481,12 @@ ${labels}
         this.step = 'install'; this.returncode = null
         this._resetLines(); this.running = true
         this.ws = wsEmerge('install', atom, async (msg) => {
-          if (msg.job_id) { localStorage.setItem('arbor_job_' + atom, msg.job_id); return }
+          if (msg.job_id) { _scopedStorageSet('arbor_job_' + atom, msg.job_id); return }
           if (msg.line !== undefined) this._pushLine(msg.line)
           if (msg.done) {
             this._flushLines(); this.running = false
             this.returncode = msg.returncode ?? null; this.ws = null
-            localStorage.removeItem('arbor_job_' + atom)
+            _scopedStorageRemove('arbor_job_' + atom)
             await this._afterInstallDone(msg.returncode ?? -1)
           }
         }, { opts: this.eoOpts() })
@@ -2395,6 +2503,7 @@ ${labels}
       },
       retry() { this.step === 'install' ? this.runInstall() : this.runAutounmask() },
       goBack() { detachWs(this.ws); this.ws = null; navigate('packages', Alpine.store('router').installAtom) },
+      closeDone() { navigate('packages', Alpine.store('router').installAtom) },
       stepTitle() {
         const atom = Alpine.store('router').installAtom || ''
         if (this.step === 'pretend')    return 'Pretend — ' + atom
@@ -2513,7 +2622,7 @@ ${labels}
         await Promise.all([
           this._resumeIfRunning('worldUpdate',  id => this._attachWorldUpdate(id)),
           this._resumeIfRunning('depclean',     id => this._attachDepclean(id)).then(() => {
-            if (!this.depclean.ws && !localStorage.getItem('arbor_depclean_ran')) return this._resumeIfRunning('depcleanPretend', id => this._attachDepcleanPretend(id))
+            if (!this.depclean.ws && !_scopedStorageGet('arbor_depclean_ran')) return this._resumeIfRunning('depcleanPretend', id => this._attachDepcleanPretend(id))
           }),
           this._resumeIfRunning('preserved',    id => this._attachPreserved(id)),
           this._resumeIfRunning('sync',         id => this._attachSync(id)),
@@ -2631,7 +2740,7 @@ ${labels}
       },
       async _resumeIfRunning(name, attach) {
         const meta = _JOB_META[name]
-        let candidate = localStorage.getItem(meta.storage)
+        let candidate = _scopedStorageGet(meta.storage)
         if (!candidate) {
           try {
             const active = await jobs.listByAtom(meta.atom)
@@ -2647,13 +2756,13 @@ ${labels}
         try {
           const st = await jobs.status(candidate)
           if (st.status === 'running' || (meta.attachOnDone && st.status === 'done')) {
-            if (st.status === 'running') localStorage.setItem(meta.storage, candidate)
-            else localStorage.removeItem(meta.storage)
+            if (st.status === 'running') _scopedStorageSet(meta.storage, candidate)
+            else _scopedStorageRemove(meta.storage)
             attach(candidate)
           } else {
-            localStorage.removeItem(meta.storage)
+            _scopedStorageRemove(meta.storage)
           }
-        } catch (_) { localStorage.removeItem(meta.storage) }
+        } catch (_) { _scopedStorageRemove(meta.storage) }
       },
       _appendLine(op, refName, line) {
         op.lines.push(line)
@@ -2671,9 +2780,9 @@ ${labels}
         this.selectAction('sync')
         this.sync.lines = []; this.sync.rc = null; this.sync.running = true; this.sync.expanded = true
         this.sync.ws = wsGlobalEmerge('sync', (msg) => {
-          if (msg.job_id) { localStorage.setItem(_JOB_META.sync.storage, msg.job_id); return }
+          if (msg.job_id) { _scopedStorageSet(_JOB_META.sync.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.sync, 'syncTerm', msg.line)
-          if (msg.done) { this.sync.running = false; this.sync.rc = msg.returncode ?? null; this.sync.ws = null; localStorage.removeItem(_JOB_META.sync.storage) }
+          if (msg.done) { this.sync.running = false; this.sync.rc = msg.returncode ?? null; this.sync.ws = null; _scopedStorageRemove(_JOB_META.sync.storage) }
         })
       },
       _attachSync(id) {
@@ -2681,16 +2790,16 @@ ${labels}
         this.sync.running = true; this.sync.expanded = true; this.sync.lines = []; this.sync.rc = null
         this.sync.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.sync, 'syncTerm', msg.line)
-          if (msg.done) { this.sync.running = false; this.sync.rc = msg.returncode ?? null; this.sync.ws = null; localStorage.removeItem(_JOB_META.sync.storage) }
+          if (msg.done) { this.sync.running = false; this.sync.rc = msg.returncode ?? null; this.sync.ws = null; _scopedStorageRemove(_JOB_META.sync.storage) }
         })
       },
       startWorldPretend() {
         this.selectAction('worldPretend')
         this.worldPretend.lines = []; this.worldPretend.rc = null; this.worldPretend.running = true; this.worldPretend.expanded = true
         this.worldPretend.ws = wsGlobalEmerge('world-pretend', (msg) => {
-          if (msg.job_id) { localStorage.setItem(_JOB_META.worldPretend.storage, msg.job_id); return }
+          if (msg.job_id) { _scopedStorageSet(_JOB_META.worldPretend.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.worldPretend, 'wpTerm', msg.line)
-          if (msg.done) { this.worldPretend.running = false; this.worldPretend.rc = msg.returncode ?? null; this.worldPretend.ws = null; localStorage.removeItem(_JOB_META.worldPretend.storage) }
+          if (msg.done) { this.worldPretend.running = false; this.worldPretend.rc = msg.returncode ?? null; this.worldPretend.ws = null; _scopedStorageRemove(_JOB_META.worldPretend.storage) }
         })
       },
       _attachWorldPretend(id) {
@@ -2698,16 +2807,16 @@ ${labels}
         this.worldPretend.running = true; this.worldPretend.expanded = true; this.worldPretend.lines = []; this.worldPretend.rc = null
         this.worldPretend.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.worldPretend, 'wpTerm', msg.line)
-          if (msg.done) { this.worldPretend.running = false; this.worldPretend.rc = msg.returncode ?? null; this.worldPretend.ws = null; localStorage.removeItem(_JOB_META.worldPretend.storage) }
+          if (msg.done) { this.worldPretend.running = false; this.worldPretend.rc = msg.returncode ?? null; this.worldPretend.ws = null; _scopedStorageRemove(_JOB_META.worldPretend.storage) }
         })
       },
       startWorldUpdate() {
         this.selectAction('worldUpdate')
         this.worldUpdate.lines = []; this.worldUpdate.rc = null; this.worldUpdate.running = true; this.worldUpdate.expanded = true
         this.worldUpdate.ws = wsGlobalEmerge('world-update', (msg) => {
-          if (msg.job_id) { localStorage.setItem(_JOB_META.worldUpdate.storage, msg.job_id); return }
+          if (msg.job_id) { _scopedStorageSet(_JOB_META.worldUpdate.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.worldUpdate, 'wuTerm', msg.line)
-          if (msg.done) { this.worldUpdate.running = false; this.worldUpdate.rc = msg.returncode ?? null; this.worldUpdate.ws = null; localStorage.removeItem(_JOB_META.worldUpdate.storage) }
+          if (msg.done) { this.worldUpdate.running = false; this.worldUpdate.rc = msg.returncode ?? null; this.worldUpdate.ws = null; _scopedStorageRemove(_JOB_META.worldUpdate.storage) }
         }, { opts: this.eoOpts() })
       },
       _attachWorldUpdate(id) {
@@ -2715,20 +2824,20 @@ ${labels}
         this.worldUpdate.running = true; this.worldUpdate.expanded = true; this.worldUpdate.lines = []; this.worldUpdate.rc = null
         this.worldUpdate.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.worldUpdate, 'wuTerm', msg.line)
-          if (msg.done) { this.worldUpdate.running = false; this.worldUpdate.rc = msg.returncode ?? null; this.worldUpdate.ws = null; localStorage.removeItem(_JOB_META.worldUpdate.storage) }
+          if (msg.done) { this.worldUpdate.running = false; this.worldUpdate.rc = msg.returncode ?? null; this.worldUpdate.ws = null; _scopedStorageRemove(_JOB_META.worldUpdate.storage) }
         })
       },
       startDepcleanPretend() {
         this.selectAction('depclean')
-        localStorage.removeItem('arbor_depclean_ran')
+        _scopedStorageRemove('arbor_depclean_ran')
         this.depclean.lines = []; this.depclean.rc = null; this.depclean.running = true; this.depclean.expanded = true; this.depclean.dcStep = 'pretend'
         this.depclean.ws = wsGlobalEmerge('depclean-pretend', (msg) => {
-          if (msg.job_id) { localStorage.setItem(_JOB_META.depcleanPretend.storage, msg.job_id); return }
+          if (msg.job_id) { _scopedStorageSet(_JOB_META.depcleanPretend.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.depclean, 'dcTerm', msg.line)
           if (msg.done) {
             this.depclean.running = false; this.depclean.rc = msg.returncode ?? null; this.depclean.ws = null
             if (this.depclean.rc === 0) this.depclean.dcStep = 'confirm'
-            localStorage.removeItem(_JOB_META.depcleanPretend.storage)
+            _scopedStorageRemove(_JOB_META.depcleanPretend.storage)
           }
         })
       },
@@ -2740,18 +2849,18 @@ ${labels}
           if (msg.done) {
             this.depclean.running = false; this.depclean.rc = msg.returncode ?? null; this.depclean.ws = null
             if (this.depclean.rc === 0) this.depclean.dcStep = 'confirm'
-            localStorage.removeItem(_JOB_META.depcleanPretend.storage)
+            _scopedStorageRemove(_JOB_META.depcleanPretend.storage)
           }
         })
       },
       startDepclean() {
         this.selectAction('depclean')
-        localStorage.setItem('arbor_depclean_ran', '1')
+        _scopedStorageSet('arbor_depclean_ran', '1')
         this.depclean.lines = []; this.depclean.rc = null; this.depclean.running = true; this.depclean.expanded = true; this.depclean.dcStep = 'running'
         this.depclean.ws = wsGlobalEmerge('depclean', (msg) => {
-          if (msg.job_id) { localStorage.setItem(_JOB_META.depclean.storage, msg.job_id); return }
+          if (msg.job_id) { _scopedStorageSet(_JOB_META.depclean.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.depclean, 'dcTerm', msg.line)
-          if (msg.done) { this.depclean.running = false; this.depclean.rc = msg.returncode ?? null; this.depclean.ws = null; localStorage.removeItem(_JOB_META.depclean.storage) }
+          if (msg.done) { this.depclean.running = false; this.depclean.rc = msg.returncode ?? null; this.depclean.ws = null; _scopedStorageRemove(_JOB_META.depclean.storage) }
         })
       },
       _attachDepclean(id) {
@@ -2759,16 +2868,16 @@ ${labels}
         this.depclean.running = true; this.depclean.expanded = true; this.depclean.dcStep = 'running'; this.depclean.lines = []; this.depclean.rc = null
         this.depclean.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.depclean, 'dcTerm', msg.line)
-          if (msg.done) { this.depclean.running = false; this.depclean.rc = msg.returncode ?? null; this.depclean.ws = null; localStorage.removeItem(_JOB_META.depclean.storage) }
+          if (msg.done) { this.depclean.running = false; this.depclean.rc = msg.returncode ?? null; this.depclean.ws = null; _scopedStorageRemove(_JOB_META.depclean.storage) }
         })
       },
       startPreserved() {
         this.selectAction('preserved')
         this.preserved.lines = []; this.preserved.rc = null; this.preserved.running = true; this.preserved.expanded = true
         this.preserved.ws = wsGlobalEmerge('preserved-rebuild', (msg) => {
-          if (msg.job_id) { localStorage.setItem(_JOB_META.preserved.storage, msg.job_id); return }
+          if (msg.job_id) { _scopedStorageSet(_JOB_META.preserved.storage, msg.job_id); return }
           if (msg.line !== undefined) this._appendLine(this.preserved, 'psTerm', msg.line)
-          if (msg.done) { this.preserved.running = false; this.preserved.rc = msg.returncode ?? null; this.preserved.ws = null; localStorage.removeItem(_JOB_META.preserved.storage) }
+          if (msg.done) { this.preserved.running = false; this.preserved.rc = msg.returncode ?? null; this.preserved.ws = null; _scopedStorageRemove(_JOB_META.preserved.storage) }
         })
       },
       _attachPreserved(id) {
@@ -2776,7 +2885,7 @@ ${labels}
         this.preserved.running = true; this.preserved.expanded = true; this.preserved.lines = []; this.preserved.rc = null
         this.preserved.ws = wsJobAttach(id, (msg) => {
           if (msg.line !== undefined) this._appendLine(this.preserved, 'psTerm', msg.line)
-          if (msg.done) { this.preserved.running = false; this.preserved.rc = msg.returncode ?? null; this.preserved.ws = null; localStorage.removeItem(_JOB_META.preserved.storage) }
+          if (msg.done) { this.preserved.running = false; this.preserved.rc = msg.returncode ?? null; this.preserved.ws = null; _scopedStorageRemove(_JOB_META.preserved.storage) }
         })
       },
     }
@@ -2808,6 +2917,21 @@ ${labels}
       searchViewQuery:   '',
       useFlagsQuery:     '',
     })
+
+    Alpine.data('loginComponent', loginComponent)
+    Alpine.data('navComponent', navComponent)
+    Alpine.data('appShellComponent', appShellComponent)
+    Alpine.data('dashboardComponent', dashboardComponent)
+    Alpine.data('packageListComponent', packageListComponent)
+    Alpine.data('useFlagsExplorerComponent', useFlagsExplorerComponent)
+    Alpine.data('searchComponent', searchComponent)
+    Alpine.data('depGraphComponent', depGraphComponent)
+    Alpine.data('packageDetailComponent', packageDetailComponent)
+    Alpine.data('jobsViewComponent', jobsViewComponent)
+    Alpine.data('uninstallComponent', uninstallComponent)
+    Alpine.data('installComponent', installComponent)
+    Alpine.data('updatesComponent', updatesComponent)
+    Alpine.data('overlayViewComponent', overlayViewComponent)
   })
 
   // ---------------------------------------------------------------------------
@@ -2901,9 +3025,12 @@ ${labels}
         finally { this.addBusy = false }
       },
       async remove(name, purge) {
+        const verb = purge ? 'PURGE' : 'REMOVE'
         if (!confirm('Remove overlay "' + name + '"?' + (purge ? '\n\nThis will also delete the local files.' : ''))) return
+        const approvalText = prompt('Type "' + verb + ' ' + name + '" to confirm.')
+        if (approvalText === null) return
         try {
-          await overlays.remove(name, purge)
+          await overlays.remove(name, purge, true, approvalText.trim())
           if (this.expanded === name) this.expanded = null
           if (this.syncName === name) {
             if (_ws) { try { _ws.close() } catch(_) {} _ws = null }
@@ -2956,26 +3083,12 @@ ${labels}
 
   document.addEventListener('DOMContentLoaded', _initRouter)
 
-  // Expose to window for Alpine x-data expressions and inline event handlers.
-  // Component factories must be on window so Alpine can resolve them by name.
+  // Expose a small surface for imperative helpers; Alpine components are
+  // registered via Alpine.data() for CSP-safe resolution.
   Object.assign(window, {
     navigate, navigateTo, navigateToUse, navigateBack,
     api, emerge, jobs, jobHistory, overlays,
     wsEmerge, wsGlobalEmerge, wsJobAttach, wsOverlaySync, detachWs,
-    loginComponent,
-    appShellComponent,
-    navComponent,
-    dashboardComponent,
-    packageListComponent,
-    useFlagsExplorerComponent,
-    searchComponent,
-    packageDetailComponent,
-    depGraphComponent,
-    jobsViewComponent,
-    uninstallComponent,
-    installComponent,
-    updatesComponent,
-    overlayViewComponent,
   })
 
 }())
