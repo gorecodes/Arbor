@@ -103,6 +103,7 @@
   const approvalRequests = {
     create: (cmd, args) => _post('/approval-requests', { cmd, args }),
     approve: (id, code) => _post('/approval-requests/' + encodeURIComponent(id) + '/approve', { code }),
+    cancel:  (id)        => _post('/approval-requests/' + encodeURIComponent(id) + '/cancel', {}),
     show:   (id)        => _get('/approval-requests/' + encodeURIComponent(id)),
     list:   (status = 'pending') => _get('/approval-requests?status=' + encodeURIComponent(status)),
   }
@@ -230,7 +231,7 @@
       return [
         '-- approval request cancelled --',
         'request id: ' + request.request_id,
-        'The shell rejected this operation.',
+        'This operation was cancelled before approval.',
         'Arbor is unlocked again. Start the action again if needed.',
       ]
     }
@@ -680,6 +681,7 @@
       activeJobs: [],
       approvalCode: '',
       approvalSubmitBusy: false,
+      approvalCancelBusy: false,
       approvalSubmitError: null,
       _approvalFormRequestId: '',
       _timer: null,
@@ -701,6 +703,7 @@
           if (this._approvalFormRequestId !== requestId) {
             this.approvalCode = ''
             this.approvalSubmitBusy = false
+            this.approvalCancelBusy = false
             this.approvalSubmitError = null
           }
           this._approvalFormRequestId = requestId
@@ -725,6 +728,9 @@
       approvalNeedsTotp() {
         return this.approvalMode() === 'totp'
       },
+      approvalCanCancel() {
+        return approvalPending(Alpine.store('approvalGate').active)
+      },
       approvalDetailLines() {
         const request = Alpine.store('approvalGate').active
         if (!request) return []
@@ -746,6 +752,21 @@
           this.approvalSubmitError = e.message || 'Unable to verify code'
         } finally {
           this.approvalSubmitBusy = false
+        }
+      },
+      async cancelApprovalRequest() {
+        const request = Alpine.store('approvalGate').active
+        if (!approvalPending(request)) return
+        this.approvalCancelBusy = true
+        this.approvalSubmitError = null
+        try {
+          const cancelled = await approvalRequests.cancel(request.request_id)
+          this.approvalCode = ''
+          window.dispatchEvent(new CustomEvent('arbor-approval-updated', { detail: { request: { ...request, ...cancelled } } }))
+        } catch (e) {
+          this.approvalSubmitError = e.message || 'Unable to cancel request'
+        } finally {
+          this.approvalCancelBusy = false
         }
       },
       async _restorePendingApproval() {

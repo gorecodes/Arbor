@@ -266,6 +266,26 @@ class ApprovalRequestStoreTests(unittest.TestCase):
 
         self.assertEqual(approved, {"error": "invalid TOTP code"})
 
+    def test_totp_mode_can_cancel_pending_request(self):
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(
+                os.environ,
+                {"ARBOR_AUTH_MODE": "totp", "ARBOR_TOTP_SECRET": self.TOTP_SECRET},
+                clear=False,
+            ),
+        ):
+            db_path = str(Path(tmpdir) / "history.db")
+            with patch.object(daemon_main, "_DB_PATH", db_path):
+                daemon_main._db_init()
+                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
+                cancelled = daemon_main._approval_cancel(created["request_id"])
+                stored = daemon_main._approval_request_get(created["request_id"])
+
+        self.assertEqual(cancelled, {"request_id": created["request_id"], "status": "cancelled"})
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["status"], "cancelled")
+
     def test_totp_mode_throttles_repeated_failures_and_logs_them(self):
         with (
             tempfile.TemporaryDirectory() as tmpdir,
@@ -373,6 +393,15 @@ class ApprovalRequestDaemonTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response["status"], "approved")
         query_one.assert_awaited_once_with("approval_request_approve", {"request_id": "req-1", "code": "123456"})
+
+    async def test_web_cancel_endpoint_forwards_request_id(self):
+        query_one = AsyncMock(return_value={"request_id": "req-1", "status": "cancelled"})
+
+        with patch.object(web_main, "query_one", query_one):
+            response = await web_main.approval_request_cancel("test-token", "req-1")
+
+        self.assertEqual(response["status"], "cancelled")
+        query_one.assert_awaited_once_with("approval_request_cancel", {"request_id": "req-1"})
 
 
 class ApprovalCliTests(unittest.TestCase):

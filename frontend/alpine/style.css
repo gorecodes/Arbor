@@ -4120,6 +4120,14 @@ input:focus,
   cursor: pointer;
 }
 
+.app-approval-cancel {
+  padding: 0.45rem 0.75rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
 .app-approval-submit:disabled {
   opacity: 0.6;
   cursor: default;
