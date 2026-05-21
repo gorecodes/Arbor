@@ -69,7 +69,7 @@ else
 fi
 
 # --- first-time setup ---
-echo "==> First-time setup (user, cert, token)"
+echo "==> First-time setup (user, cert, IPC key)"
 bash "$REPO/config/setup.sh" "$REPO"
 
 echo ""
