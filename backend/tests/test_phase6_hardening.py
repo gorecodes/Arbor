@@ -90,6 +90,47 @@ class ArborEnvLoadingTests(unittest.TestCase):
             log_config=server_mod._log_config(),
         )
 
+    def test_server_run_skips_cert_lookup_when_tls_disabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / "arbor.env"
+            env_file.write_text(
+                "ARBOR_HOST=127.0.0.1\nARBOR_PORT=8444\nARBOR_TLS=0\n",
+                encoding="utf-8",
+            )
+
+            with (
+                patch.dict("os.environ", {"ARBOR_ENV_FILE": str(env_file)}, clear=False),
+                patch.object(server_mod, "load_ipc_key"),
+                patch.object(server_mod, "validate_approval_mode_config", return_value=approval_mode.ApprovalMode.CLI),
+                patch.object(server_mod.os.path, "exists", side_effect=AssertionError("cert lookup should be skipped")),
+                patch.object(server_mod.uvicorn, "run") as run_mock,
+            ):
+                server_mod.run()
+
+        run_mock.assert_called_once_with(
+            "arbor.main:app",
+            host="127.0.0.1",
+            port=8444,
+            ssl_certfile=None,
+            ssl_keyfile=None,
+            log_level="info",
+            log_config=server_mod._log_config(),
+        )
+
+    def test_server_run_requires_cert_when_tls_explicitly_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / "arbor.env"
+            env_file.write_text(
+                "ARBOR_HOST=127.0.0.1\nARBOR_PORT=8443\nARBOR_TLS=1\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict("os.environ", {"ARBOR_ENV_FILE": str(env_file)}, clear=False):
+                with self.assertRaises(SystemExit) as ctx:
+                    server_mod.run()
+
+        self.assertEqual(ctx.exception.code, 2)
+
     def test_web_main_reads_cors_origins_from_arbor_env(self):
         original_origins = list(web_main._cors_origins)
         with tempfile.TemporaryDirectory() as tmpdir:

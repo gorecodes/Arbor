@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from .approval_mode import LOGIN_AUTH_MODE_ENV, TOTP_SECRET_ENV, TOTP_SECRET_FILE_ENV, ApprovalMode, login_totp_required, verify_totp_code
 from .auth import auth_backend, require_auth, resolve_ws_principal
 from .authorization import AuthorizationError, current_principal, require_min_role, set_current_principal
-from .config_env import env_enabled, env_list
+from .config_env import env_enabled, env_file_value, env_list
 from .daemon_client import query, query_all, query_one
 from .emerge_log import compile_time_by_category
 from .local_auth import dummy_password_hash, find_user_by_username, has_local_users, mark_login_success, record_login_failure, verify_password
@@ -118,6 +118,10 @@ def _websocket_principal_binding(websocket: WebSocket) -> dict:
 
 def _overlay_add_enabled() -> bool:
     return env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
+
+
+def _persisted_login_auth_mode() -> str:
+    return env_file_value(LOGIN_AUTH_MODE_ENV, "").strip().lower()
 
 
 async def _json_object_body(request: Request, *, allow_empty: bool = True) -> dict | JSONResponse:
@@ -266,6 +270,11 @@ async def auth_totp_confirm(auth: Auth, request: Request):
         },
         unset_keys={TOTP_SECRET_ENV},
     )
+    if _persisted_login_auth_mode() != ApprovalMode.TOTP.value:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "failed to persist TOTP login mode to arbor.env"},
+        )
     revoke_all_sessions(reason="totp_enabled")
     response = JSONResponse(status_code=200, content={**data, "reauth_required": True})
     clear_session_cookie(response)
@@ -299,6 +308,11 @@ async def auth_totp_disable(auth: Auth, request: Request):
         {LOGIN_AUTH_MODE_ENV: ApprovalMode.CLI.value},
         unset_keys={TOTP_SECRET_ENV, TOTP_SECRET_FILE_ENV},
     )
+    if _persisted_login_auth_mode() != ApprovalMode.CLI.value:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "failed to persist login mode reset to arbor.env"},
+        )
     revoke_all_sessions(reason="totp_disabled")
     response = JSONResponse(status_code=200, content={**data, "reauth_required": True})
     clear_session_cookie(response)

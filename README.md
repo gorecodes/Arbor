@@ -17,9 +17,17 @@ The mode applies to install, uninstall, world update, sync, preserved-rebuild, d
 Minimal `/etc/arbor/arbor.env` examples:
 
 ```bash
+# local-first HTTP on loopback (bootstrap default)
+ARBOR_TLS=0
+
 # password login + CLI approval for privileged operations (default)
 ARBOR_APPROVAL_MODE=cli
 
+# direct HTTPS on Arbor itself (optional)
+# ARBOR_TLS=1
+# ARBOR_CERT=/etc/arbor/cert.pem
+# ARBOR_KEY=/etc/arbor/key.pem
+#
 # password + TOTP at login, no extra approval prompt per operation
 ARBOR_AUTH_MODE=totp
 ARBOR_APPROVAL_MODE=none
@@ -140,7 +148,7 @@ That directory is the canonical UI source and the one served in development and 
 
 ## Security hardening
 
-- Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over HTTPS on port `8443`, and it is **not intended for internet exposure**.
+- Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over plain HTTP on port `8443`, and it is **not intended for internet exposure**.
 - Treat an authenticated Arbor session as **root-equivalent intent**: once logged in, the UI can request root-backed package actions (subject to approval mode and role checks).
 - In `cli` mode, root-backed actions are intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
 - `totp` mode is a convenience tradeoff for trusted local/LAN use. It adds a second factor in the browser, but it does **not** make Arbor safe to expose on the internet; a valid session plus the shared TOTP secret is still not the same as a hardened internet-facing auth design.
@@ -212,9 +220,9 @@ The installer will:
 4. Create `/usr/bin/arbor` and `/usr/bin/arbor-daemon`
 5. Install OpenRC or systemd service files, depending on the detected init system
 6. Create the `arbor` system user
-7. Generate a self-signed TLS certificate in `/etc/arbor/` if one does not already exist
-8. Enforce local auth mode in `/etc/arbor/arbor.env` (`ARBOR_AUTH_BACKEND=local`)
-9. Create `/etc/arbor/arbor.env` if it does not already exist
+7. Enforce local auth mode in `/etc/arbor/arbor.env` (`ARBOR_AUTH_BACKEND=local`)
+8. Create `/etc/arbor/arbor.env` if it does not already exist
+9. Default Arbor to local-first plain HTTP (`ARBOR_TLS=0`)
 10. Generate an IPC key in `/etc/arbor/ipc.key` if one does not already exist
 
 After script-based upgrades, run setup again to refresh runtime permissions:
@@ -236,7 +244,7 @@ rc-service arbor start
 systemctl start arbor-daemon arbor
 ```
 
-Open `https://localhost:8443` or `https://127.0.0.1:8443` in your browser, accept the self-signed certificate warning, and sign in with the local owner username/password created during setup. If `ARBOR_AUTH_MODE=totp` is enabled, the login form also requires the current TOTP code.
+Open `http://localhost:8443` or `http://127.0.0.1:8443` in your browser and sign in with the local owner username/password created during setup. If `ARBOR_AUTH_MODE=totp` is enabled, the login form also requires the current TOTP code.
 
 Arbor uses local username/password auth only (`ARBOR_AUTH_BACKEND=local`). Rerun setup after upgrades so owner bootstrap and auth DB permissions are applied:
 
@@ -302,10 +310,10 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-Run the web server without TLS for local development:
+Run the web server in local-first HTTP mode:
 
 ```bash
-ARBOR_ALLOW_PLAINTEXT=1 .venv/bin/arbor
+ARBOR_TLS=0 .venv/bin/arbor
 ```
 
 The frontend does not need a build step; it is served directly from `frontend/alpine/`, which is the canonical frontend source tree for this repository.
@@ -411,8 +419,9 @@ rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 |---|---|---|
 | `ARBOR_HOST` | `127.0.0.1` | Bind address; change explicitly for LAN access |
 | `ARBOR_PORT` | `8443` | Web server port |
-| `ARBOR_CERT` | `/etc/arbor/cert.pem` | TLS certificate path |
-| `ARBOR_KEY` | `/etc/arbor/key.pem` | TLS key path |
+| `ARBOR_TLS` | unset (`0` in the bootstrap config) | Set to `0` to disable TLS without checking cert files; set to `1` to require `ARBOR_CERT` and `ARBOR_KEY` |
+| `ARBOR_CERT` | `/etc/arbor/cert.pem` | TLS certificate path when `ARBOR_TLS=1` |
+| `ARBOR_KEY` | `/etc/arbor/key.pem` | TLS key path when `ARBOR_TLS=1` |
 | `ARBOR_AUTH_MODE` | `cli` | Login auth mode; set to `totp` to require a TOTP code during login |
 | `ARBOR_APPROVAL_MODE` | derived from `ARBOR_AUTH_MODE` | Privileged operation approval mode; use `cli` for root-shell confirmation or `none` for no extra prompt |
 | `ARBOR_TOTP_SECRET` | unset | Inline base32 TOTP secret; supported, but prefer the file-based option below |
@@ -422,7 +431,7 @@ rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 | `ARBOR_ENABLE_OVERLAY_ADD` | `0` | Enable the dangerous overlay-add flow; overlays are disabled by default because new ebuilds run as root |
 | `ARBOR_IPC_KEY` | unset | Optional env override for the shared HMAC key used to authenticate web-to-daemon IPC requests |
 | `ARBOR_IPC_KEY_FILE` | `/etc/arbor/ipc.key` | Shared HMAC key file, generated by setup by default |
-| `ARBOR_ALLOW_PLAINTEXT` | unset | Set to `1` to allow plain HTTP when cert/key are missing |
+| `ARBOR_ALLOW_PLAINTEXT` | unset | Legacy fallback: allow plain HTTP when `ARBOR_TLS` is unset and cert/key are missing |
 | `ARBOR_CORS_ORIGINS` | loopback `http(s)` on `localhost`, `127.0.0.1`, `[::1]` (port `8443`) | Comma-separated allowed origins |
 | `ARBOR_STATIC_DIR` | auto-detected | Override the frontend static directory |
 
