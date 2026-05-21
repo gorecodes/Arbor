@@ -15,10 +15,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import require_auth, verify_token
+from .auth import auth_backend, require_auth, resolve_ws_principal
+from .authorization import AuthorizationError, require_min_role, set_current_principal
 from .config_env import env_enabled, env_list
 from .daemon_client import query, query_all, query_one
 from .emerge_log import compile_time_by_category
+from .local_auth import find_user_by_username, has_local_users, mark_login_success, record_login_failure, verify_password
+from .session import clear_session_cookie, create_session, revoke_session, set_session_cookie, session_cookie_name
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +29,11 @@ logging.basicConfig(
 )
 
 app = FastAPI(title="Arbor", version="0.1.0", docs_url=None, redoc_url=None)
+
+
+@app.exception_handler(AuthorizationError)
+async def authorization_error_handler(_request: Request, exc: AuthorizationError):
+    return JSONResponse(status_code=403, content={"error": str(exc)})
 
 # The frontend uses Alpine's CSP-friendly build, so script-src can omit
 # unsafe-eval. Inline styles are still used by the current UI.
@@ -99,6 +107,72 @@ async def _json_object_body(request: Request, *, allow_empty: bool = True) -> di
 # ---------------------------------------------------------------------------
 # REST endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/api/auth/backend")
+async def auth_backend_status():
+    return {"backend": auth_backend()}
+
+
+@app.get("/api/auth/session")
+async def auth_session(request: Request):
+    session_id = request.cookies.get(session_cookie_name(), "")
+    from .session import get_session
+
+    session = get_session(session_id)
+    if session is None:
+        return {"backend": "local", "authenticated": False}
+    return {
+        "backend": "local",
+        "authenticated": True,
+        "user_id": session["user_id"],
+        "username": session["username"],
+        "role": session["role"],
+        "expires_at": session["expires_at"],
+    }
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request):
+    if not has_local_users():
+        return JSONResponse(status_code=503, content={"error": "no local users configured"})
+
+    body = await _json_object_body(request, allow_empty=False)
+    if isinstance(body, JSONResponse):
+        return body
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    user = find_user_by_username(username)
+    if user is None or user.get("disabled_at") is not None or not verify_password(password, str(user["password_hash"])):
+        record_login_failure(username)
+        return JSONResponse(status_code=401, content={"error": "invalid username or password"})
+
+    mark_login_success(str(user["user_id"]))
+    session = create_session(
+        str(user["user_id"]),
+        remote_addr=request.client.host if request.client else "",
+        user_agent=request.headers.get("user-agent", ""),
+    )
+    response = JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "user_id": user["user_id"],
+            "username": user["username"],
+            "role": user["role"],
+            "expires_at": session["expires_at"],
+        },
+    )
+    set_session_cookie(response, session["session_id"])
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    session_id = request.cookies.get(session_cookie_name(), "")
+    revoke_session(session_id, reason="logout")
+    response = JSONResponse(status_code=200, content={"ok": True})
+    clear_session_cookie(response)
+    return response
 
 @app.get("/api/status")
 async def system_status(auth: Auth):
@@ -192,6 +266,7 @@ async def approval_request_show(auth: Auth, request_id: str):
 
 @app.post("/api/approval-requests")
 async def approval_request_create(auth: Auth, request: Request):
+    require_min_role("operator")
     body = await _json_object_body(request, allow_empty=False)
     if isinstance(body, JSONResponse):
         return body
@@ -207,6 +282,7 @@ async def approval_request_create(auth: Auth, request: Request):
 
 @app.post("/api/approval-requests/{request_id}/approve")
 async def approval_request_approve(auth: Auth, request_id: str, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request, allow_empty=False)
     if isinstance(body, JSONResponse):
         return body
@@ -220,6 +296,7 @@ async def approval_request_approve(auth: Auth, request_id: str, request: Request
 
 @app.post("/api/approval-requests/{request_id}/cancel")
 async def approval_request_cancel(auth: Auth, request_id: str):
+    require_min_role("owner")
     data = await query_one("approval_request_cancel", {"request_id": request_id})
     if "error" in data:
         status = 404 if data["error"] == "approval request not found" else 400
@@ -268,10 +345,14 @@ async def _ws_require_auth(websocket: WebSocket) -> bool:
         await _ws_fail(websocket, 4400, "invalid auth message")
         return False
 
-    token = payload.get("token") if isinstance(payload, dict) else None
-    if not isinstance(payload, dict) or payload.get("type") != "auth" or not verify_token(token):
-        await _ws_fail(websocket, 4401, "invalid or missing token")
+    if not isinstance(payload, dict) or payload.get("type") != "auth":
+        await _ws_fail(websocket, 4401, "invalid or missing session")
         return False
+    principal = resolve_ws_principal(payload, websocket.headers)
+    if principal is None:
+        await _ws_fail(websocket, 4401, "invalid or missing session")
+        return False
+    set_current_principal(principal)
     origin = websocket.headers.get("origin")
     if not _ws_origin_allowed(origin):
         await _ws_fail(websocket, 4403, "origin not allowed")
@@ -515,6 +596,7 @@ async def job_status(auth: Auth, job_id: str):
 
 @app.post("/api/jobs/{job_id}/cancel")
 async def job_cancel(auth: Auth, job_id: str, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -576,6 +658,7 @@ async def history_log(auth: Auth, job_id: str):
 
 @app.delete("/api/history/{job_id}")
 async def history_delete(auth: Auth, job_id: str, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -594,6 +677,7 @@ async def history_delete(auth: Auth, job_id: str, request: Request):
 
 @app.post("/api/history/purge")
 async def history_purge(auth: Auth, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -636,6 +720,7 @@ async def analytics_compile_time(auth: Auth):
 
 @app.post("/api/emerge/etc-update/resolve")
 async def etc_update_resolve(auth: Auth, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -670,6 +755,7 @@ async def overlay_config(auth: Auth):
 
 @app.post("/api/overlays")
 async def overlay_add(auth: Auth, request: Request):
+    require_min_role("owner")
     if not _overlay_add_enabled():
         return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
     body = await _json_object_body(request)
@@ -694,6 +780,7 @@ async def overlay_add(auth: Auth, request: Request):
 
 @app.delete("/api/overlays/{name}")
 async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Query(default=0)):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body

@@ -16,6 +16,7 @@ dependencies = [
 arbor = "arbor.server:run"
 arbor-daemon = "daemon.main:cli"
 arbor-approve = "arbor.approval_cli:main"
+arbor-auth = "arbor.local_auth_cli:main"
 
 [tool.setuptools]
 packages = ["arbor", "daemon"]

@@ -64,6 +64,10 @@ class InstallSurfaceCharacterizationTests(unittest.TestCase):
     def test_setup_script_creates_log_directory_for_services(self):
         setup_script = (REPO_ROOT / "config" / "setup.sh").read_text(encoding="utf-8")
         self.assertIn('install -d -m 750 -o arbor -g arbor /var/log/arbor', setup_script)
+        self.assertIn('install -d -m 750 -o arbor -g arbor /var/lib/arbor', setup_script)
+        self.assertIn("ARBOR_AUTH_BACKEND", setup_script)
+        self.assertIn("arbor-auth create-owner", setup_script)
+        self.assertIn("chown arbor:arbor /var/lib/arbor/auth.db", setup_script)
 
     def test_install_script_and_service_files_share_the_same_entrypoint_paths(self):
         install_script = (REPO_ROOT / "install.sh").read_text(encoding="utf-8")
@@ -87,22 +91,52 @@ class InstallSurfaceCharacterizationTests(unittest.TestCase):
         self.assertIn("ln -sf \"$arbor_link\" /usr/bin/arbor-approve", sync_script)
         self.assertIn("from arbor.approval_cli import main", sync_script)
 
+    def test_dev_sync_script_installs_arbor_auth_wrapper(self):
+        sync_script = (REPO_ROOT / "sync_installed_dev.sh").read_text(encoding="utf-8")
+        self.assertIn("/usr/bin/arbor-auth", sync_script)
+        self.assertIn("ln -sf \"$arbor_link\" /usr/bin/arbor-auth", sync_script)
+        self.assertIn("from arbor.local_auth_cli import main", sync_script)
+
+    def test_local_auth_cli_exposes_user_role_management_commands(self):
+        cli_py = (REPO_ROOT / "backend" / "arbor" / "local_auth_cli.py").read_text(encoding="utf-8")
+        self.assertIn("create-user", cli_py)
+        self.assertIn("list-users", cli_py)
+        self.assertIn("set-role", cli_py)
+
+    def test_frontend_login_supports_local_auth_form(self):
+        index_html = (REPO_ROOT / "frontend" / "alpine" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("Local auth only", index_html)
+        self.assertIn('placeholder="Username"', index_html)
+        self.assertIn('placeholder="Password"', index_html)
+        self.assertNotIn('placeholder="Access token"', index_html)
+
+    def test_frontend_contains_role_gating_for_sensitive_actions(self):
+        index_html = (REPO_ROOT / "frontend" / "alpine" / "index.html").read_text(encoding="utf-8")
+        app_js = (REPO_ROOT / "frontend" / "alpine" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("$store.auth.canOwner", index_html)
+        self.assertIn("$store.auth.canOperate", index_html)
+        self.assertIn("get canOwner()", app_js)
+        self.assertIn("get canOperate()", app_js)
+        self.assertIn("authRolePill()", app_js)
+        self.assertIn("authRoleTooltip()", app_js)
+        self.assertIn("Role: owner", app_js)
+
 
 class AuthCharacterizationTests(unittest.TestCase):
-    def test_verify_token_rejects_empty_candidate(self):
-        self.assertFalse(auth_mod.verify_token(None))
-        self.assertFalse(auth_mod.verify_token(""))
+    def test_auth_backend_is_local_only(self):
+        self.assertEqual(auth_mod.auth_backend(), "local")
 
-    def test_require_auth_rejects_missing_credentials(self):
+    def test_require_auth_rejects_missing_session(self):
         with self.assertRaises(HTTPException) as ctx:
-            auth_mod.require_auth(None)
+            request = SimpleNamespace(cookies={})
+            auth_mod.require_auth(request, None)
         self.assertEqual(ctx.exception.status_code, 401)
-        self.assertEqual(ctx.exception.detail, "Invalid or missing token")
+        self.assertEqual(ctx.exception.detail, "Invalid or missing session")
 
-    def test_require_auth_accepts_matching_bearer_token(self):
-        credentials = SimpleNamespace(credentials="test-token")
-        with patch.object(auth_mod, "verify_token", return_value=True):
-            self.assertEqual(auth_mod.require_auth(credentials), "test-token")
+    def test_require_auth_accepts_valid_session_cookie(self):
+        request = SimpleNamespace(cookies={"arbor_session": "sid-1"})
+        with patch.object(auth_mod, "get_session", return_value={"user_id": "u1", "role": "owner", "username": "owner"}):
+            self.assertEqual(auth_mod.require_auth(request, None), "u1")
 
 
 class ServerApprovalModeTests(unittest.TestCase):
@@ -187,7 +221,7 @@ class WebSocketCharacterizationTests(unittest.IsolatedAsyncioTestCase):
     async def test_ws_requires_auth_as_first_frame(self):
         websocket = FakeWebSocket([json.dumps({"type": "not-auth", "token": "test-token"})])
 
-        with patch.object(web_main, "verify_token", side_effect=lambda token: token == "test-token"):
+        with patch.object(web_main, "resolve_ws_principal", return_value={"subject": "u1", "role": "owner"}):
             result = await web_main._ws_require_auth(websocket)
 
         self.assertFalse(result)
@@ -196,13 +230,13 @@ class WebSocketCharacterizationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.close_code, 4401)
         self.assertEqual(
             [json.loads(payload) for payload in websocket.sent_texts],
-            [{"error": "invalid or missing token", "done": True}],
+            [{"error": "invalid or missing session", "done": True}],
         )
 
     async def test_ws_reports_missing_atom_after_successful_auth(self):
         websocket = FakeWebSocket([json.dumps({"type": "auth", "token": "test-token"})])
 
-        with patch.object(web_main, "verify_token", side_effect=lambda token: token == "test-token"):
+        with patch.object(web_main, "resolve_ws_principal", return_value={"subject": "u1", "role": "owner"}):
             await web_main._ws_emerge(websocket, "emerge_pretend", "", {"clean": False, "opts": ""})
 
         self.assertTrue(websocket.closed)
@@ -220,7 +254,7 @@ class WebSocketCharacterizationTests(unittest.IsolatedAsyncioTestCase):
             yield {"line": "Calculating dependencies..."}
             yield {"done": True}
 
-        with patch.object(web_main, "verify_token", side_effect=lambda token: token == "test-token"):
+        with patch.object(web_main, "resolve_ws_principal", return_value={"subject": "u1", "role": "owner"}):
             with patch.object(web_main, "query", fake_query):
                 await web_main._ws_emerge(websocket, "emerge_pretend", "sys-apps/portage", {"clean": False, "opts": ""})
 

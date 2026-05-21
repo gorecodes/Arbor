@@ -141,14 +141,15 @@ That directory is the canonical UI source and the one served in development and 
 ## Security hardening
 
 - Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over HTTPS on port `8443`, and it is **not intended for internet exposure**.
-- Treat the Arbor token as **root-equivalent**. Arbor now authenticates web-to-daemon IPC requests and avoids putting WebSocket tokens in URLs, but an authenticated session can still trigger root-backed Portage actions.
+- Treat an authenticated Arbor session as **root-equivalent intent**: once logged in, the UI can request root-backed package actions (subject to approval mode and role checks).
 - In `cli` mode, root-backed actions are intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
 - `totp` mode is a convenience tradeoff for trusted local/LAN use. It adds a second factor in the browser, but it does **not** make Arbor safe to expose on the internet; a valid session plus the shared TOTP secret is still not the same as a hardened internet-facing auth design.
 - `none` mode removes the secondary approval gate entirely and should be treated as equivalent to trusting any authenticated session with direct root-backed action approval.
-- Safer defaults are enabled out of the box: localhost bind, tighter token/key handling, response security headers, and overlay add disabled by default.
+- Safer defaults are enabled out of the box: localhost bind, tighter key handling, response security headers, and overlay add disabled by default.
 - Overlay add remains a dangerous admin action. If you enable `ARBOR_ENABLE_OVERLAY_ADD=1`, Arbor requires an explicit approval flow, but adding an untrusted overlay still means trusting it with root-level package build execution.
 - The etc-update resolve path now refuses unsafe symlinked overwrite targets, and job handling is more honest after restarts: active jobs are snapshotted to disk and may come back as `orphaned` or `unknown` rather than being treated as live.
 - Live job buffers and stored history logs are intentionally bounded. Very large jobs may show truncated live output or truncated saved logs.
+- Local auth DB ownership is auto-healed on system path (`/var/lib/arbor/auth.db`) when initialized by root. This behavior is enabled by default and can be disabled with `ARBOR_AUTH_AUTOHEAL_PERMS=0` if you prefer setup/package-hook-only permission management.
 
 ## Recent fixes
 
@@ -177,6 +178,14 @@ emerge app-admin/arbor
 bash /usr/share/arbor/setup.sh
 ```
 
+After every package upgrade, run setup again:
+
+```bash
+bash /usr/share/arbor/setup.sh
+```
+
+This keeps `/etc/arbor` assets and `/var/lib/arbor` permissions aligned with the current release (including local-auth DB ownership).
+
 By default this installs the stable overlay version. If you want the live ebuild that tracks `main`:
 
 ```bash
@@ -204,9 +213,15 @@ The installer will:
 5. Install OpenRC or systemd service files, depending on the detected init system
 6. Create the `arbor` system user
 7. Generate a self-signed TLS certificate in `/etc/arbor/` if one does not already exist
-8. Generate an access token in `/etc/arbor/token` if one does not already exist
+8. Enforce local auth mode in `/etc/arbor/arbor.env` (`ARBOR_AUTH_BACKEND=local`)
 9. Create `/etc/arbor/arbor.env` if it does not already exist
 10. Generate an IPC key in `/etc/arbor/ipc.key` if one does not already exist
+
+After script-based upgrades, run setup again to refresh runtime permissions:
+
+```bash
+sudo bash config/setup.sh
+```
 
 ## First run
 
@@ -221,9 +236,15 @@ rc-service arbor start
 systemctl start arbor-daemon arbor
 ```
 
-Open `https://localhost:8443` or `https://127.0.0.1:8443` in your browser, accept the self-signed certificate warning, and enter the token from `/etc/arbor/token`.
+Open `https://localhost:8443` or `https://127.0.0.1:8443` in your browser, accept the self-signed certificate warning, and sign in with the local owner username/password created during setup.
 
-For a first install, keep Arbor on localhost until you are comfortable with the model: the bearer token unlocks root-backed package actions, and LAN exposure is still a deliberate tradeoff rather than the default.
+Arbor uses local username/password auth only (`ARBOR_AUTH_BACKEND=local`). Rerun setup after upgrades so owner bootstrap and auth DB permissions are applied:
+
+```bash
+bash /usr/share/arbor/setup.sh
+```
+
+For a first install, keep Arbor on localhost until you are comfortable with the model: an authenticated local session unlocks root-backed package actions, and LAN exposure is still a deliberate tradeoff rather than the default.
 
 When you start a privileged action from the UI, Arbor's behavior depends on `ARBOR_AUTH_MODE`:
 
@@ -245,6 +266,24 @@ arbor-approve totp-setup
 ```
 
 If you reject the prompt in `arbor-approve`, the request is cancelled and the browser unlocks immediately.
+
+## Local users and roles
+
+Arbor local auth supports three roles: `owner`, `operator`, `viewer`.
+
+Examples:
+
+```bash
+# create additional users
+arbor-auth create-user --username alice --role operator --password 'change-me-now'
+arbor-auth create-user --username bob --role viewer --password 'change-me-now'
+
+# list users
+arbor-auth list-users
+
+# change role
+arbor-auth set-role --username bob --role operator
+```
 
 ## Start at boot
 
@@ -279,7 +318,7 @@ The frontend does not need a build step; it is served directly from `frontend/al
 
 The daemon still requires root privileges and a working Portage environment.
 
-If `/etc/arbor/token` is missing, the web service generates an ephemeral token and prints it on startup.
+Local-auth setup should create the owner account via `arbor-auth`. If no local users exist, login is intentionally unavailable until bootstrap is completed.
 
 ## Update
 
@@ -424,8 +463,4 @@ https://<hostname>:8443
 
 You will need to accept the certificate warning unless you import the certificate into your browser trust store.
 
-To read the token remotely:
-
-```bash
-ssh yourbox sudo cat /etc/arbor/token
-```
+Create and use a local owner account instead of token sharing for remote/LAN access patterns.
