@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import arbor.approval_cli as approval_cli
 import arbor.approval_mode as approval_mode
+import arbor.authorization as authz
 import arbor.main as web_main
 import daemon.main as daemon_main
 
@@ -24,13 +25,19 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
+                created = daemon_main._approval_request_create(
+                    "emerge_install",
+                    {"atom": "sys-apps/portage"},
+                    {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
+                )
 
         self.assertEqual(created["status"], "pending")
         self.assertEqual(created["action_cmd"], "emerge_install")
         self.assertEqual(created["action_class"], "approval_required")
         self.assertEqual(created["action_target"], "sys-apps/portage")
         self.assertEqual(created["args"], {"atom": "sys-apps/portage"})
+        self.assertEqual(created["requested_by_subject"], "u1")
+        self.assertEqual(created["requested_by_session_id"], "s1")
         self.assertTrue(created["request_hash"])
         self.assertIn("confirmation_phrase", created)
 
@@ -39,8 +46,9 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                first = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
-                second = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
+                principal = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"}
+                first = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"}, principal)
+                second = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"}, principal)
 
         self.assertEqual(second["request_id"], first["request_id"])
         self.assertEqual(second["status"], "pending")
@@ -50,7 +58,8 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage", "opts": ""})
+                principal = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"}
+                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage", "opts": ""}, principal)
                 daemon_main._approval_issue_token(created["request_id"])
                 first = daemon_main._require_approval(
                     "emerge_install",
@@ -58,6 +67,7 @@ class ApprovalRequestStoreTests(unittest.TestCase):
                         "atom": "sys-apps/portage",
                         "opts": "",
                         "approval_request_id": created["request_id"],
+                        "request_principal": principal,
                     },
                 )
                 second = daemon_main._require_approval(
@@ -66,6 +76,7 @@ class ApprovalRequestStoreTests(unittest.TestCase):
                         "atom": "sys-apps/portage",
                         "opts": "",
                         "approval_request_id": created["request_id"],
+                        "request_principal": principal,
                     },
                 )
 
@@ -77,13 +88,15 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_uninstall", {"atom": "sys-apps/portage"})
+                principal = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"}
+                created = daemon_main._approval_request_create("emerge_uninstall", {"atom": "sys-apps/portage"}, principal)
                 daemon_main._approval_issue_token(created["request_id"])
                 result = daemon_main._require_approval(
                     "emerge_uninstall",
                     {
                         "atom": "sys-apps/portage",
                         "approval_request_id": created["request_id"],
+                        "request_principal": principal,
                     },
                 )
 
@@ -95,7 +108,11 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
                 with patch.object(daemon_main.time, "time", return_value=100.0):
-                    created = daemon_main._approval_request_create("emerge_uninstall", {"atom": "sys-apps/portage"})
+                    created = daemon_main._approval_request_create(
+                        "emerge_uninstall",
+                        {"atom": "sys-apps/portage"},
+                        {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
+                    )
                 with patch.object(daemon_main.time, "time", return_value=3699.0):
                     issued = daemon_main._approval_issue_token(created["request_id"])
                 with patch.object(daemon_main.time, "time", return_value=3701.0):
@@ -104,6 +121,7 @@ class ApprovalRequestStoreTests(unittest.TestCase):
                         {
                             "atom": "sys-apps/portage",
                             "approval_request_id": created["request_id"],
+                            "request_principal": {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
                         },
                     )
 
@@ -115,9 +133,11 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
+                principal = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"}
                 created = daemon_main._approval_request_create(
                     "emerge_install",
                     {"atom": "sys-apps/portage", "opts": "jobs:4,unknown-flag,keep-going"},
+                    principal,
                 )
                 daemon_main._approval_issue_token(created["request_id"])
                 result = daemon_main._require_approval(
@@ -126,6 +146,7 @@ class ApprovalRequestStoreTests(unittest.TestCase):
                         "atom": "sys-apps/portage",
                         "opts": "jobs:4,keep-going",
                         "approval_request_id": created["request_id"],
+                        "request_principal": principal,
                     },
                 )
 
@@ -136,13 +157,15 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("history_purge", {"days": "30"})
+                principal = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"}
+                created = daemon_main._approval_request_create("history_purge", {"days": "30"}, principal)
                 daemon_main._approval_issue_token(created["request_id"])
                 result = daemon_main._require_approval(
                     "history_purge",
                     {
                         "days": 30,
                         "approval_request_id": created["request_id"],
+                        "request_principal": principal,
                     },
                 )
 
@@ -153,7 +176,11 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
+                created = daemon_main._approval_request_create(
+                    "emerge_install",
+                    {"atom": "sys-apps/portage"},
+                    {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
+                )
                 cancelled = daemon_main._approval_cancel(created["request_id"])
                 stored = daemon_main._approval_request_get(created["request_id"])
 
@@ -166,13 +193,15 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
+                principal = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"}
+                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"}, principal)
                 daemon_main._approval_issue_token(created["request_id"])
                 daemon_main._require_approval(
                     "emerge_install",
                     {
                         "atom": "sys-apps/portage",
                         "approval_request_id": created["request_id"],
+                        "request_principal": principal,
                     },
                 )
                 with daemon_main._db_conn() as conn:
@@ -210,12 +239,16 @@ class ApprovalRequestStoreTests(unittest.TestCase):
     def test_none_mode_auto_approves_request_creation(self):
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            patch.dict(os.environ, {"ARBOR_AUTH_MODE": "none"}, clear=False),
+            patch.dict(os.environ, {"ARBOR_APPROVAL_MODE": "none"}, clear=False),
         ):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
+                created = daemon_main._approval_request_create(
+                    "emerge_install",
+                    {"atom": "sys-apps/portage"},
+                    {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
+                )
 
         self.assertEqual(created["status"], "approved")
         self.assertEqual(created["approval_mode"], "none")
@@ -223,12 +256,12 @@ class ApprovalRequestStoreTests(unittest.TestCase):
         self.assertEqual(created["request_id"], "")
 
     def test_none_mode_bypasses_secondary_approval(self):
-        with patch.dict(os.environ, {"ARBOR_AUTH_MODE": "none"}, clear=False):
+        with patch.dict(os.environ, {"ARBOR_APPROVAL_MODE": "none"}, clear=False):
             result = daemon_main._require_approval("emerge_install", {"atom": "sys-apps/portage"})
 
         self.assertIsNone(result)
 
-    def test_totp_mode_approves_pending_request_with_valid_code(self):
+    def test_totp_mode_auto_approves_request_creation_for_secondary_approval(self):
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.dict(
@@ -240,16 +273,44 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
-                approved = daemon_main._approval_request_approve(
-                    created["request_id"],
-                    approval_mode.totp_code(self.TOTP_SECRET),
+                created = daemon_main._approval_request_create(
+                    "emerge_install",
+                    {"atom": "sys-apps/portage"},
+                    {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
                 )
 
-        self.assertEqual(approved["status"], "approved")
-        self.assertEqual(approved["approval_mode"], "totp")
+        self.assertEqual(created["status"], "approved")
+        self.assertEqual(created["approval_mode"], "none")
+        self.assertTrue(created["auto_approved"])
 
-    def test_totp_mode_rejects_invalid_code(self):
+    def test_cli_approval_mode_can_be_enabled_separately_from_login_totp(self):
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            patch.dict(
+                os.environ,
+                {
+                    "ARBOR_AUTH_MODE": "totp",
+                    "ARBOR_APPROVAL_MODE": "cli",
+                    "ARBOR_TOTP_SECRET": self.TOTP_SECRET,
+                },
+                clear=False,
+            ),
+        ):
+            db_path = str(Path(tmpdir) / "history.db")
+            with patch.object(daemon_main, "_DB_PATH", db_path):
+                daemon_main._db_init()
+                created = daemon_main._approval_request_create(
+                    "emerge_install",
+                    {"atom": "sys-apps/portage"},
+                    {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
+                )
+
+        self.assertEqual(created["status"], "pending")
+        self.assertEqual(created["approval_mode"], "cli")
+        self.assertNotEqual(created["request_id"], "")
+        self.assertNotIn("auto_approved", created)
+
+    def test_totp_mode_web_approval_endpoint_is_disabled(self):
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.dict(
@@ -261,12 +322,16 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
+                created = daemon_main._approval_request_create(
+                    "emerge_install",
+                    {"atom": "sys-apps/portage"},
+                    {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
+                )
                 approved = daemon_main._approval_request_approve(created["request_id"], "000000")
 
-        self.assertEqual(approved, {"error": "invalid TOTP code"})
+        self.assertEqual(approved, {"error": "web approval is disabled; TOTP is checked during login"})
 
-    def test_totp_mode_can_cancel_pending_request(self):
+    def test_totp_mode_does_not_create_pending_request_to_cancel(self):
         with (
             tempfile.TemporaryDirectory() as tmpdir,
             patch.dict(
@@ -278,77 +343,64 @@ class ApprovalRequestStoreTests(unittest.TestCase):
             db_path = str(Path(tmpdir) / "history.db")
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
+                created = daemon_main._approval_request_create(
+                    "emerge_install",
+                    {"atom": "sys-apps/portage"},
+                    {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"},
+                )
                 cancelled = daemon_main._approval_cancel(created["request_id"])
-                stored = daemon_main._approval_request_get(created["request_id"])
 
-        self.assertEqual(cancelled, {"request_id": created["request_id"], "status": "cancelled"})
-        self.assertIsNotNone(stored)
-        self.assertEqual(stored["status"], "cancelled")
+        self.assertEqual(created["request_id"], "")
+        self.assertTrue(created["auto_approved"])
+        self.assertEqual(cancelled, {"error": "approval request not found"})
 
-    def test_totp_mode_throttles_repeated_failures_and_logs_them(self):
-        with (
-            tempfile.TemporaryDirectory() as tmpdir,
-            patch.dict(
-                os.environ,
-                {"ARBOR_AUTH_MODE": "totp", "ARBOR_TOTP_SECRET": self.TOTP_SECRET},
-                clear=False,
-            ),
-        ):
+    def test_approved_request_cannot_be_consumed_by_different_principal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "history.db")
+            owner = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"}
+            other = {"subject": "u2", "username": "other", "role": "owner", "session_id": "s2"}
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                with patch.object(daemon_main.time, "time", return_value=100.0):
-                    created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
-                    first = daemon_main._approval_request_approve(created["request_id"], "000000")
-                with patch.object(daemon_main.time, "time", return_value=101.0):
-                    second = daemon_main._approval_request_approve(created["request_id"], "111111")
-                with patch.object(daemon_main.time, "time", return_value=101.1):
-                    third = daemon_main._approval_request_approve(created["request_id"], "222222")
-                with daemon_main._db_conn() as conn:
-                    conn.row_factory = daemon_main.sqlite3.Row
-                    rows = conn.execute(
-                        "SELECT event_type, details_json FROM approval_events WHERE request_id=? ORDER BY event_id",
-                        (created["request_id"],),
-                    ).fetchall()
+                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"}, owner)
+                daemon_main._approval_issue_token(created["request_id"])
+                result = daemon_main._require_approval(
+                    "emerge_install",
+                    {
+                        "atom": "sys-apps/portage",
+                        "approval_request_id": created["request_id"],
+                        "request_principal": other,
+                    },
+                )
 
-        self.assertEqual(first, {"error": "invalid TOTP code"})
-        self.assertEqual(second, {"error": "invalid TOTP code", "retry_after": 2})
-        self.assertEqual(third["error"], "approval temporarily throttled; retry in 2s")
-        self.assertEqual(third["retry_after"], 2)
-        self.assertEqual([row["event_type"] for row in rows[-3:]], ["totp_failed", "totp_failed", "totp_throttled"])
+        self.assertEqual(result, {"error": "approval request belongs to a different authenticated user"})
 
-    def test_totp_mode_recovers_after_backoff_window(self):
-        with (
-            tempfile.TemporaryDirectory() as tmpdir,
-            patch.dict(
-                os.environ,
-                {"ARBOR_AUTH_MODE": "totp", "ARBOR_TOTP_SECRET": self.TOTP_SECRET},
-                clear=False,
-            ),
-        ):
+    def test_approved_request_cannot_be_consumed_by_different_session(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "history.db")
+            owner = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s1"}
+            other_session = {"subject": "u1", "username": "owner", "role": "owner", "session_id": "s2"}
             with patch.object(daemon_main, "_DB_PATH", db_path):
                 daemon_main._db_init()
-                with patch.object(daemon_main.time, "time", return_value=100.0):
-                    created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"})
-                    daemon_main._approval_request_approve(created["request_id"], "000000")
-                with patch.object(daemon_main.time, "time", return_value=101.0):
-                    second = daemon_main._approval_request_approve(created["request_id"], "111111")
-                with patch.object(daemon_main.time, "time", return_value=102.1):
-                    throttled = daemon_main._approval_request_approve(created["request_id"], "222222")
-                with patch.object(daemon_main.time, "time", return_value=103.1):
-                    approved = daemon_main._approval_request_approve(
-                        created["request_id"],
-                        approval_mode.totp_code(self.TOTP_SECRET, 103.1),
-                    )
+                created = daemon_main._approval_request_create("emerge_install", {"atom": "sys-apps/portage"}, owner)
+                daemon_main._approval_issue_token(created["request_id"])
+                result = daemon_main._require_approval(
+                    "emerge_install",
+                    {
+                        "atom": "sys-apps/portage",
+                        "approval_request_id": created["request_id"],
+                        "request_principal": other_session,
+                    },
+                )
 
-        self.assertEqual(second, {"error": "invalid TOTP code", "retry_after": 2})
-        self.assertEqual(throttled["error"], "approval temporarily throttled; retry in 1s")
-        self.assertEqual(approved["status"], "approved")
-
+        self.assertEqual(result, {"error": "approval request belongs to a different authenticated session"})
 
 class ApprovalRequestDaemonTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        authz.set_current_principal({"backend": "local", "subject": "u1", "username": "owner", "role": "owner"})
+
+    async def asyncTearDown(self):
+        authz.set_current_principal(None)
+
     async def test_emerge_install_requires_approval_before_starting_job(self):
         chunks = [chunk async for chunk in daemon_main.cmd_emerge_install({"atom": "sys-apps/portage", "opts": ""})]
         self.assertEqual(
@@ -368,7 +420,7 @@ class ApprovalRequestDaemonTests(unittest.IsolatedAsyncioTestCase):
         chunks = [
             chunk
             async for chunk in daemon_main.cmd_overlay_remove(
-                {"name": "foo", "purge": False, "approve_danger": True, "approval_text": "REMOVE foo"}
+                {"name": "foo", "purge": False, "approve_danger": True}
             )
         ]
         self.assertEqual(
@@ -405,124 +457,28 @@ class ApprovalRequestDaemonTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApprovalCliTests(unittest.TestCase):
-    def test_totp_setup_prints_uri_and_ascii_qr(self):
-        class FakeQr:
-            def add_data(self, _data):
-                pass
-
-            def make(self, fit=True):
-                self.fit = fit
-
-            def print_ascii(self, out, tty=False, invert=True):
-                out.write("##\n##\n")
-
-        stdout = io.StringIO()
+    def test_totp_setup_rejects_cli_provisioning(self):
         stderr = io.StringIO()
         with (
-            tempfile.TemporaryDirectory() as tmpdir,
             patch.object(approval_cli, "_require_root"),
-            patch.dict(
-                os.environ,
-                {
-                    "ARBOR_AUTH_MODE": "totp",
-                    "ARBOR_ENV_FILE": str(Path(tmpdir) / "arbor.env"),
-                    "ARBOR_TOTP_SECRET_FILE": str(Path(tmpdir) / "totp.secret"),
-                },
-                clear=False,
-            ),
-            patch.dict(sys.modules, {"qrcode": SimpleNamespace(QRCode=lambda border=1: FakeQr())}),
-            redirect_stdout(stdout),
-            redirect_stderr(stderr),
-        ):
-            rc = approval_cli.main(["totp-setup"])
-            env_text = (Path(tmpdir) / "arbor.env").read_text(encoding="utf-8")
-
-        self.assertEqual(rc, 0)
-        out = stdout.getvalue()
-        self.assertIn("Arbor TOTP provisioning", out)
-        self.assertIn("Scan this QR code", out)
-        self.assertIn("otpauth://totp/", out)
-        self.assertIn("##\n##", out)
-        self.assertEqual(stderr.getvalue(), "")
-        self.assertIn("ARBOR_AUTH_MODE=totp", env_text)
-        self.assertIn(f"ARBOR_TOTP_SECRET_FILE={Path(tmpdir) / 'totp.secret'}", env_text)
-
-    def test_totp_setup_warns_when_qr_dependency_is_missing(self):
-        real_import = __import__
-
-        def fake_import(name, *args, **kwargs):
-            if name == "qrcode":
-                raise ImportError("missing qrcode")
-            return real_import(name, *args, **kwargs)
-
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with (
-            tempfile.TemporaryDirectory() as tmpdir,
-            patch.object(approval_cli, "_require_root"),
-            patch.dict(
-                os.environ,
-                {
-                    "ARBOR_AUTH_MODE": "totp",
-                    "ARBOR_ENV_FILE": str(Path(tmpdir) / "arbor.env"),
-                    "ARBOR_TOTP_SECRET_FILE": str(Path(tmpdir) / "totp.secret"),
-                },
-                clear=False,
-            ),
-            patch("builtins.__import__", side_effect=fake_import),
-            redirect_stdout(stdout),
             redirect_stderr(stderr),
         ):
             rc = approval_cli.main(["totp-setup"])
 
-        self.assertEqual(rc, 0)
-        self.assertIn("otpauth://totp/", stdout.getvalue())
-        self.assertIn("terminal QR rendering requires", stderr.getvalue())
-
-    def test_totp_setup_updates_existing_env_assignments(self):
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with tempfile.TemporaryDirectory() as tmpdir:
-            env_path = Path(tmpdir) / "arbor.env"
-            env_path.write_text(
-                "ARBOR_AUTH_MODE=cli\nARBOR_TOTP_SECRET_FILE=/old/path\nOTHER_KEY=1\n",
-                encoding="utf-8",
-            )
-            with (
-                patch.object(approval_cli, "_require_root"),
-                patch.dict(
-                    os.environ,
-                    {
-                        "ARBOR_AUTH_MODE": "totp",
-                        "ARBOR_ENV_FILE": str(env_path),
-                        "ARBOR_TOTP_SECRET_FILE": str(Path(tmpdir) / "totp.secret"),
-                    },
-                    clear=False,
-                ),
-                patch.object(approval_cli, "_render_terminal_qr", return_value="QR"),
-                redirect_stdout(stdout),
-                redirect_stderr(stderr),
-            ):
-                rc = approval_cli.main(["totp-setup"])
-
-            self.assertEqual(rc, 0)
-            env_text = env_path.read_text(encoding="utf-8")
-            self.assertIn("ARBOR_AUTH_MODE=totp", env_text)
-            self.assertIn(f"ARBOR_TOTP_SECRET_FILE={Path(tmpdir) / 'totp.secret'}", env_text)
-            self.assertIn("OTHER_KEY=1", env_text)
-            self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(rc, 2)
+        self.assertIn("managed from the Arbor web UI", stderr.getvalue())
 
     def test_approve_rejects_when_cli_mode_is_disabled(self):
         stderr = io.StringIO()
         with (
             patch.object(approval_cli, "_require_root"),
-            patch.dict(os.environ, {"ARBOR_AUTH_MODE": "totp"}, clear=False),
+            patch.dict(os.environ, {"ARBOR_APPROVAL_MODE": "none"}, clear=False),
             redirect_stderr(stderr),
         ):
             rc = approval_cli.main(["approve", "req-1"])
 
         self.assertEqual(rc, 2)
-        self.assertIn("ARBOR_AUTH_MODE must be 'cli'", stderr.getvalue())
+        self.assertIn("ARBOR_APPROVAL_MODE must be 'cli'", stderr.getvalue())
 
     def test_approve_uses_simple_yes_no_confirmation(self):
         request = {
@@ -541,7 +497,7 @@ class ApprovalCliTests(unittest.TestCase):
         stderr = io.StringIO()
         with (
             patch.object(approval_cli, "_require_root"),
-            patch.dict(os.environ, {"ARBOR_AUTH_MODE": "cli"}, clear=False),
+            patch.dict(os.environ, {"ARBOR_APPROVAL_MODE": "cli"}, clear=False),
             patch.object(daemon_main, "_db_init"),
             patch.object(daemon_main, "_approval_request_get", return_value=request),
             patch.object(daemon_main, "_approval_issue_token", return_value={"request_id": "req-1", "approval_token": "secret", "expires_at": 3.0}) as issue,
@@ -575,7 +531,7 @@ class ApprovalCliTests(unittest.TestCase):
         stderr = io.StringIO()
         with (
             patch.object(approval_cli, "_require_root"),
-            patch.dict(os.environ, {"ARBOR_AUTH_MODE": "cli"}, clear=False),
+            patch.dict(os.environ, {"ARBOR_APPROVAL_MODE": "cli"}, clear=False),
             patch.object(daemon_main, "_db_init"),
             patch.object(daemon_main, "_approval_request_get", return_value=request),
             patch.object(daemon_main, "_approval_cancel", return_value={"request_id": "req-1", "status": "cancelled"}) as cancel,
@@ -697,6 +653,12 @@ class ApprovalCliTests(unittest.TestCase):
 
 
 class ApprovalRequestWebTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        authz.set_current_principal({"backend": "local", "subject": "u1", "username": "owner", "role": "owner"})
+
+    async def asyncTearDown(self):
+        authz.set_current_principal(None)
+
     async def test_approval_request_create_rejects_non_object_args(self):
         response = await web_main.approval_request_create("test-token", FakeRequest({"cmd": "emerge_install", "args": []}))
         self.assertEqual(response.status_code, 400)
@@ -725,15 +687,21 @@ class ApprovalRequestWebTests(unittest.IsolatedAsyncioTestCase):
                 "action": "keep",
                 "approval_request_id": "req-1",
                 "approval_token": "tok-1",
+                "request_principal": {
+                    "subject": "u1",
+                    "username": "owner",
+                    "role": "owner",
+                    "session_id": "",
+                },
             },
         )
 
 
 class ApprovalFrontendWiringTests(unittest.TestCase):
-    def test_approval_cli_exposes_totp_setup_command(self):
+    def test_approval_cli_points_totp_setup_to_web_ui(self):
         cli_py = (Path(__file__).resolve().parents[2] / "backend" / "arbor" / "approval_cli.py").read_text(encoding="utf-8")
         self.assertIn("totp-setup", cli_py)
-        self.assertIn("Show or generate the Arbor TOTP secret and QR code", cli_py)
+        self.assertIn("TOTP setup now lives in the web UI", cli_py)
 
     def test_frontend_totp_approval_keeps_input_and_pokes_polling_immediately(self):
         app_js = (Path(__file__).resolve().parents[2] / "frontend" / "alpine" / "app.js").read_text(encoding="utf-8")
@@ -801,6 +769,26 @@ class ApprovalFrontendWiringTests(unittest.TestCase):
     def test_uninstall_close_done_returns_to_package_list(self):
         app_js = (Path(__file__).resolve().parents[2] / "frontend" / "alpine" / "app.js").read_text(encoding="utf-8")
         self.assertIn("closeDone() {\n        navigate('packages')\n      },", app_js)
+
+    def test_frontend_exposes_owner_only_totp_security_component(self):
+        app_js = (Path(__file__).resolve().parents[2] / "frontend" / "alpine" / "app.js").read_text(encoding="utf-8")
+        index_html = (Path(__file__).resolve().parents[2] / "frontend" / "alpine" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("function totpSecurityComponent()", app_js)
+        self.assertIn("authTotpStatus: () => _get('/auth/totp')", app_js)
+        self.assertIn("authTotpDisable: (password, totpCode) => _del('/auth/totp', { password, totp_code: totpCode })", app_js)
+        self.assertIn("get qrSvg()", app_js)
+        self.assertIn("|| Alpine.store('auth').loginTotpRequired", app_js)
+        self.assertIn("fallbackStatus()", app_js)
+        self.assertIn("this.status = this.status || this.fallbackStatus()", app_js)
+        self.assertIn("this.$watch('$store.auth.sessionUser', () => loadIfVisible())", app_js)
+        self.assertIn("if (Alpine.store('auth') && Alpine.store('auth').canOwner) items.push({ id: 'security', label: 'Security' })", app_js)
+        self.assertIn("x-show=\"$store.router.view === 'security'\"", index_html)
+        self.assertIn("x-if=\"status || enabled\"", index_html)
+        self.assertIn("x-show=\"qrDataUrl\"", index_html)
+        self.assertNotIn("x-html=\"qrSvg\"", index_html)
+        self.assertIn("Confirm and enable", index_html)
+        self.assertIn("Current password", index_html)
+        self.assertNotIn("window.confirm('Disable login-time TOTP for Arbor?')", app_js)
 
 
 if __name__ == "__main__":

@@ -15,10 +15,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .auth import require_auth, verify_token
+from .approval_mode import LOGIN_AUTH_MODE_ENV, TOTP_SECRET_ENV, TOTP_SECRET_FILE_ENV, ApprovalMode, login_totp_required, verify_totp_code
+from .auth import auth_backend, require_auth, resolve_ws_principal
+from .authorization import AuthorizationError, current_principal, require_min_role, set_current_principal
 from .config_env import env_enabled, env_list
 from .daemon_client import query, query_all, query_one
 from .emerge_log import compile_time_by_category
+from .local_auth import dummy_password_hash, find_user_by_username, has_local_users, mark_login_success, record_login_failure, verify_password
+from .login_throttle import login_retry_after, register_login_failure, register_login_success
+from .session import clear_session_cookie, create_session, revoke_all_sessions, revoke_session, set_session_cookie, session_cookie_name
+from .totp_admin import sync_runtime_env
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +32,11 @@ logging.basicConfig(
 )
 
 app = FastAPI(title="Arbor", version="0.1.0", docs_url=None, redoc_url=None)
+
+
+@app.exception_handler(AuthorizationError)
+async def authorization_error_handler(_request: Request, exc: AuthorizationError):
+    return JSONResponse(status_code=403, content={"error": str(exc)})
 
 # The frontend uses Alpine's CSP-friendly build, so script-src can omit
 # unsafe-eval. Inline styles are still used by the current UI.
@@ -79,6 +90,32 @@ app.add_middleware(
 Auth = Annotated[str, Depends(require_auth)]
 _WS_AUTH_TIMEOUT = 5
 
+
+def _request_principal_binding(request: Request) -> dict:
+    state = getattr(request, "state", None)
+    principal = getattr(state, "arbor_principal", None)
+    cookies = getattr(request, "cookies", {}) or {}
+    if principal is None:
+        principal = current_principal()
+    return {
+        "subject": str(principal.get("subject", "")).strip(),
+        "username": str(principal.get("username", "")).strip(),
+        "role": str(principal.get("role", "")).strip(),
+        "session_id": str(cookies.get(session_cookie_name(), "")).strip(),
+    }
+
+
+def _websocket_principal_binding(websocket: WebSocket) -> dict:
+    principal = current_principal()
+    cookies = getattr(websocket, "cookies", {}) or {}
+    return {
+        "subject": str(principal.get("subject", "")).strip(),
+        "username": str(principal.get("username", "")).strip(),
+        "role": str(principal.get("role", "")).strip(),
+        "session_id": str(cookies.get(session_cookie_name(), "")).strip(),
+    }
+
+
 def _overlay_add_enabled() -> bool:
     return env_enabled("ARBOR_ENABLE_OVERLAY_ADD")
 
@@ -99,6 +136,173 @@ async def _json_object_body(request: Request, *, allow_empty: bool = True) -> di
 # ---------------------------------------------------------------------------
 # REST endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/api/auth/backend")
+async def auth_backend_status():
+    return {"backend": auth_backend(), "login_totp_required": login_totp_required()}
+
+
+@app.get("/api/auth/session")
+async def auth_session(request: Request):
+    session_id = request.cookies.get(session_cookie_name(), "")
+    from .session import get_session
+
+    session = get_session(session_id)
+    if session is None:
+        return {"backend": "local", "authenticated": False}
+    return {
+        "backend": "local",
+        "authenticated": True,
+        "user_id": session["user_id"],
+        "username": session["username"],
+        "role": session["role"],
+        "expires_at": session["expires_at"],
+        "step_up_method": session.get("step_up_method", ""),
+    }
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request):
+    if not has_local_users():
+        return JSONResponse(status_code=503, content={"error": "no local users configured"})
+
+    body = await _json_object_body(request, allow_empty=False)
+    if isinstance(body, JSONResponse):
+        return body
+    username = str(body.get("username", "")).strip()
+    password = str(body.get("password", ""))
+    totp_code = str(body.get("totp_code", ""))
+    remote_addr = request.client.host if request.client else ""
+    user_agent = request.headers.get("user-agent", "")
+    retry_after = login_retry_after(username, remote_addr)
+    user = find_user_by_username(username)
+    password_hash = str(user["password_hash"]) if user is not None else dummy_password_hash()
+    password_ok = verify_password(password, password_hash)
+    if retry_after > 0:
+        register_login_failure(username, remote_addr)
+        record_login_failure(username, remote_addr=remote_addr, user_agent=user_agent, reason="throttled")
+        return JSONResponse(status_code=401, content={"error": "invalid username or password"})
+    if user is None or user.get("disabled_at") is not None or not password_ok:
+        register_login_failure(username, remote_addr)
+        reason = "disabled" if user is not None and user.get("disabled_at") is not None else "invalid_credentials"
+        record_login_failure(username, remote_addr=remote_addr, user_agent=user_agent, reason=reason)
+        return JSONResponse(status_code=401, content={"error": "invalid username or password"})
+    if login_totp_required() and not verify_totp_code(totp_code):
+        register_login_failure(username, remote_addr)
+        record_login_failure(username, remote_addr=remote_addr, user_agent=user_agent, reason="invalid_totp")
+        return JSONResponse(status_code=401, content={"error": "invalid username or password"})
+
+    register_login_success(username, remote_addr)
+    mark_login_success(str(user["user_id"]))
+    session = create_session(
+        str(user["user_id"]),
+        remote_addr=remote_addr,
+        user_agent=user_agent,
+        step_up_method="totp" if login_totp_required() else "",
+    )
+    response = JSONResponse(
+        status_code=200,
+        content={
+            "ok": True,
+            "user_id": user["user_id"],
+            "username": user["username"],
+            "role": user["role"],
+            "expires_at": session["expires_at"],
+            "step_up_method": session.get("step_up_method", ""),
+        },
+    )
+    set_session_cookie(response, session["session_id"])
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request):
+    session_id = request.cookies.get(session_cookie_name(), "")
+    revoke_session(session_id, reason="logout")
+    response = JSONResponse(status_code=200, content={"ok": True})
+    clear_session_cookie(response)
+    return response
+
+
+@app.get("/api/auth/totp")
+async def auth_totp_status(auth: Auth):
+    require_min_role("owner")
+    data = await query_one("totp_status", {})
+    if "error" in data:
+        return JSONResponse(status_code=400, content=data)
+    if login_totp_required():
+        data["enabled"] = True
+        data["pending_enrollment"] = False
+    return data
+
+
+@app.post("/api/auth/totp/enroll")
+async def auth_totp_enroll(auth: Auth):
+    require_min_role("owner")
+    if login_totp_required():
+        return JSONResponse(status_code=400, content={"error": "TOTP is already enabled"})
+    data = await query_one("totp_enroll_begin", {})
+    if "error" in data:
+        return JSONResponse(status_code=400, content=data)
+    return data
+
+
+@app.post("/api/auth/totp/confirm")
+async def auth_totp_confirm(auth: Auth, request: Request):
+    require_min_role("owner")
+    body = await _json_object_body(request, allow_empty=False)
+    if isinstance(body, JSONResponse):
+        return body
+    code = str(body.get("code", "")).strip()
+    if not code:
+        return JSONResponse(status_code=400, content={"error": "code is required"})
+    data = await query_one("totp_enroll_confirm", {"code": code})
+    if "error" in data:
+        return JSONResponse(status_code=400, content=data)
+    sync_runtime_env(
+        {
+            LOGIN_AUTH_MODE_ENV: ApprovalMode.TOTP.value,
+            TOTP_SECRET_FILE_ENV: str(data.get("secret_file", "")).strip(),
+        },
+        unset_keys={TOTP_SECRET_ENV},
+    )
+    revoke_all_sessions(reason="totp_enabled")
+    response = JSONResponse(status_code=200, content={**data, "reauth_required": True})
+    clear_session_cookie(response)
+    return response
+
+
+@app.delete("/api/auth/totp")
+async def auth_totp_disable(auth: Auth, request: Request):
+    require_min_role("owner")
+    if not login_totp_required():
+        return JSONResponse(status_code=400, content={"error": "TOTP is not enabled"})
+    body = await _json_object_body(request, allow_empty=False)
+    if isinstance(body, JSONResponse):
+        return body
+    password = str(body.get("password", ""))
+    totp_code = str(body.get("totp_code", "")).strip()
+    if not password:
+        return JSONResponse(status_code=400, content={"error": "password is required"})
+    if not totp_code:
+        return JSONResponse(status_code=400, content={"error": "verification code is required"})
+    principal = current_principal()
+    username = str(principal.get("username", "")).strip()
+    user = find_user_by_username(username)
+    password_hash = str(user["password_hash"]) if user is not None else ""
+    if user is None or not verify_password(password, password_hash) or not verify_totp_code(totp_code):
+        return JSONResponse(status_code=401, content={"error": "invalid password or verification code"})
+    data = await query_one("totp_disable", {})
+    if "error" in data:
+        return JSONResponse(status_code=400, content=data)
+    sync_runtime_env(
+        {LOGIN_AUTH_MODE_ENV: ApprovalMode.CLI.value},
+        unset_keys={TOTP_SECRET_ENV, TOTP_SECRET_FILE_ENV},
+    )
+    revoke_all_sessions(reason="totp_disabled")
+    response = JSONResponse(status_code=200, content={**data, "reauth_required": True})
+    clear_session_cookie(response)
+    return response
 
 @app.get("/api/status")
 async def system_status(auth: Auth):
@@ -192,6 +396,7 @@ async def approval_request_show(auth: Auth, request_id: str):
 
 @app.post("/api/approval-requests")
 async def approval_request_create(auth: Auth, request: Request):
+    require_min_role("operator")
     body = await _json_object_body(request, allow_empty=False)
     if isinstance(body, JSONResponse):
         return body
@@ -199,7 +404,10 @@ async def approval_request_create(auth: Auth, request: Request):
     args = body.get("args", {})
     if not isinstance(args, dict):
         return JSONResponse(status_code=400, content={"error": "args must be an object"})
-    data = await query_one("approval_request_create", {"cmd": cmd, "args": args})
+    data = await query_one(
+        "approval_request_create",
+        {"cmd": cmd, "args": args, "request_principal": _request_principal_binding(request)},
+    )
     if "error" in data:
         return JSONResponse(status_code=400, content=data)
     return data
@@ -207,6 +415,7 @@ async def approval_request_create(auth: Auth, request: Request):
 
 @app.post("/api/approval-requests/{request_id}/approve")
 async def approval_request_approve(auth: Auth, request_id: str, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request, allow_empty=False)
     if isinstance(body, JSONResponse):
         return body
@@ -220,6 +429,7 @@ async def approval_request_approve(auth: Auth, request_id: str, request: Request
 
 @app.post("/api/approval-requests/{request_id}/cancel")
 async def approval_request_cancel(auth: Auth, request_id: str):
+    require_min_role("owner")
     data = await query_one("approval_request_cancel", {"request_id": request_id})
     if "error" in data:
         status = 404 if data["error"] == "approval request not found" else 400
@@ -268,10 +478,14 @@ async def _ws_require_auth(websocket: WebSocket) -> bool:
         await _ws_fail(websocket, 4400, "invalid auth message")
         return False
 
-    token = payload.get("token") if isinstance(payload, dict) else None
-    if not isinstance(payload, dict) or payload.get("type") != "auth" or not verify_token(token):
-        await _ws_fail(websocket, 4401, "invalid or missing token")
+    if not isinstance(payload, dict) or payload.get("type") != "auth":
+        await _ws_fail(websocket, 4401, "invalid or missing session")
         return False
+    principal = resolve_ws_principal(payload, websocket.headers)
+    if principal is None:
+        await _ws_fail(websocket, 4401, "invalid or missing session")
+        return False
+    set_current_principal(principal)
     origin = websocket.headers.get("origin")
     if not _ws_origin_allowed(origin):
         await _ws_fail(websocket, 4403, "origin not allowed")
@@ -286,7 +500,7 @@ async def _ws_emerge(websocket: WebSocket, cmd: str, atom: str, extra_args: dict
         await _ws_fail(websocket, 4400, "missing atom")
         return
     try:
-        async for chunk in query(cmd, {"atom": atom, **(extra_args or {})}):
+        async for chunk in query(cmd, {"atom": atom, **(extra_args or {}), "request_principal": _websocket_principal_binding(websocket)}):
             await websocket.send_text(json.dumps(chunk))
             if chunk.get("done"):
                 break
@@ -310,7 +524,8 @@ async def _ws_job_cmd(websocket: WebSocket, daemon_cmd: str, args: dict):
         return
     try:
         job_id = None
-        async for chunk in query(daemon_cmd, args):
+        daemon_args = {**args, "request_principal": _websocket_principal_binding(websocket)}
+        async for chunk in query(daemon_cmd, daemon_args):
             if chunk.get("error"):
                 await websocket.send_text(json.dumps({"error": chunk["error"], "done": True}))
                 return
@@ -515,6 +730,7 @@ async def job_status(auth: Auth, job_id: str):
 
 @app.post("/api/jobs/{job_id}/cancel")
 async def job_cancel(auth: Auth, job_id: str, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -524,6 +740,7 @@ async def job_cancel(auth: Auth, job_id: str, request: Request):
             "job_id": job_id,
             "approval_request_id": str(body.get("approval_request_id", "")).strip(),
             "approval_token": str(body.get("approval_token", "")).strip(),
+            "request_principal": _request_principal_binding(request),
         },
     )
     if "error" in data:
@@ -576,6 +793,7 @@ async def history_log(auth: Auth, job_id: str):
 
 @app.delete("/api/history/{job_id}")
 async def history_delete(auth: Auth, job_id: str, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -585,6 +803,7 @@ async def history_delete(auth: Auth, job_id: str, request: Request):
             "job_id": job_id,
             "approval_request_id": str(body.get("approval_request_id", "")).strip(),
             "approval_token": str(body.get("approval_token", "")).strip(),
+            "request_principal": _request_principal_binding(request),
         },
     )
     if "error" in data:
@@ -594,6 +813,7 @@ async def history_delete(auth: Auth, job_id: str, request: Request):
 
 @app.post("/api/history/purge")
 async def history_purge(auth: Auth, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -607,6 +827,7 @@ async def history_purge(auth: Auth, request: Request):
             "days": days,
             "approval_request_id": str(body.get("approval_request_id", "")).strip(),
             "approval_token": str(body.get("approval_token", "")).strip(),
+            "request_principal": _request_principal_binding(request),
         },
     )
     return data
@@ -636,6 +857,7 @@ async def analytics_compile_time(auth: Auth):
 
 @app.post("/api/emerge/etc-update/resolve")
 async def etc_update_resolve(auth: Auth, request: Request):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -648,6 +870,7 @@ async def etc_update_resolve(auth: Auth, request: Request):
             "action": action,
             "approval_request_id": str(body.get("approval_request_id", "")).strip(),
             "approval_token": str(body.get("approval_token", "")).strip(),
+            "request_principal": _request_principal_binding(request),
         },
     )
     return data
@@ -670,6 +893,7 @@ async def overlay_config(auth: Auth):
 
 @app.post("/api/overlays")
 async def overlay_add(auth: Auth, request: Request):
+    require_min_role("owner")
     if not _overlay_add_enabled():
         return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
     body = await _json_object_body(request)
@@ -679,15 +903,14 @@ async def overlay_add(auth: Auth, request: Request):
     sync_type = str(body.get("sync_type", "git")).strip()
     sync_uri  = str(body.get("sync_uri", "")).strip()
     approve_danger = bool(body.get("approve_danger", False))
-    approval_text = str(body.get("approval_text", "")).strip()
     data = await query_one("overlay_add", {
         "name": name,
         "sync_type": sync_type,
         "sync_uri": sync_uri,
         "approve_danger": approve_danger,
-        "approval_text": approval_text,
         "approval_request_id": str(body.get("approval_request_id", "")).strip(),
         "approval_token": str(body.get("approval_token", "")).strip(),
+        "request_principal": _request_principal_binding(request),
     })
     if "error" in data:
         return JSONResponse(status_code=400, content=data)
@@ -696,6 +919,7 @@ async def overlay_add(auth: Auth, request: Request):
 
 @app.delete("/api/overlays/{name}")
 async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Query(default=0)):
+    require_min_role("owner")
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -703,9 +927,9 @@ async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Q
         "name": name,
         "purge": bool(purge),
         "approve_danger": bool(body.get("approve_danger", False)),
-        "approval_text": str(body.get("approval_text", "")).strip(),
         "approval_request_id": str(body.get("approval_request_id", "")).strip(),
         "approval_token": str(body.get("approval_token", "")).strip(),
+        "request_principal": _request_principal_binding(request),
     })
     if "error" in data:
         return JSONResponse(status_code=400, content=data)
@@ -729,6 +953,7 @@ async def ws_overlay_sync(
                 "name": name,
                 "approval_request_id": approval_request_id,
                 "approval_token": approval_token,
+                "request_principal": _websocket_principal_binding(websocket),
             },
         ):
             await websocket.send_text(json.dumps(chunk))

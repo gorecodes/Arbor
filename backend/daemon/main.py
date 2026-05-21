@@ -23,9 +23,17 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from arbor.action_security import action_metadata, infer_job_action
-from arbor.approval_mode import ApprovalMode, verify_totp_code, get_approval_mode
+from arbor.approval_mode import (
+    ApprovalMode,
+    effective_approval_mode,
+    get_approval_mode,
+    get_login_auth_mode,
+    totp_secret_path,
+    verify_totp_code_for_secret,
+)
 from arbor.config_env import env_enabled
 from arbor.ipc_auth import IPCAuthError, load_ipc_key, verify_request
+from arbor.totp_admin import begin_totp_enrollment, disable_totp_login, enable_totp_login, totp_management_status
 
 SOCKET_PATH = "/run/arbor/daemon.sock"
 MAX_JOB_LOG_BYTES = 512 * 1024
@@ -61,6 +69,10 @@ ALLOWED_COMMANDS = {
     "use_flag_origins",
     "package_deps",
     "dep_graph",
+    "totp_status",
+    "totp_enroll_begin",
+    "totp_enroll_confirm",
+    "totp_disable",
     "emerge_pretend",
     "emerge_install",
     "emerge_autounmask",
@@ -329,6 +341,16 @@ _APPROVAL_TOTP_FAIL_MAX_DELAY_SECONDS = 60
 _APPROVAL_ARG_KEYS = {"approval_request_id", "approval_token"}
 
 
+def _request_principal_snapshot(raw: dict | None) -> dict[str, str]:
+    data = dict(raw or {})
+    return {
+        "subject": str(data.get("subject", "")).strip(),
+        "username": str(data.get("username", "")).strip(),
+        "role": str(data.get("role", "")).strip(),
+        "session_id": str(data.get("session_id", "")).strip(),
+    }
+
+
 @contextmanager
 def _db_conn(*, begin_immediate: bool = False):
     conn = sqlite3.connect(_DB_PATH, timeout=30.0)
@@ -406,6 +428,10 @@ def _db_init():
             """)
             _db_ensure_column(conn, "approval_requests", "failed_attempts", "INTEGER NOT NULL DEFAULT 0")
             _db_ensure_column(conn, "approval_requests", "last_failed_at", "REAL")
+            _db_ensure_column(conn, "approval_requests", "requested_by_subject", "TEXT NOT NULL DEFAULT ''")
+            _db_ensure_column(conn, "approval_requests", "requested_by_username", "TEXT NOT NULL DEFAULT ''")
+            _db_ensure_column(conn, "approval_requests", "requested_by_role", "TEXT NOT NULL DEFAULT ''")
+            _db_ensure_column(conn, "approval_requests", "requested_by_session_id", "TEXT NOT NULL DEFAULT ''")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS approval_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -702,7 +728,7 @@ def _approval_request_row_to_dict(row: sqlite3.Row | None) -> dict | None:
         data.get("action_target", ""),
         data["request_id"],
     )
-    data["approval_mode"] = get_approval_mode().value
+    data["approval_mode"] = effective_approval_mode().value
     return data
 
 
@@ -734,12 +760,13 @@ def _approval_auto_response(action_cmd: str, clean_args: dict, meta: dict[str, o
     }
 
 
-def _approval_request_create(action_cmd: str, args: dict | None) -> dict:
+def _approval_request_create(action_cmd: str, args: dict | None, request_principal: dict | None = None) -> dict:
     clean_args = _canonical_approval_args(action_cmd, args)
     meta = action_metadata(action_cmd, clean_args)
+    principal = _request_principal_snapshot(request_principal)
     if not meta["approval_required"]:
         return {"error": "approval is not required for this action"}
-    if get_approval_mode() is ApprovalMode.NONE:
+    if effective_approval_mode() is ApprovalMode.NONE:
         return _approval_auto_response(action_cmd, clean_args, meta)
     request_id = str(uuid.uuid4())
     now = time.time()
@@ -751,10 +778,12 @@ def _approval_request_create(action_cmd: str, args: dict | None) -> dict:
             _approval_expire_stale(conn, now)
             conn.row_factory = sqlite3.Row
             existing = conn.execute(
-                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at, "
+                "requested_by_subject, requested_by_username, requested_by_role, requested_by_session_id "
                 "FROM approval_requests WHERE status='pending' AND action_cmd=? AND request_hash=? "
+                "AND requested_by_subject=? AND requested_by_session_id=? "
                 "ORDER BY created_at DESC LIMIT 1",
-                (action_cmd, request_hash),
+                (action_cmd, request_hash, principal["subject"], principal["session_id"]),
             ).fetchone()
             if existing is not None:
                 return _approval_request_row_to_dict(existing) or {"error": "could not reuse approval request"}
@@ -770,8 +799,9 @@ def _approval_request_create(action_cmd: str, args: dict | None) -> dict:
                 }
             conn.execute(
                 "INSERT INTO approval_requests "
-                "(request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "(request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, "
+                "requested_by_subject, requested_by_username, requested_by_role, requested_by_session_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     request_id,
                     action_cmd,
@@ -782,10 +812,15 @@ def _approval_request_create(action_cmd: str, args: dict | None) -> dict:
                     "pending",
                     now,
                     expires_at,
+                    principal["subject"],
+                    principal["username"],
+                    principal["role"],
+                    principal["session_id"],
                 ),
             )
             row = conn.execute(
-                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at, "
+                "requested_by_subject, requested_by_username, requested_by_role, requested_by_session_id "
                 "FROM approval_requests WHERE request_id=?",
                 (request_id,),
             ).fetchone()
@@ -812,12 +847,14 @@ def _approval_request_list(status: str = "pending") -> list[dict]:
             conn.row_factory = sqlite3.Row
             if status == "all":
                 rows = conn.execute(
-                    "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                    "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at, "
+                    "requested_by_subject, requested_by_username, requested_by_role, requested_by_session_id "
                     "FROM approval_requests ORDER BY created_at DESC"
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                    "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at, "
+                    "requested_by_subject, requested_by_username, requested_by_role, requested_by_session_id "
                     "FROM approval_requests WHERE status=? ORDER BY created_at DESC",
                     (status,),
                 ).fetchall()
@@ -831,7 +868,8 @@ def _approval_request_get(request_id: str) -> dict | None:
             _approval_expire_stale(conn, now)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at "
+                "SELECT request_id, action_cmd, action_class, action_target, request_hash, args_json, status, created_at, expires_at, approved_at, "
+                "requested_by_subject, requested_by_username, requested_by_role, requested_by_session_id "
                 "FROM approval_requests WHERE request_id=?",
                 (request_id,),
             ).fetchone()
@@ -905,93 +943,21 @@ def _approval_cancel(request_id: str) -> dict:
 
 
 def _approval_request_approve(request_id: str, code: str) -> dict:
-    mode = get_approval_mode()
+    mode = effective_approval_mode()
     if mode is ApprovalMode.CLI:
         return {"error": "web approval is disabled in cli mode"}
     if mode is ApprovalMode.NONE:
-        return {"error": "approval is disabled in none mode"}
-    now = time.time()
-    with _db_lock:
-        with _db_conn(begin_immediate=True) as conn:
-            _approval_expire_stale(conn, now)
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT request_id, action_cmd, action_class, action_target, status, expires_at, "
-                "failed_attempts, last_failed_at "
-                "FROM approval_requests WHERE request_id=?",
-                (request_id,),
-            ).fetchone()
-            if row is None:
-                return {"error": "approval request not found"}
-            if row["status"] != "pending":
-                return {"error": f"approval request is not pending (status={row['status']})"}
-            if row["expires_at"] < now:
-                return {"error": "approval request has expired"}
-            failed_attempts = int(row["failed_attempts"] or 0)
-            last_failed_at = float(row["last_failed_at"]) if row["last_failed_at"] is not None else None
-            retry_after = 0
-            if last_failed_at is not None:
-                locked_until = last_failed_at + _approval_totp_backoff_seconds(failed_attempts)
-                if locked_until > now:
-                    retry_after = max(1, int(locked_until - now + 0.999))
-                    _approval_event_log(
-                        conn,
-                        request_id,
-                        "totp_throttled",
-                        row["action_cmd"],
-                        row["action_class"],
-                        row["action_target"],
-                        now,
-                        {"failed_attempts": failed_attempts, "retry_after": retry_after},
-                    )
-                    log.warning(
-                        "totp approval throttled request_id=%s action=%s retry_after=%ss",
-                        request_id,
-                        row["action_cmd"],
-                        retry_after,
-                    )
-                    return {"error": f"approval temporarily throttled; retry in {retry_after}s", "retry_after": retry_after}
-            if not verify_totp_code(code):
-                failed_attempts += 1
-                retry_after = _approval_totp_backoff_seconds(failed_attempts)
-                conn.execute(
-                    "UPDATE approval_requests SET failed_attempts=?, last_failed_at=? WHERE request_id=?",
-                    (failed_attempts, now, request_id),
-                )
-                _approval_event_log(
-                    conn,
-                    request_id,
-                    "totp_failed",
-                    row["action_cmd"],
-                    row["action_class"],
-                    row["action_target"],
-                    now,
-                    {"failed_attempts": failed_attempts, "retry_after": retry_after},
-                )
-                log.warning(
-                    "totp approval failed request_id=%s action=%s failed_attempts=%s retry_after=%ss",
-                    request_id,
-                    row["action_cmd"],
-                    failed_attempts,
-                    retry_after,
-                )
-                payload = {"error": "invalid TOTP code"}
-                if retry_after > 0:
-                    payload["retry_after"] = retry_after
-                return payload
-    issued = _approval_issue_token(request_id, {"method": "totp"})
-    if "error" in issued:
-        return issued
-    request = _approval_request_get(request_id)
-    return request or {"error": "approval request not found"}
+        return {"error": "web approval is disabled; TOTP is checked during login"}
+    return {"error": f"web approval is disabled in {mode.value} mode"}
 
 
 def _require_approval(action_cmd: str, args: dict) -> dict | None:
     clean_args = _canonical_approval_args(action_cmd, args)
     meta = action_metadata(action_cmd, clean_args)
+    request_principal = _request_principal_snapshot(args.get("request_principal"))
     if not meta["approval_required"]:
         return None
-    if get_approval_mode() is ApprovalMode.NONE:
+    if effective_approval_mode() is ApprovalMode.NONE:
         log.warning(
             "approval bypassed mode=none action=%s class=%s target=%s",
             action_cmd,
@@ -1015,7 +981,8 @@ def _require_approval(action_cmd: str, args: dict) -> dict | None:
             _approval_expire_stale(conn, now)
             conn.row_factory = sqlite3.Row
             row = conn.execute(
-                "SELECT request_id, action_cmd, action_class, action_target, request_hash, status, expires_at "
+                "SELECT request_id, action_cmd, action_class, action_target, request_hash, status, expires_at, "
+                "requested_by_subject, requested_by_session_id "
                 "FROM approval_requests WHERE request_id=?",
                 (request_id,),
             ).fetchone()
@@ -1040,6 +1007,10 @@ def _require_approval(action_cmd: str, args: dict) -> dict | None:
                 return {"error": "approval request no longer matches the requested plan"}
             if row["expires_at"] < now:
                 return {"error": "approval request has expired"}
+            if row["requested_by_subject"] != request_principal["subject"]:
+                return {"error": "approval request belongs to a different authenticated user"}
+            if row["requested_by_session_id"] and row["requested_by_session_id"] != request_principal["session_id"]:
+                return {"error": "approval request belongs to a different authenticated session"}
             conn.execute("UPDATE approval_requests SET status='consumed' WHERE request_id=?", (request_id,))
             _approval_event_log(
                 conn,
@@ -2024,6 +1995,7 @@ def _approval_payload(action_cmd: str, args: dict | None, overrides: dict | None
     payload = _canonical_approval_args(action_cmd, source)
     payload["approval_request_id"] = str(source.get("approval_request_id", "")).strip()
     payload["approval_token"] = str(source.get("approval_token", "")).strip()
+    payload["request_principal"] = _request_principal_snapshot(source.get("request_principal"))
     return payload
 
 
@@ -2991,6 +2963,53 @@ async def cmd_overlay_sync(args):
         yield item
 
 
+def _totp_status() -> dict:
+    return totp_management_status(enabled=get_login_auth_mode() is ApprovalMode.TOTP)
+
+
+def _totp_enroll_begin() -> dict:
+    if get_login_auth_mode() is ApprovalMode.TOTP:
+        return {"error": "TOTP is already enabled"}
+    return begin_totp_enrollment()
+
+
+def _totp_enroll_confirm(code: str) -> dict:
+    if get_login_auth_mode() is ApprovalMode.TOTP:
+        return {"error": "TOTP is already enabled"}
+    secret_path = totp_secret_path()
+    if not secret_path.exists():
+        return {"error": "start TOTP enrollment first"}
+    secret = secret_path.read_text(encoding="utf-8").strip()
+    if not verify_totp_code_for_secret(secret, code):
+        return {"error": "invalid verification code"}
+    return enable_totp_login(secret_path=secret_path)
+
+
+def _totp_disable() -> dict:
+    secret_path = totp_secret_path()
+    return disable_totp_login(secret_path=secret_path)
+
+
+async def cmd_totp_status(_args):
+    yield await in_thread(_totp_status)
+
+
+async def cmd_totp_enroll_begin(_args):
+    yield await in_thread(_totp_enroll_begin)
+
+
+async def cmd_totp_enroll_confirm(args):
+    code = str(args.get("code", "")).strip()
+    if not code:
+        yield {"error": "code is required"}
+        return
+    yield await in_thread(_totp_enroll_confirm, code)
+
+
+async def cmd_totp_disable(_args):
+    yield await in_thread(_totp_disable)
+
+
 async def cmd_approval_request_create(args):
     action_cmd = str(args.get("cmd", "")).strip()
     action_args = args.get("args", {})
@@ -3003,7 +3022,7 @@ async def cmd_approval_request_create(args):
     if action_cmd not in ALLOWED_COMMANDS:
         yield {"error": f"command '{action_cmd}' not allowed"}
         return
-    yield await in_thread(_approval_request_create, action_cmd, action_args)
+    yield await in_thread(_approval_request_create, action_cmd, action_args, args.get("request_principal"))
 
 
 async def cmd_approval_request_approve(args):
@@ -3047,6 +3066,10 @@ async def cmd_approval_request_show(args):
 
 
 HANDLERS = {
+    "totp_status":        cmd_totp_status,
+    "totp_enroll_begin":  cmd_totp_enroll_begin,
+    "totp_enroll_confirm": cmd_totp_enroll_confirm,
+    "totp_disable":       cmd_totp_disable,
     "approval_request_create": cmd_approval_request_create,
     "approval_request_approve": cmd_approval_request_approve,
     "approval_request_cancel":  cmd_approval_request_cancel,

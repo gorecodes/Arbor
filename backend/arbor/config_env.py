@@ -14,6 +14,10 @@ def env_value(name: str, default: str = "") -> str:
     value = os.environ.get(name)
     if value is not None:
         return value
+    return env_file_value(name, default)
+
+
+def env_file_value(name: str, default: str = "") -> str:
     try:
         for raw_line in env_file_path().read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
@@ -27,6 +31,13 @@ def env_value(name: str, default: str = "") -> str:
     except OSError:
         return default
     return default
+
+
+def env_value_file_first(name: str, default: str = "") -> str:
+    file_value = env_file_value(name, "__arbor_missing__")
+    if file_value != "__arbor_missing__":
+        return file_value
+    return os.environ.get(name, default)
 
 
 def env_int(name: str, default: int) -> int:

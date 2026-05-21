@@ -142,71 +142,12 @@ def _render_terminal_qr(uri: str) -> str:
 
 
 def _cmd_totp_setup(args: argparse.Namespace) -> int:
-    _require_root()
-    try:
-        mode = get_approval_mode()
-    except ApprovalModeError as exc:
-        print(f"[arbor-approve] ERROR: {exc}", file=sys.stderr)
-        return 2
-
-    env_secret = os.environ.get("ARBOR_TOTP_SECRET", "").strip()
-    source = "environment"
-    status = "existing"
-    secret_path = totp_secret_path()
-    if env_secret:
-        if args.rotate:
-            print(
-                "[arbor-approve] ERROR: cannot rotate a TOTP secret provided through ARBOR_TOTP_SECRET; update the environment value or switch to ARBOR_TOTP_SECRET_FILE",
-                file=sys.stderr,
-            )
-            return 2
-        secret = get_totp_secret()
-    else:
-        source = str(secret_path)
-        if args.rotate or not secret_path.exists():
-            secret = generate_totp_secret()
-            _write_secret_file(secret_path, secret)
-            status = "generated"
-        else:
-            try:
-                secret = get_totp_secret()
-            except ApprovalModeError as exc:
-                print(f"[arbor-approve] ERROR: {exc}", file=sys.stderr)
-                return 2
-
-    issuer = args.issuer.strip() if args.issuer else get_totp_issuer()
-    account_name = args.account_name.strip() if args.account_name else get_totp_account_name()
-    uri = build_totp_uri(secret, issuer=issuer, account_name=account_name)
-    env_updates = {"ARBOR_AUTH_MODE": "totp"}
-    if not env_secret:
-        env_updates["ARBOR_TOTP_SECRET_FILE"] = str(secret_path)
-    if args.issuer:
-        env_updates["ARBOR_TOTP_ISSUER"] = issuer
-    if args.account_name:
-        env_updates["ARBOR_TOTP_ACCOUNT_NAME"] = account_name
-    updated_env_path = _upsert_env_file(env_updates)
-
-    print("Arbor TOTP provisioning")
-    print(f"mode:          {mode.value}")
-    print(f"secret source: {source} ({status})")
-    print(f"env file:      {updated_env_path}")
-    print(f"issuer:        {issuer}")
-    print(f"account:       {account_name}")
-    print()
-    print("Manual entry secret:")
-    print(secret)
-    print()
-    try:
-        print("Scan this QR code with Google Authenticator, Aegis, or another TOTP app:")
-        print(_render_terminal_qr(uri))
-        print()
-    except RuntimeError as exc:
-        print(f"[arbor-approve] WARNING: {exc}", file=sys.stderr)
-        print("QR rendering unavailable; use the secret or otpauth URI below for manual setup.")
-        print()
-    print("otpauth URI:")
-    print(uri)
-    return 0
+    _ = args
+    print(
+        "[arbor-approve] ERROR: TOTP enable/disable is managed from the Arbor web UI by an owner account",
+        file=sys.stderr,
+    )
+    return 2
 
 
 def _cmd_list(_args: argparse.Namespace) -> int:
@@ -242,7 +183,7 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     try:
         if get_approval_mode() is not ApprovalMode.CLI:
             print(
-                "[arbor-approve] ERROR: ARBOR_AUTH_MODE must be 'cli' to approve from the terminal",
+                "[arbor-approve] ERROR: ARBOR_APPROVAL_MODE must be 'cli' to approve from the terminal",
                 file=sys.stderr,
             )
             return 2
@@ -301,10 +242,10 @@ def build_parser() -> argparse.ArgumentParser:
     approve_parser.add_argument("-y", "--yes", action="store_true", help="Approve without interactive confirmation")
     approve_parser.set_defaults(func=_cmd_approve)
 
-    totp_parser = sub.add_parser("totp-setup", help="Show or generate the Arbor TOTP secret and QR code")
-    totp_parser.add_argument("--rotate", action="store_true", help="Generate and persist a fresh file-backed TOTP secret")
-    totp_parser.add_argument("--issuer", default="", help="Override the TOTP issuer label")
-    totp_parser.add_argument("--account-name", default="", help="Override the TOTP account label")
+    totp_parser = sub.add_parser("totp-setup", help="Show migration guidance; TOTP setup now lives in the web UI")
+    totp_parser.add_argument("--rotate", action="store_true", help=argparse.SUPPRESS)
+    totp_parser.add_argument("--issuer", default="", help=argparse.SUPPRESS)
+    totp_parser.add_argument("--account-name", default="", help=argparse.SUPPRESS)
     totp_parser.set_defaults(func=_cmd_totp_setup)
 
     return parser

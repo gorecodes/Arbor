@@ -6,6 +6,7 @@ import asyncio
 import json
 from typing import AsyncIterator
 
+from .authorization import authorize_daemon_command
 from .ipc_auth import sign_request
 
 SOCKET_PATH = "/run/arbor/daemon.sock"
@@ -16,9 +17,11 @@ _READER_LIMIT = 64 * 1024 * 1024
 
 
 async def query(cmd: str, args: dict = None) -> AsyncIterator[dict]:
+    request_args = dict(args or {})
+    authorize_daemon_command(cmd, request_args)
     reader, writer = await asyncio.open_unix_connection(SOCKET_PATH, limit=_READER_LIMIT)
     try:
-        request = json.dumps(sign_request(cmd, args)) + "\n"
+        request = json.dumps(sign_request(cmd, request_args)) + "\n"
         writer.write(request.encode())
         await writer.drain()
 

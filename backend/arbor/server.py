@@ -42,15 +42,15 @@ def _log_config():
 def _report_approval_mode(mode: ApprovalMode) -> None:
     if mode is ApprovalMode.NONE:
         print(
-            "[arbor] WARNING: ARBOR_AUTH_MODE=none — secondary approval is disabled; "
+            "[arbor] WARNING: ARBOR_APPROVAL_MODE=none — secondary approval is disabled; "
             "privileged operations will run without extra confirmation",
             flush=True,
         )
         return
     if mode is ApprovalMode.TOTP:
-        print("[arbor] INFO: ARBOR_AUTH_MODE=totp — approvals use a Web UI TOTP prompt", flush=True)
+        print("[arbor] INFO: ARBOR_APPROVAL_MODE=totp — approval TOTP mode is configured", flush=True)
         return
-    print("[arbor] INFO: ARBOR_AUTH_MODE=cli — approvals require arbor-approve in a root shell", flush=True)
+    print("[arbor] INFO: ARBOR_APPROVAL_MODE=cli — approvals require arbor-approve in a root shell", flush=True)
 
 
 def run():

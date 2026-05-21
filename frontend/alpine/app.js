@@ -8,19 +8,10 @@
 
   const BASE = '/api'
 
-  function _getToken() {
-    return (localStorage.getItem('arbor_token') || '').trim()
-  }
-
   function _storageScope() {
-    const token = _getToken()
-    if (!token) return 'anon'
-    let hash = 2166136261
-    for (let i = 0; i < token.length; i++) {
-      hash ^= token.charCodeAt(i)
-      hash = Math.imul(hash, 16777619)
-    }
-    return 't' + (hash >>> 0).toString(16)
+    const user = Alpine.store && Alpine.store('auth') && Alpine.store('auth').sessionUser
+    const userId = user && user.user_id ? String(user.user_id).trim() : ''
+    return userId ? 'u:' + userId : 'anon'
   }
 
   function _scopedStorageKey(key) {
@@ -39,8 +30,10 @@
     localStorage.removeItem(_scopedStorageKey(key))
   }
 
+  const _ROLE_RANK = { viewer: 0, operator: 1, owner: 2 }
+
   function _hdr() {
-    return { 'Authorization': 'Bearer ' + _getToken(), 'Content-Type': 'application/json' }
+    return { 'Content-Type': 'application/json' }
   }
 
   async function _apiError(res) {
@@ -76,7 +69,14 @@
   }
 
   const api = {
-    setToken(t) { localStorage.setItem('arbor_token', t) },
+    authBackend: () => _get('/auth/backend'),
+    authSession: () => _get('/auth/session'),
+    loginLocal: (username, password, totpCode = '') => _post('/auth/login', { username, password, totp_code: totpCode }),
+    logoutLocal: () => _post('/auth/logout', {}),
+    authTotpStatus: () => _get('/auth/totp'),
+    authTotpEnroll: () => _post('/auth/totp/enroll', {}),
+    authTotpConfirm: (code) => _post('/auth/totp/confirm', { code }),
+    authTotpDisable: (password, totpCode) => _del('/auth/totp', { password, totp_code: totpCode }),
     status:      ()          => _get('/status'),
     packages:    (q = '')    => _get('/packages?search=' + encodeURIComponent(q)),
     packageInfo: (atom)      => _get('/package?atom=' + encodeURIComponent(atom)),
@@ -136,15 +136,15 @@
   const overlays = {
     list:   ()                             => _get('/overlays'),
     config: ()                             => _get('/overlays/config'),
-    add:    (name, sync_type, sync_uri, approve_danger, approval_text, approval = null) =>
+    add:    (name, sync_type, sync_uri, approve_danger, approval = null) =>
       _post('/overlays', {
-        name, sync_type, sync_uri, approve_danger, approval_text,
+        name, sync_type, sync_uri, approve_danger,
         approval_request_id: approval && approval.request_id ? approval.request_id : '',
         approval_token: approval && approval.approval_token ? approval.approval_token : '',
       }),
-    remove: (name, purge = false, approve_danger = false, approval_text = '', approval = null) =>
+    remove: (name, purge = false, approve_danger = false, approval = null) =>
       _del('/overlays/' + encodeURIComponent(name) + (purge ? '?purge=1' : ''), {
-        approve_danger, approval_text,
+        approve_danger,
         approval_request_id: approval && approval.request_id ? approval.request_id : '',
         approval_token: approval && approval.approval_token ? approval.approval_token : '',
       }),
@@ -161,8 +161,7 @@
     const ws = new WebSocket(_wsProto() + '://' + location.host + path)
     let done = false
     ws.onopen = () => {
-      // Send auth in the first frame so the token never appears in the URL.
-      ws.send(JSON.stringify({ type: 'auth', token: _getToken() }))
+      ws.send(JSON.stringify({ type: 'auth' }))
     }
     ws.onmessage = e => { const m = JSON.parse(e.data); if (m.done) done = true; onMsg(m) }
     ws.onerror   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'WebSocket error' }) } }
@@ -632,16 +631,27 @@
 
   function loginComponent() {
     return {
-      token: '', error: '', loading: false,
+      username: '', password: '', totpCode: '', error: '', loading: false,
       async submit() {
         this.loading = true; this.error = ''
-        const t = this.token.trim()
-        api.setToken(t)
         try {
-          await api.status()
-          Alpine.store('auth').set(t)
-        } catch {
-          this.error = 'Invalid token'; api.setToken('')
+          const username = this.username.trim()
+          const password = this.password
+          const totpCode = this.totpCode.trim()
+          if (!username || !password) {
+            this.error = 'Username and password required'
+            return
+          }
+          if (Alpine.store('auth').loginTotpRequired && !totpCode) {
+            this.error = 'Verification code required'
+            return
+          }
+          await Alpine.store('auth').loginLocal(username, password, totpCode)
+          Alpine.store('auth').notice = ''
+          this.password = ''
+          this.totpCode = ''
+        } catch (e) {
+          this.error = e.message || 'Invalid credentials'
         } finally {
           this.loading = false
         }
@@ -649,7 +659,7 @@
     }
   }
 
-  const PRIMARY_NAV_ITEMS = [
+  const BASE_NAV_ITEMS = [
     { id: 'dashboard', label: 'Dashboard'   },
     { id: 'packages',  label: 'Installed packages'   },
     { id: 'search',    label: 'Search Packages' },
@@ -659,6 +669,12 @@
     { id: 'jobs',      label: 'Jobs'        },
   ]
 
+  function primaryNavItems() {
+    const items = BASE_NAV_ITEMS.slice()
+    if (Alpine.store('auth') && Alpine.store('auth').canOwner) items.push({ id: 'security', label: 'Security' })
+    return items
+  }
+
   function isPrimaryRouteActive(id) {
     const view = Alpine.store('router').view
     if (id === 'packages') return ['packages', 'install', 'uninstall'].includes(view)
@@ -667,16 +683,16 @@
 
   function navComponent() {
     return {
-      items: PRIMARY_NAV_ITEMS,
+      get items() { return primaryNavItems() },
       isActive(id) { return isPrimaryRouteActive(id) },
       nav(id) { navigate(id) },
-      logout() { Alpine.store('auth').logout() }
+      logout() { void Alpine.store('auth').logout() }
     }
   }
 
   function appShellComponent() {
     return {
-      items: PRIMARY_NAV_ITEMS,
+      get items() { return primaryNavItems() },
       status: null,
       activeJobs: [],
       approvalCode: '',
@@ -692,8 +708,8 @@
           if (!Alpine.store('auth').isLoggedIn) return
           this._loadSummary()
         }, 15000)
-        this.$watch('$store.auth.token', token => {
-          if (token) {
+        this.$watch('$store.auth.sessionUser', user => {
+          if (user) {
             this._loadSummary()
             this._restorePendingApproval()
           }
@@ -715,7 +731,7 @@
         if (Alpine.store('approvalGate').active) return
         navigate(id)
       },
-      logout() { Alpine.store('auth').logout() },
+      logout() { void Alpine.store('auth').logout() },
       approvalPending() {
         return Alpine.store('approvalGate').active
       },
@@ -742,6 +758,10 @@
       async submitApprovalCode() {
         const request = Alpine.store('approvalGate').active
         if (!approvalPending(request) || approvalMode(request) !== 'totp') return
+        if (!Alpine.store('auth').canOwner) {
+          this.approvalSubmitError = 'Owner role required for approval actions'
+          return
+        }
         this.approvalSubmitBusy = true
         this.approvalSubmitError = null
         try {
@@ -757,6 +777,10 @@
       async cancelApprovalRequest() {
         const request = Alpine.store('approvalGate').active
         if (!approvalPending(request)) return
+        if (!Alpine.store('auth').canOwner) {
+          this.approvalSubmitError = 'Owner role required for approval actions'
+          return
+        }
         this.approvalCancelBusy = true
         this.approvalSubmitError = null
         try {
@@ -808,6 +832,24 @@
           pills.push({ key: 'sync', text: this.syncLabel(), tone: 'muted' })
         }
         return pills
+      },
+      authRolePill() {
+        const auth = Alpine.store('auth')
+        const role = String(auth.role || 'viewer').toLowerCase()
+        if (role === 'owner') return { tone: 'ok', text: 'Role: owner' }
+        if (role === 'operator') return { tone: 'warn', text: 'Role: operator' }
+        return { tone: 'muted', text: 'Role: viewer' }
+      },
+      authRoleTooltip() {
+        const auth = Alpine.store('auth')
+        const role = String(auth.role || 'viewer').toLowerCase()
+        if (role === 'owner') {
+          return 'Owner: full administrative access, including package changes, overlay management, and destructive history/job actions.'
+        }
+        if (role === 'operator') {
+          return 'Operator: can run package maintenance/install/uninstall flows, but cannot run owner-only destructive actions.'
+        }
+        return 'Viewer: read-only and pretend operations only.'
       },
       currentMeta() {
         const r = Alpine.store('router')
@@ -867,6 +909,13 @@
             detail: 'Inspect configured overlays and sync additional repositories.',
           }
         }
+        if (r.view === 'security') {
+          return {
+            section: 'Administration',
+            title: 'Security',
+            detail: 'Manage login-time TOTP for the Arbor instance.',
+          }
+        }
         if (r.view === 'install') {
           return {
             section: 'Packages',
@@ -901,6 +950,140 @@
         const section = document.getElementById(id)
         if (!section) return
         section.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      },
+    }
+  }
+
+  function totpSecurityComponent() {
+    return {
+      loading: false,
+      busy: false,
+      error: '',
+      code: '',
+      disablePassword: '',
+      disableTotpCode: '',
+      status: null,
+      init() {
+        const loadIfVisible = () => {
+          if (Alpine.store('router').view === 'security' && Alpine.store('auth').canOwner) void this.load()
+        }
+        this.$watch('$store.router.view', () => loadIfVisible())
+        this.$watch('$store.auth.sessionUser', () => loadIfVisible())
+        loadIfVisible()
+      },
+      get enabled() {
+        return !!((this.status && this.status.enabled) || Alpine.store('auth').loginTotpRequired)
+      },
+      get pendingEnrollment() {
+        return !!(this.status && this.status.pending_enrollment)
+      },
+      get qrDataUrl() {
+        return this.status && this.status.qr_data_url ? this.status.qr_data_url : ''
+      },
+      get qrSvg() {
+        return this.status && this.status.qr_svg ? this.status.qr_svg : ''
+      },
+      get otpauthUri() {
+        return this.status && this.status.otpauth_uri ? this.status.otpauth_uri : ''
+      },
+      get manualSecret() {
+        return this.status && this.status.manual_secret ? this.status.manual_secret : ''
+      },
+      get issuer() {
+        return this.status && this.status.issuer ? this.status.issuer : 'Arbor'
+      },
+      get accountName() {
+        return this.status && this.status.account_name ? this.status.account_name : ''
+      },
+      fallbackStatus() {
+        return {
+          enabled: !!Alpine.store('auth').loginTotpRequired,
+          pending_enrollment: false,
+          issuer: 'Arbor',
+          account_name: '',
+        }
+      },
+      async load() {
+        this.loading = true
+        this.error = ''
+        try {
+          const status = await api.authTotpStatus()
+          if (Alpine.store('auth').loginTotpRequired) {
+            status.enabled = true
+            status.pending_enrollment = false
+          }
+          this.status = status
+        } catch (e) {
+          this.status = this.status || this.fallbackStatus()
+          this.error = e.message || 'Unable to load TOTP settings'
+        } finally {
+          this.loading = false
+        }
+      },
+      async beginEnrollment() {
+        this.busy = true
+        this.error = ''
+        try {
+          this.status = await api.authTotpEnroll()
+          this.code = ''
+        } catch (e) {
+          this.error = e.message || 'Unable to start TOTP enrollment'
+        } finally {
+          this.busy = false
+        }
+      },
+      async confirmEnrollment() {
+        const code = this.code.trim()
+        if (!code) {
+          this.error = 'Verification code required'
+          return
+        }
+        this.busy = true
+        this.error = ''
+        try {
+          const result = await api.authTotpConfirm(code)
+          Alpine.store('auth').loginTotpRequired = !!result.enabled
+          Alpine.store('auth').notice = 'TOTP enabled. Sign in again with your verification code.'
+          Alpine.store('auth').sessionUser = null
+          this.status = result
+          this.code = ''
+          this.disablePassword = ''
+          this.disableTotpCode = ''
+          navigate('dashboard')
+        } catch (e) {
+          this.error = e.message || 'Unable to enable TOTP'
+        } finally {
+          this.busy = false
+        }
+      },
+      async disableTotp() {
+        const password = this.disablePassword
+        const totpCode = this.disableTotpCode.trim()
+        if (!password) {
+          this.error = 'Password required'
+          return
+        }
+        if (!totpCode) {
+          this.error = 'Verification code required'
+          return
+        }
+        this.busy = true
+        this.error = ''
+        try {
+          const result = await api.authTotpDisable(password, totpCode)
+          Alpine.store('auth').loginTotpRequired = !!result.enabled
+          Alpine.store('auth').notice = 'TOTP disabled. Sign in again to continue.'
+          Alpine.store('auth').sessionUser = null
+          this.status = result
+          this.code = ''
+          this.disablePassword = ''
+          this.disableTotpCode = ''
+          navigate('dashboard')
+        } catch (e) {
+          this.error = e.message || 'Unable to disable TOTP'
+        } finally {
+          this.busy = false
+        }
       },
     }
   }
@@ -3604,15 +3787,63 @@ ${labels}
 
   document.addEventListener('alpine:init', () => {
     Alpine.store('auth', {
-      token: localStorage.getItem('arbor_token') || '',
-      get isLoggedIn() { return !!this.token },
-      set(t) {
-        this.token = t.trim()
-        t.trim() ? localStorage.setItem('arbor_token', t.trim())
-                 : localStorage.removeItem('arbor_token')
+      backend: 'local',
+      loginTotpRequired: false,
+      notice: '',
+      sessionUser: null,
+      ready: false,
+      get role() {
+        const role = (this.sessionUser && this.sessionUser.role ? String(this.sessionUser.role) : '').trim().toLowerCase()
+        return role || 'viewer'
       },
-      logout() { this.set('') }
+      can(requiredRole) {
+        const want = String(requiredRole || '').trim().toLowerCase()
+        const have = this.role
+        const wantRank = _ROLE_RANK[want]
+        const haveRank = _ROLE_RANK[have]
+        if (wantRank === undefined) return false
+        return (haveRank === undefined ? _ROLE_RANK.viewer : haveRank) >= wantRank
+      },
+      get canOperate() {
+        return this.can('operator')
+      },
+      get canOwner() {
+        return this.can('owner')
+      },
+      get isLoggedIn() {
+        return !!this.sessionUser
+      },
+      async init() {
+        try {
+          const info = await api.authBackend()
+          this.backend = info && info.backend ? info.backend : 'local'
+          this.loginTotpRequired = !!(info && info.login_totp_required)
+        } catch (_) {
+          this.backend = 'local'
+          this.loginTotpRequired = false
+        }
+        await this.refreshSession()
+        this.ready = true
+      },
+      async refreshSession() {
+        try {
+          const data = await api.authSession()
+          this.sessionUser = data && data.authenticated ? data : null
+        } catch (_) {
+          this.sessionUser = null
+        }
+        return this.sessionUser
+      },
+      async loginLocal(username, password, totpCode = '') {
+        await api.loginLocal(username, password, totpCode)
+        await this.refreshSession()
+      },
+      async logout() {
+        try { await api.logoutLocal() } catch (_) {}
+        this.sessionUser = null
+      }
     })
+    void Alpine.store('auth').init()
 
     Alpine.store('approvalGate', {
       active: null,
@@ -3672,6 +3903,7 @@ ${labels}
     Alpine.data('loginComponent', loginComponent)
     Alpine.data('navComponent', navComponent)
     Alpine.data('appShellComponent', appShellComponent)
+    Alpine.data('totpSecurityComponent', totpSecurityComponent)
     Alpine.data('dashboardComponent', dashboardComponent)
     Alpine.data('packageListComponent', packageListComponent)
     Alpine.data('useFlagsExplorerComponent', useFlagsExplorerComponent)
@@ -3778,12 +4010,12 @@ ${labels}
           const approval = await _approvalRequestReady(
             this,
             'overlay_add',
-            { name, sync_type: this.addSyncType, sync_uri: syncUri, approve_danger: this.addDangerAck, approval_text: '' },
+            { name, sync_type: this.addSyncType, sync_uri: syncUri, approve_danger: this.addDangerAck },
             lines => { this.approvalLines = lines },
             () => this.add(),
           )
           if (!approval) return
-          const res = await overlays.add(name, this.addSyncType, syncUri, this.addDangerAck, '', approval)
+          const res = await overlays.add(name, this.addSyncType, syncUri, this.addDangerAck, approval)
           clearApprovalState(this)
           this.approvalLines = []
           this.addShow = false
@@ -3798,12 +4030,12 @@ ${labels}
           const approval = await _approvalRequestReady(
             this,
             'overlay_remove',
-            { name, purge, approve_danger: true, approval_text: '' },
+            { name, purge, approve_danger: true },
             lines => { this.approvalLines = lines },
             () => this._removeConfirmed(name, purge),
           )
           if (!approval) return
-          await overlays.remove(name, purge, true, '', approval)
+          await overlays.remove(name, purge, true, approval)
           clearApprovalState(this)
           this.approvalLines = []
           if (this.expanded === name) this.expanded = null

@@ -14,24 +14,41 @@
 <body x-data>
 
   <!-- ── Login ──────────────────────────────────────────────────────────── -->
-  <div x-show="!$store.auth.isLoggedIn" x-cloak x-data="loginComponent">
+  <div x-show="$store.auth.ready && !$store.auth.isLoggedIn" x-cloak x-data="loginComponent">
     <div class="login">
       <div class="card">
         <h1>Arbor</h1>
         <p class="sub">Local-first Portage admin UI</p>
-        <p class="sub">Use on localhost by default. Treat the access token like root.</p>
+        <p class="sub">Local auth only. Sign in with the owner account.</p>
         <form @submit.prevent="submit">
-          <input
-            type="password"
-            x-model="token"
-            placeholder="Access token"
-            autocomplete="current-password"
-          >
+          <div>
+            <input
+              type="text"
+              x-model="username"
+              placeholder="Username"
+              autocomplete="username"
+            >
+            <input
+              type="password"
+              x-model="password"
+              placeholder="Password"
+              autocomplete="current-password"
+            >
+            <input
+              x-show="$store.auth.loginTotpRequired"
+              type="text"
+              x-model="totpCode"
+              placeholder="Verification code"
+              inputmode="numeric"
+              autocomplete="one-time-code"
+            >
+          </div>
+          <span class="sub" x-show="$store.auth.notice" x-text="$store.auth.notice"></span>
           <span class="error" x-show="error" x-text="error"></span>
           <button
             type="submit"
-            :disabled="loading || !token"
-            x-text="loading ? 'Connecting…' : 'Connect'"
+            :disabled="loading || !username || !password || ($store.auth.loginTotpRequired && !totpCode)"
+            x-text="loading ? 'Connecting…' : 'Sign in'"
           ></button>
         </form>
       </div>
@@ -39,7 +56,7 @@
   </div>
 
   <!-- ── App layout ─────────────────────────────────────────────────────── -->
-  <div x-show="$store.auth.isLoggedIn" x-cloak class="layout app-shell" x-data="appShellComponent">
+  <div x-show="$store.auth.ready && $store.auth.isLoggedIn" x-cloak class="layout app-shell" x-data="appShellComponent">
 
     <div class="app-approval-lock" x-show="approvalPending()">
       <div class="app-approval-card">
@@ -59,18 +76,20 @@
           <button
             type="submit"
             class="app-approval-submit"
+            x-show="$store.auth.canOwner"
             :disabled="approvalSubmitBusy || !approvalCode.trim()"
             x-text="approvalSubmitBusy ? 'Verifying…' : 'Approve'"
           ></button>
           <button
             type="button"
             class="app-approval-submit app-approval-cancel"
-            x-show="approvalCanCancel()"
+            x-show="approvalCanCancel() && $store.auth.canOwner"
             @click="cancelApprovalRequest()"
             :disabled="approvalSubmitBusy || approvalCancelBusy"
             x-text="approvalCancelBusy ? 'Cancelling…' : 'Cancel request'"
           ></button>
         </form>
+        <div class="app-approval-error" x-show="approvalNeedsTotp() && !$store.auth.canOwner">Owner role required to approve or cancel requests.</div>
         <div class="app-approval-error" x-show="approvalSubmitError" x-text="approvalSubmitError"></div>
       </div>
     </div>
@@ -103,6 +122,7 @@
 
         <div class="app-bar-tools">
           <div class="app-status-strip" aria-label="System summary">
+            <span class="app-status-pill" :class="'is-' + authRolePill().tone" :title="authRoleTooltip()" x-text="authRolePill().text"></span>
             <template x-for="pill in statusPills()" :key="pill.key">
               <span class="app-status-pill" :class="'is-' + pill.tone" x-text="pill.text"></span>
             </template>
@@ -203,8 +223,9 @@
                     <span class="iv-badge-action" x-show="file.resolved"
                           x-text="file.action === 'replace' ? '✓ replaced' : '✓ kept'"></span>
                     <div class="iv-etcfile-actions" x-show="!file.resolved">
-                      <button class="iv-btn-keep" @click="resolveFile(file, 'keep')">Keep old</button>
-                      <button class="iv-btn-replace" @click="resolveFile(file, 'replace')">Take new</button>
+                      <button class="iv-btn-keep" x-show="$store.auth.canOwner" @click="resolveFile(file, 'keep')">Keep old</button>
+                      <button class="iv-btn-replace" x-show="$store.auth.canOwner" @click="resolveFile(file, 'replace')">Take new</button>
+                      <span class="muted" x-show="!$store.auth.canOwner">Owner role required to resolve files.</span>
                     </div>
                   </div>
                   <pre class="iv-diff" x-show="!file.resolved && file.diff" x-text="file.diff"></pre>
@@ -221,10 +242,10 @@
             <!-- Actions -->
             <div class="ev-actions">
               <button class="ev-btn-primary"
-                x-show="step === 'pretend' && !running && needsUnmask"
+                x-show="step === 'pretend' && !running && needsUnmask && $store.auth.canOperate"
                 @click="runAutounmask()">Unmask &amp; retry</button>
               <button class="ev-btn-primary"
-                x-show="step === 'pretend' && !running && !needsUnmask && returncode === 0"
+                x-show="step === 'pretend' && !running && !needsUnmask && returncode === 0 && $store.auth.canOperate"
                 @click="runInstall()">Install</button>
               <button class="ev-btn-primary"
                 x-show="step === 'pretend' && !running && !needsUnmask && returncode === null"
@@ -233,7 +254,7 @@
                 x-show="step === 'pretend' && !running && !needsUnmask && returncode !== null && returncode !== 0"
                 @click="runPretend()">Retry pretend</button>
               <button class="ev-btn-secondary"
-                x-show="(step === 'install' || step === 'autounmask') && !running && returncode !== null && returncode !== 0"
+                x-show="(step === 'install' || step === 'autounmask') && !running && returncode !== null && returncode !== 0 && $store.auth.canOperate"
                 @click="retry()">Retry</button>
               <button class="ev-btn-primary"
                 x-show="step === 'done'"
@@ -280,10 +301,10 @@
                 x-show="step === 'pretend' && !running && returncode === null"
                 @click="runPretend()">Run pretend</button>
               <button class="ev-btn-danger"
-                x-show="step === 'pretend' && !running && returncode === 0"
+                x-show="step === 'pretend' && !running && returncode === 0 && $store.auth.canOperate"
                 @click="runUninstall()">Uninstall</button>
               <button class="ev-btn-secondary"
-                x-show="(step === 'pretend' || step === 'uninstall') && !running && returncode !== null && returncode !== 0"
+                x-show="(step === 'pretend' || step === 'uninstall') && !running && returncode !== null && returncode !== 0 && $store.auth.canOperate"
                 @click="retry()">Retry</button>
               <button class="ev-btn-primary"
                 x-show="step === 'done'"
@@ -471,10 +492,10 @@
           <div class="pd-header">
             <div class="pd-header-row">
               <h2 x-text="packageCpv()"></h2>
-              <button class="pd-btn-install"   x-show="info && !info.installed"
+              <button class="pd-btn-install" x-show="info && !info.installed && $store.auth.canOperate"
                 @click="openInstall()">⬇ Install</button>
               <span   class="pd-installed-badge" x-show="info && info.installed">✓ installed</span>
-              <button class="pd-btn-uninstall" x-show="info && info.installed"
+              <button class="pd-btn-uninstall" x-show="info && info.installed && $store.auth.canOperate"
                 @click="openUninstall()">✕ Uninstall</button>
             </div>
             <p class="pd-desc" x-text="packageDescription()"></p>
@@ -901,7 +922,7 @@
                   <div class="mv-card-actions">
                     <button class="mv-btn-toggle" @click="sync.expanded = !sync.expanded"
                             x-text="sync.expanded ? '▲' : '▼'"></button>
-                    <button class="mv-btn-run" @click="startSync()" :disabled="sync.running"
+                    <button class="mv-btn-run" x-show="$store.auth.canOperate" @click="startSync()" :disabled="sync.running"
                             x-text="sync.running ? 'Running…' : sync.rc !== null ? 'Re-sync' : 'Sync'"></button>
                   </div>
                 </div>
@@ -953,7 +974,7 @@
                   <div class="mv-card-actions">
                     <button class="mv-btn-toggle" @click="worldUpdate.expanded = !worldUpdate.expanded"
                             x-text="worldUpdate.expanded ? '▲' : '▼'"></button>
-                    <button class="mv-btn-run" @click="startWorldUpdate()" :disabled="worldUpdate.running"
+                    <button class="mv-btn-run" x-show="$store.auth.canOperate" @click="startWorldUpdate()" :disabled="worldUpdate.running"
                             x-text="worldUpdate.running ? 'Running…' : worldUpdate.rc !== null ? 'Retry' : 'Update'"></button>
                   </div>
                 </div>
@@ -1014,7 +1035,7 @@
                   <div class="mv-card-actions">
                     <button class="mv-btn-toggle" @click="preserved.expanded = !preserved.expanded"
                             x-text="preserved.expanded ? '▲' : '▼'"></button>
-                    <button class="mv-btn-run" @click="startPreserved()" :disabled="preserved.running"
+                    <button class="mv-btn-run" x-show="$store.auth.canOperate" @click="startPreserved()" :disabled="preserved.running"
                             x-text="preserved.running ? 'Running…' : preserved.rc !== null ? 'Retry' : 'Rebuild'"></button>
                   </div>
                 </div>
@@ -1052,7 +1073,7 @@
                   <div class="line muted-line" x-show="depclean.lines.length === 0 && !depclean.running">Remove packages no longer needed.</div>
                   <div class="mv-confirm-row" x-show="depclean.dcStep === 'confirm' && !depclean.running">
                     <span class="mv-confirm-msg">⚠ The packages above will be removed.</span>
-                    <button class="mv-btn-confirm-run" @click="startDepclean()">Remove</button>
+                    <button class="mv-btn-confirm-run" x-show="$store.auth.canOperate" @click="startDepclean()">Remove</button>
                     <button class="mv-btn-confirm-cancel"
                       @click="depclean.dcStep = 'idle'; depclean.lines = []">Cancel</button>
                   </div>
@@ -1153,7 +1174,7 @@
                       <template x-if="job.status === 'running'">
                         <span>
                           <button class="jv-btn-open" @click="openPanel(job, $event)">Open</button>
-                          <button class="jv-btn-kill" @click="kill(job.job_id, $event)">Kill</button>
+                          <button class="jv-btn-kill" x-show="$store.auth.canOwner" @click="kill(job.job_id, $event)">Kill</button>
                         </span>
                       </template>
                     </div>
@@ -1192,7 +1213,7 @@
                 <span class="muted">Purge older than</span>
                 <input class="jv-purge-input" type="number" x-model.number="purgeDays" min="1" max="365">
                 <span class="muted">days</span>
-                <button class="jv-btn-purge" @click="purge()">Purge</button>
+                <button class="jv-btn-purge" x-show="$store.auth.canOwner" @click="purge()">Purge</button>
                 <span class="jv-purge-msg" x-show="purgeMsg" x-text="purgeMsg"></span>
               </div>
             </div>
@@ -1214,7 +1235,7 @@
                     <div class="jv-actions">
                       <button class="jv-btn-output" @click="toggleHist(job.job_id)"
                         x-text="histExpanded === job.job_id ? '▲ log' : '▼ log'"></button>
-                      <button class="jv-btn-kill" @click="deleteEntry(job.job_id, $event)">Delete</button>
+                      <button class="jv-btn-kill" x-show="$store.auth.canOwner" @click="deleteEntry(job.job_id, $event)">Delete</button>
                     </div>
                   </div>
 
@@ -1248,7 +1269,7 @@
         <div class="jv-view">
           <div class="jv-header">
             <h2>Overlays</h2>
-            <button class="jv-btn-refresh" @click="toggleAdd()" x-text="addShow ? '✕ Cancel' : '+ Add overlay'"></button>
+            <button class="jv-btn-refresh" x-show="$store.auth.canOwner" @click="toggleAdd()" x-text="addShow ? '✕ Cancel' : '+ Add overlay'"></button>
           </div>
           <div class="terminal" x-show="approvalLines.length > 0">
             <template x-for="(line, i) in approvalLines" :key="i">
@@ -1321,7 +1342,7 @@
                       x-show="syncName === repo.name && syncLines.length > 0"
                       @click="toggleExpand(repo.name)"
                       x-text="expanded === repo.name ? '▲ log' : '▼ log'"></button>
-                    <button class="jv-btn-open" :disabled="syncRunning"
+                  <button class="jv-btn-open" :disabled="syncRunning" x-show="$store.auth.canOperate"
                       @click="sync(repo.name)"
                       x-text="syncRunning && syncName === repo.name ? 'Syncing…' : 'Sync'"></button>
                     <!-- Remove temporarily hidden -->
@@ -1343,6 +1364,82 @@
           <p class="muted" x-show="!loading && !error && list.length === 0">No repositories found.</p>
         </div>
       </div>
+
+      <section x-show="$store.router.view === 'security'" x-data="totpSecurityComponent" class="security-view">
+        <div class="security-card">
+          <div class="security-header">
+            <div>
+              <h2>Login TOTP</h2>
+              <p class="muted">Require a verification code in addition to username and password when signing in.</p>
+            </div>
+            <span class="security-badge" :class="enabled ? 'is-enabled' : (pendingEnrollment ? 'is-pending' : 'is-disabled')" x-text="enabled ? 'Enabled' : (pendingEnrollment ? 'Pending setup' : 'Disabled')"></span>
+          </div>
+
+          <p class="muted" x-show="loading">Loading…</p>
+          <p class="jv-err-msg" x-show="error" x-text="error"></p>
+
+          <template x-if="status || enabled">
+            <div class="security-body">
+              <div class="security-summary">
+                <div><span class="muted">Issuer</span><code x-text="issuer"></code></div>
+                <div><span class="muted">Account</span><code x-text="accountName || 'arbor@localhost'"></code></div>
+              </div>
+
+              <div class="security-actions" x-show="!enabled && !pendingEnrollment">
+                <button class="jv-btn-open" :disabled="busy" @click="beginEnrollment()" x-text="busy ? 'Preparing…' : 'Enable TOTP'"></button>
+              </div>
+
+              <div class="security-enrollment" x-show="pendingEnrollment">
+                <p>Scan the QR code or enter the secret manually in your authenticator app, then confirm with the current 6-digit code.</p>
+                <img x-show="qrDataUrl" class="security-qr" :src="qrDataUrl" alt="TOTP QR code">
+                <div class="security-secret-block">
+                  <span class="muted">Manual secret</span>
+                  <code class="security-secret" x-text="manualSecret"></code>
+                </div>
+                <div class="security-secret-block">
+                  <span class="muted">otpauth URI</span>
+                  <code class="security-uri" x-text="otpauthUri"></code>
+                </div>
+                <div class="security-confirm">
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="one-time-code"
+                    placeholder="123456"
+                    x-model="code"
+                  >
+                  <button class="jv-btn-open" :disabled="busy || !code.trim()" @click="confirmEnrollment()" x-text="busy ? 'Enabling…' : 'Confirm and enable'"></button>
+                </div>
+              </div>
+
+              <div class="security-actions" x-show="enabled">
+                <p class="muted">TOTP is active for login. To disable it, confirm with the current owner password and a fresh TOTP code. All sessions will then need to sign in again.</p>
+                <div class="security-confirm">
+                  <input
+                    type="password"
+                    autocomplete="current-password"
+                    placeholder="Current password"
+                    x-model="disablePassword"
+                  >
+                  <input
+                    type="text"
+                    inputmode="numeric"
+                    autocomplete="one-time-code"
+                    placeholder="123456"
+                    x-model="disableTotpCode"
+                  >
+                  <button
+                    class="jv-btn-kill"
+                    :disabled="busy || !disablePassword || !disableTotpCode.trim()"
+                    @click="disableTotp()"
+                    x-text="busy ? 'Disabling…' : 'Disable TOTP'"
+                  ></button>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </section>
 
       </div>
     </main>

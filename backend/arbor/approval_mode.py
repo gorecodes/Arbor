@@ -12,9 +12,10 @@ from urllib.parse import quote, urlencode
 from enum import StrEnum
 from pathlib import Path
 
-from .config_env import env_value
+from .config_env import env_value, env_value_file_first
 
-AUTH_MODE_ENV = "ARBOR_AUTH_MODE"
+LOGIN_AUTH_MODE_ENV = "ARBOR_AUTH_MODE"
+APPROVAL_MODE_ENV = "ARBOR_APPROVAL_MODE"
 TOTP_SECRET_ENV = "ARBOR_TOTP_SECRET"
 TOTP_SECRET_FILE_ENV = "ARBOR_TOTP_SECRET_FILE"
 TOTP_ISSUER_ENV = "ARBOR_TOTP_ISSUER"
@@ -32,14 +33,30 @@ class ApprovalMode(StrEnum):
     NONE = "none"
 
 
-def get_approval_mode() -> ApprovalMode:
-    raw = env_value(AUTH_MODE_ENV, ApprovalMode.CLI.value).strip().lower() or ApprovalMode.CLI.value
+def _parse_mode(raw: str, env_name: str) -> ApprovalMode:
     try:
         return ApprovalMode(raw)
     except ValueError as exc:
         raise ApprovalModeError(
-            f"invalid {AUTH_MODE_ENV}={raw!r}; expected one of: cli, totp, none"
+            f"invalid {env_name}={raw!r}; expected one of: cli, totp, none"
         ) from exc
+
+
+def get_login_auth_mode() -> ApprovalMode:
+    raw = env_value_file_first(LOGIN_AUTH_MODE_ENV, ApprovalMode.CLI.value).strip().lower() or ApprovalMode.CLI.value
+    return _parse_mode(raw, LOGIN_AUTH_MODE_ENV)
+
+
+def _default_approval_mode() -> ApprovalMode:
+    if get_login_auth_mode() is ApprovalMode.TOTP:
+        return ApprovalMode.NONE
+    return ApprovalMode.CLI
+
+
+def get_approval_mode() -> ApprovalMode:
+    default_mode = _default_approval_mode().value
+    raw = env_value_file_first(APPROVAL_MODE_ENV, default_mode).strip().lower() or default_mode
+    return _parse_mode(raw, APPROVAL_MODE_ENV)
 
 
 def _load_totp_secret_from_file(path: Path) -> str:
@@ -61,11 +78,11 @@ def _load_totp_secret_from_file(path: Path) -> str:
 
 
 def totp_secret_path() -> Path:
-    return Path(env_value(TOTP_SECRET_FILE_ENV, DEFAULT_TOTP_SECRET_FILE).strip() or DEFAULT_TOTP_SECRET_FILE)
+    return Path(env_value_file_first(TOTP_SECRET_FILE_ENV, DEFAULT_TOTP_SECRET_FILE).strip() or DEFAULT_TOTP_SECRET_FILE)
 
 
 def get_totp_secret() -> str:
-    secret = env_value(TOTP_SECRET_ENV, "").strip()
+    secret = env_value_file_first(TOTP_SECRET_ENV, "").strip()
     if not secret:
         secret = _load_totp_secret_from_file(totp_secret_path())
     if not secret:
@@ -80,9 +97,21 @@ def get_totp_secret() -> str:
 
 
 def validate_approval_mode_config() -> ApprovalMode:
+    login_mode = get_login_auth_mode()
+    mode = get_approval_mode()
+    if login_mode is ApprovalMode.TOTP or mode is ApprovalMode.TOTP:
+        get_totp_secret()
+    return mode
+
+
+def login_totp_required() -> bool:
+    return get_login_auth_mode() is ApprovalMode.TOTP
+
+
+def effective_approval_mode() -> ApprovalMode:
     mode = get_approval_mode()
     if mode is ApprovalMode.TOTP:
-        get_totp_secret()
+        return ApprovalMode.NONE
     return mode
 
 
@@ -91,12 +120,12 @@ def generate_totp_secret() -> str:
 
 
 def get_totp_issuer() -> str:
-    return env_value(TOTP_ISSUER_ENV, "Arbor").strip() or "Arbor"
+    return env_value_file_first(TOTP_ISSUER_ENV, "Arbor").strip() or "Arbor"
 
 
 def get_totp_account_name() -> str:
     default = f"arbor@{socket.gethostname() or 'localhost'}"
-    return env_value(TOTP_ACCOUNT_NAME_ENV, default).strip() or default
+    return env_value_file_first(TOTP_ACCOUNT_NAME_ENV, default).strip() or default
 
 
 def build_totp_uri(
@@ -129,13 +158,16 @@ def totp_code(secret: str, for_time: float | None = None, *, period: int = 30, d
     return str(binary % (10**digits)).zfill(digits)
 
 
-def verify_totp_code(code: str) -> bool:
+def verify_totp_code_for_secret(secret: str, code: str) -> bool:
     cleaned = "".join(ch for ch in str(code).strip() if ch.isdigit())
     if not cleaned:
         return False
-    secret = get_totp_secret()
     now = time.time()
     for offset in (-30, 0, 30):
         if hmac.compare_digest(cleaned, totp_code(secret, now + offset)):
             return True
     return False
+
+
+def verify_totp_code(code: str) -> bool:
+    return verify_totp_code_for_secret(get_totp_secret(), code)

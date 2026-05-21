@@ -96,7 +96,7 @@ class OverlayRemoveDaemonTests(unittest.IsolatedAsyncioTestCase):
 
 class OverlayRemoveWebTests(unittest.IsolatedAsyncioTestCase):
     async def test_overlay_remove_forwards_confirmation_fields(self):
-        request = FakeRequest({"approve_danger": True, "approval_text": "PURGE foo"})
+        request = FakeRequest({"approve_danger": True})
         query_one = AsyncMock(return_value={"ok": True})
 
         with patch.object(web_main, "query_one", query_one):
@@ -109,7 +109,6 @@ class OverlayRemoveWebTests(unittest.IsolatedAsyncioTestCase):
                 "name": "foo",
                 "purge": True,
                 "approve_danger": True,
-                "approval_text": "PURGE foo",
                 "approval_request_id": "",
                 "approval_token": "",
             },
