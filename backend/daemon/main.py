@@ -47,6 +47,7 @@ _HISTORY_TAIL_BYTES = max(
 ALLOWED_COMMANDS = {
     "approval_request_create",
     "approval_request_approve",
+    "approval_request_cancel",
     "approval_request_list",
     "approval_request_show",
     "world_updates",
@@ -3017,6 +3018,14 @@ async def cmd_approval_request_approve(args):
     yield await in_thread(_approval_request_approve, request_id, code)
 
 
+async def cmd_approval_request_cancel(args):
+    request_id = str(args.get("request_id", "")).strip()
+    if not request_id:
+        yield {"error": "request_id is required"}
+        return
+    yield await in_thread(_approval_cancel, request_id)
+
+
 async def cmd_approval_request_list(args):
     status = str(args.get("status", "pending")).strip() or "pending"
     items = await in_thread(_approval_request_list, status)
@@ -3040,6 +3049,7 @@ async def cmd_approval_request_show(args):
 HANDLERS = {
     "approval_request_create": cmd_approval_request_create,
     "approval_request_approve": cmd_approval_request_approve,
+    "approval_request_cancel":  cmd_approval_request_cancel,
     "approval_request_list":   cmd_approval_request_list,
     "approval_request_show":   cmd_approval_request_show,
     "system_status":      cmd_system_status,

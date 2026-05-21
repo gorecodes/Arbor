@@ -62,6 +62,14 @@
             :disabled="approvalSubmitBusy || !approvalCode.trim()"
             x-text="approvalSubmitBusy ? 'Verifying…' : 'Approve'"
           ></button>
+          <button
+            type="button"
+            class="app-approval-submit app-approval-cancel"
+            x-show="approvalCanCancel()"
+            @click="cancelApprovalRequest()"
+            :disabled="approvalSubmitBusy || approvalCancelBusy"
+            x-text="approvalCancelBusy ? 'Cancelling…' : 'Cancel request'"
+          ></button>
         </form>
         <div class="app-approval-error" x-show="approvalSubmitError" x-text="approvalSubmitError"></div>
       </div>

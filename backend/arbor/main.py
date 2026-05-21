@@ -218,6 +218,15 @@ async def approval_request_approve(auth: Auth, request_id: str, request: Request
     return data
 
 
+@app.post("/api/approval-requests/{request_id}/cancel")
+async def approval_request_cancel(auth: Auth, request_id: str):
+    data = await query_one("approval_request_cancel", {"request_id": request_id})
+    if "error" in data:
+        status = 404 if data["error"] == "approval request not found" else 400
+        return JSONResponse(status_code=status, content=data)
+    return data
+
+
 # ---------------------------------------------------------------------------
 # emerge — REST + WebSocket endpoints
 # ---------------------------------------------------------------------------

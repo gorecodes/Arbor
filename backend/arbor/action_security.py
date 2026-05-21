@@ -11,6 +11,7 @@ TRUST_HEAVY = "trust_heavy"
 _READONLY_COMMANDS = {
     "approval_request_create",
     "approval_request_approve",
+    "approval_request_cancel",
     "approval_request_list",
     "approval_request_show",
     "world_updates",
