@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 import arbor.auth as auth_mod
 import arbor.main as web_main
+import arbor.server as server_mod
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -102,6 +103,27 @@ class AuthCharacterizationTests(unittest.TestCase):
         credentials = SimpleNamespace(credentials="test-token")
         with patch.object(auth_mod, "verify_token", return_value=True):
             self.assertEqual(auth_mod.require_auth(credentials), "test-token")
+
+
+class ServerApprovalModeTests(unittest.TestCase):
+    def test_none_mode_warns_at_startup(self):
+        with patch("builtins.print") as printed:
+            server_mod._report_approval_mode(server_mod.ApprovalMode.NONE)
+        printed.assert_called_once()
+        self.assertIn("ARBOR_AUTH_MODE=none", printed.call_args.args[0])
+
+    def test_run_refuses_invalid_approval_mode(self):
+        with (
+            patch.object(server_mod, "load_ipc_key"),
+            patch.object(server_mod.os.path, "exists", return_value=True),
+            patch.object(server_mod, "validate_approval_mode_config", side_effect=server_mod.ApprovalModeError("bad mode")),
+            patch.object(server_mod.uvicorn, "run"),
+            patch("builtins.print"),
+            patch.object(server_mod.sys, "exit", side_effect=SystemExit(2)),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                server_mod.run()
+        self.assertEqual(ctx.exception.code, 2)
 
 
 class ApiCharacterizationTests(unittest.IsolatedAsyncioTestCase):

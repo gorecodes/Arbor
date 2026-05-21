@@ -102,6 +102,7 @@
 
   const approvalRequests = {
     create: (cmd, args) => _post('/approval-requests', { cmd, args }),
+    approve: (id, code) => _post('/approval-requests/' + encodeURIComponent(id) + '/approve', { code }),
     show:   (id)        => _get('/approval-requests/' + encodeURIComponent(id)),
     list:   (status = 'pending') => _get('/approval-requests?status=' + encodeURIComponent(status)),
   }
@@ -188,18 +189,29 @@
     return 'arbor-approve approve ' + request.request_id
   }
 
+  function approvalMode(request) {
+    const mode = String(request && request.approval_mode ? request.approval_mode : 'cli').trim().toLowerCase()
+    return ['cli', 'totp', 'none'].includes(mode) ? mode : 'cli'
+  }
+
   function approvalPending(request) {
     return !!request && request.status === 'pending'
   }
 
   function approvalLines(request) {
     const lines = [
-      '-- shell approval required before this action can run --',
+      approvalMode(request) === 'totp'
+        ? '-- approval code required before this action can run --'
+        : '-- shell approval required before this action can run --',
       'request id: ' + request.request_id,
       'action: ' + request.action_cmd + ' [' + request.action_class + ']',
     ]
     if (request.action_target) lines.push('target: ' + request.action_target)
-    lines.push('run as root: ' + approvalCommand(request))
+    if (approvalMode(request) === 'totp') {
+      lines.push('enter a TOTP code below to approve this action in Arbor')
+    } else {
+      lines.push('run as root: ' + approvalCommand(request))
+    }
     lines.push('Arbor will start this action automatically after approval is recorded.')
     lines.push('Other Arbor actions are locked until this approval is resolved.')
     return lines
@@ -207,7 +219,7 @@
 
   function approvalResolvedLines(request) {
     return [
-      '-- shell approval received --',
+      '-- approval received --',
       'request id: ' + request.request_id,
       'starting action automatically…',
     ]
@@ -298,6 +310,10 @@
       document.removeEventListener('visibilitychange', state._approvalVisibilityHandler)
       state._approvalVisibilityHandler = null
     }
+    if (state._approvalUpdateHandler) {
+      window.removeEventListener('arbor-approval-updated', state._approvalUpdateHandler)
+      state._approvalUpdateHandler = null
+    }
     if (syncGate && state.approvalRequest && state.approvalRequest.request_id) {
       _approvalGateStore().clear(state.approvalRequest.request_id)
     }
@@ -332,29 +348,7 @@
     state._approvalPollDelay = 1500
     _syncApprovalGate(state.approvalRequest)
     if (setLines) setLines(approvalLines(state.approvalRequest))
-    const schedule = (delay) => {
-      const nextDelay = document.hidden ? Math.max(delay, 10000) : delay
-      state._approvalPollTimer = setTimeout(poll, nextDelay)
-    }
-    state._approvalVisibilityHandler = () => {
-      if (document.hidden || !state.approvalRequest || state.approvalRequest.request_id !== requestId) return
-      if (state._approvalPollTimer !== null) clearTimeout(state._approvalPollTimer)
-      state._approvalPollDelay = 1500
-      state._approvalPollTimer = setTimeout(poll, 100)
-    }
-    document.addEventListener('visibilitychange', state._approvalVisibilityHandler)
-    const poll = async () => {
-      if (!state.approvalRequest || state.approvalRequest.request_id !== requestId) return
-      let request
-      try {
-        request = await approvalRequests.show(requestId)
-      } catch (_) {
-        if (state.approvalRequest && state.approvalRequest.request_id === requestId) {
-          state._approvalPollDelay = Math.min(Math.max(state._approvalPollDelay || 1500, 1500) * 2, 30000)
-          schedule(state._approvalPollDelay)
-        }
-        return
-      }
+    const handleApprovalUpdate = async (request) => {
       if (!state.approvalRequest || state.approvalRequest.request_id !== requestId) return
       state.approvalRequest = request
       state.approvalCommand = approvalCommand(request)
@@ -381,6 +375,39 @@
       clearApprovalState(state)
       if (setLines) setLines(approvalUnavailableLines(request))
       _refreshApprovalGate({ navigate: false })
+    }
+    const schedule = (delay) => {
+      const nextDelay = document.hidden ? Math.max(delay, 10000) : delay
+      state._approvalPollTimer = setTimeout(poll, nextDelay)
+    }
+    state._approvalVisibilityHandler = () => {
+      if (document.hidden || !state.approvalRequest || state.approvalRequest.request_id !== requestId) return
+      if (state._approvalPollTimer !== null) clearTimeout(state._approvalPollTimer)
+      state._approvalPollDelay = 1500
+      state._approvalPollTimer = setTimeout(poll, 100)
+    }
+    state._approvalUpdateHandler = (event) => {
+      const updated = event && event.detail ? event.detail.request : null
+      if (!updated || updated.request_id !== requestId) return
+      if (state._approvalPollTimer !== null) clearTimeout(state._approvalPollTimer)
+      state._approvalPollDelay = 1500
+      void handleApprovalUpdate(updated)
+    }
+    document.addEventListener('visibilitychange', state._approvalVisibilityHandler)
+    window.addEventListener('arbor-approval-updated', state._approvalUpdateHandler)
+    const poll = async () => {
+      if (!state.approvalRequest || state.approvalRequest.request_id !== requestId) return
+      let request
+      try {
+        request = await approvalRequests.show(requestId)
+      } catch (_) {
+        if (state.approvalRequest && state.approvalRequest.request_id === requestId) {
+          state._approvalPollDelay = Math.min(Math.max(state._approvalPollDelay || 1500, 1500) * 2, 30000)
+          schedule(state._approvalPollDelay)
+        }
+        return
+      }
+      await handleApprovalUpdate(request)
     }
     schedule(state._approvalPollDelay)
   }
@@ -651,6 +678,10 @@
       items: PRIMARY_NAV_ITEMS,
       status: null,
       activeJobs: [],
+      approvalCode: '',
+      approvalSubmitBusy: false,
+      approvalSubmitError: null,
+      _approvalFormRequestId: '',
       _timer: null,
       init() {
         this._loadSummary()
@@ -666,6 +697,13 @@
           }
         })
         this.$watch('$store.approvalGate.active', request => {
+          const requestId = request && request.request_id ? request.request_id : ''
+          if (this._approvalFormRequestId !== requestId) {
+            this.approvalCode = ''
+            this.approvalSubmitBusy = false
+            this.approvalSubmitError = null
+          }
+          this._approvalFormRequestId = requestId
           if (approvalPending(request)) _navigateToApprovalRequest(request)
         })
       },
@@ -678,6 +716,15 @@
       approvalPending() {
         return Alpine.store('approvalGate').active
       },
+      approvalMode() {
+        return approvalMode(Alpine.store('approvalGate').active)
+      },
+      approvalTitle() {
+        return this.approvalMode() === 'totp' ? 'Enter approval code' : 'Awaiting shell approval'
+      },
+      approvalNeedsTotp() {
+        return this.approvalMode() === 'totp'
+      },
       approvalDetailLines() {
         const request = Alpine.store('approvalGate').active
         if (!request) return []
@@ -685,6 +732,21 @@
         const queued = Math.max(0, Alpine.store('approvalGate').pendingCount() - 1)
         if (queued > 0) lines.push(queued + ' more pending approval' + (queued === 1 ? '' : 's') + ' queued after this one.')
         return lines
+      },
+      async submitApprovalCode() {
+        const request = Alpine.store('approvalGate').active
+        if (!approvalPending(request) || approvalMode(request) !== 'totp') return
+        this.approvalSubmitBusy = true
+        this.approvalSubmitError = null
+        try {
+          const approved = await approvalRequests.approve(request.request_id, this.approvalCode)
+          this.approvalCode = ''
+          window.dispatchEvent(new CustomEvent('arbor-approval-updated', { detail: { request: approved } }))
+        } catch (e) {
+          this.approvalSubmitError = e.message || 'Unable to verify code'
+        } finally {
+          this.approvalSubmitBusy = false
+        }
       },
       async _restorePendingApproval() {
         if (!Alpine.store('auth').isLoggedIn) return

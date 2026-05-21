@@ -6,11 +6,32 @@ A local-first web UI for managing Portage from a browser on the same machine.
 
 Designed for Gentoo systems in a local environment. Not intended to be exposed to the internet.
 
-## Root approval flow
+## Approval modes
 
-**Arbor now uses a shell-first approval model for privileged actions. This is a major part of the safety model, not an optional extra.**
+**Arbor supports three approval modes for privileged actions, selected with `ARBOR_AUTH_MODE`.**
 
-For actions such as install, uninstall, world update, sync, preserved-rebuild, depclean, and other root-backed destructive/admin operations:
+The mode applies to install, uninstall, world update, sync, preserved-rebuild, depclean, overlay changes, and other root-backed admin operations.
+
+Minimal `/etc/arbor/arbor.env` examples:
+
+```bash
+# cli (default)
+ARBOR_AUTH_MODE=cli
+
+# totp
+ARBOR_AUTH_MODE=totp
+ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
+# Optional
+# ARBOR_TOTP_ISSUER=Arbor
+# ARBOR_TOTP_ACCOUNT_NAME=arbor@my-host
+
+#none
+ARBOR_AUTH_MODE=none
+```
+
+### `cli` (default)
+
+This is the original shell-first model and remains the safest mode for Arbor's intended local-first deployment.
 
 1. Start the action in the browser as usual.
 2. Arbor creates a pending approval request and locks the UI.
@@ -25,17 +46,44 @@ This means:
 - the approval decision happens in a **root shell**
 - refreshing the UI does **not** lose a pending approval request; Arbor restores it and reopens the relevant page
 
+### `totp`
+
+In TOTP mode, Arbor still creates a pending approval request, but approval happens in the Web UI by entering a code from a standard TOTP app such as Google Authenticator or Aegis.
+
+To configure it manually in `/etc/arbor/arbor.env`, set:
+
+Provisioning can be done from a root shell with:
+
+```bash
+arbor-approve totp-setup
+```
+
+That command can:
+
+- create or reuse the TOTP secret
+- print the `otpauth://...` URI
+- render an ASCII QR code when the optional `qrcode` dependency is available
+- update `/etc/arbor/arbor.env` automatically so `ARBOR_AUTH_MODE=totp` and the secret file path are configured
+
+**Important:** TOTP improves convenience for trusted local/LAN use, but it does **not** make Arbor suitable for internet exposure. The TOTP code is still a shared second factor for the whole instance, not a per-request cryptographic proof bound to a single browser action.
+
+### `none`
+
+In `none` mode, Arbor skips the extra approval step entirely and starts privileged actions immediately after the authenticated browser request.
+
+This exists for fully trusted environments only. Arbor logs a startup warning when `ARBOR_AUTH_MODE=none` is enabled.
+
 ## Features
 
 - **Dashboard** — summary cards, recent job activity, compile time by category, source/binary mix, keyword posture, top enabled USE flags, and multi-slot package summaries
 - **Installed packages** — filter installed packages, open package details, inspect metadata, USE state, and runtime dependencies
 - **Search packages** — search the Portage tree and jump to the selected package
 - **USE flags** — inspect global USE state, package-specific overrides, installed build state, and mismatch indicators
-- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and require shell approval before the real root action starts
+- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and require approval before the real root action starts
 - **Autounmask flow** — for masked install targets, Arbor can write accepted keywords to `/etc/portage/package.accept_keywords`
 - **etc-update review** — after successful installs, pending `._cfg*` files can be reviewed and resolved in the UI
-- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with shell approval on privileged steps
-- **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with explicit danger acknowledgement plus shell approval
+- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with approval on privileged steps
+- **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with explicit danger acknowledgement plus approval
 - **Jobs** — view active jobs, reopen live output, browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`), and surface recovered orphaned/unknown jobs after daemon restart
 
 ## Dashboard
@@ -94,7 +142,9 @@ That directory is the canonical UI source and the one served in development and 
 
 - Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over HTTPS on port `8443`, and it is **not intended for internet exposure**.
 - Treat the Arbor token as **root-equivalent**. Arbor now authenticates web-to-daemon IPC requests and avoids putting WebSocket tokens in URLs, but an authenticated session can still trigger root-backed Portage actions.
-- Root-backed actions are now intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
+- In `cli` mode, root-backed actions are intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
+- `totp` mode is a convenience tradeoff for trusted local/LAN use. It adds a second factor in the browser, but it does **not** make Arbor safe to expose on the internet; a valid session plus the shared TOTP secret is still not the same as a hardened internet-facing auth design.
+- `none` mode removes the secondary approval gate entirely and should be treated as equivalent to trusting any authenticated session with direct root-backed action approval.
 - Safer defaults are enabled out of the box: localhost bind, tighter token/key handling, response security headers, and overlay add disabled by default.
 - Overlay add remains a dangerous admin action. If you enable `ARBOR_ENABLE_OVERLAY_ADD=1`, Arbor requires an explicit approval flow, but adding an untrusted overlay still means trusting it with root-level package build execution.
 - The etc-update resolve path now refuses unsafe symlinked overwrite targets, and job handling is more honest after restarts: active jobs are snapshotted to disk and may come back as `orphaned` or `unknown` rather than being treated as live.
@@ -175,11 +225,23 @@ Open `https://localhost:8443` or `https://127.0.0.1:8443` in your browser, accep
 
 For a first install, keep Arbor on localhost until you are comfortable with the model: the bearer token unlocks root-backed package actions, and LAN exposure is still a deliberate tradeoff rather than the default.
 
-When you start a privileged action from the UI, expect Arbor to pause and ask for shell approval. Open a root shell and run:
+When you start a privileged action from the UI, Arbor's behavior depends on `ARBOR_AUTH_MODE`:
+
+- `cli`: Arbor pauses and waits for `arbor-approve approve <request_id>` from a root shell.
+- `totp`: Arbor pauses and shows a TOTP prompt in the Web UI.
+- `none`: Arbor starts the privileged action immediately with no second prompt.
+
+For `cli`, use:
 
 ```bash
 arbor-approve list
 arbor-approve approve <request_id>
+```
+
+For `totp`, provision the instance first:
+
+```bash
+arbor-approve totp-setup
 ```
 
 If you reject the prompt in `arbor-approve`, the request is cancelled and the browser unlocks immediately.
@@ -318,6 +380,11 @@ rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 | `ARBOR_PORT` | `8443` | Web server port |
 | `ARBOR_CERT` | `/etc/arbor/cert.pem` | TLS certificate path |
 | `ARBOR_KEY` | `/etc/arbor/key.pem` | TLS key path |
+| `ARBOR_AUTH_MODE` | `cli` | Secondary approval mode: `cli`, `totp`, or `none` |
+| `ARBOR_TOTP_SECRET` | unset | Inline base32 TOTP secret; supported, but prefer the file-based option below |
+| `ARBOR_TOTP_SECRET_FILE` | `/etc/arbor/totp.secret` when configured | File containing the base32 TOTP secret for `totp` mode |
+| `ARBOR_TOTP_ISSUER` | `Arbor` | Issuer label embedded in the `otpauth://` TOTP URI |
+| `ARBOR_TOTP_ACCOUNT_NAME` | host-derived | Account label embedded in the `otpauth://` TOTP URI |
 | `ARBOR_ENABLE_OVERLAY_ADD` | `0` | Enable the dangerous overlay-add flow; overlays are disabled by default because new ebuilds run as root |
 | `ARBOR_IPC_KEY` | unset | Optional env override for the shared HMAC key used to authenticate web-to-daemon IPC requests |
 | `ARBOR_IPC_KEY_FILE` | `/etc/arbor/ipc.key` | Shared HMAC key file, generated by setup by default |
@@ -327,9 +394,15 @@ rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 
 Overlay add is disabled by default. To enable it, set `ARBOR_ENABLE_OVERLAY_ADD=1` in `/etc/arbor/arbor.env`, restart the services, and use the two-step confirmation flow in the UI. Adding an overlay is equivalent to trusting that repository with root-level code execution during package builds.
 
+For TOTP mode, prefer storing the secret in `ARBOR_TOTP_SECRET_FILE` instead of `ARBOR_TOTP_SECRET` so it stays out of process listings and service unit overrides. `arbor-approve totp-setup` will create and wire this for you by default.
+
+`ARBOR_AUTH_MODE=none` is intentionally noisy: Arbor prints a startup warning because authenticated browser access can immediately trigger privileged actions in that mode.
+
 ## LAN access
 
 LAN access exists, but it is still not the recommended deployment mode. Arbor now ships with several hardening changes for safer local use, but it still binds only to loopback by default and should not be treated as an internet-facing service.
+
+Even with `ARBOR_AUTH_MODE=totp`, Arbor is **not** designed to become safe for public internet exposure. TOTP here is a usability-oriented second approval factor for a trusted operator, not a substitute for a hardened multi-user internet auth model.
 
 For LAN access you must configure both:
 

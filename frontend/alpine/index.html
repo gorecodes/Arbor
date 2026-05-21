@@ -43,10 +43,27 @@
 
     <div class="app-approval-lock" x-show="approvalPending()">
       <div class="app-approval-card">
-        <div class="app-approval-title">Awaiting shell approval</div>
+        <div class="app-approval-title" x-text="approvalTitle()"></div>
         <template x-for="(line, i) in approvalDetailLines()" :key="i">
           <div class="app-approval-line" x-text="line"></div>
         </template>
+        <form class="app-approval-form" x-show="approvalNeedsTotp()" @submit.prevent="submitApprovalCode()">
+          <input
+            class="app-approval-input"
+            type="text"
+            inputmode="numeric"
+            autocomplete="one-time-code"
+            placeholder="123456"
+            x-model="approvalCode"
+          >
+          <button
+            type="submit"
+            class="app-approval-submit"
+            :disabled="approvalSubmitBusy || !approvalCode.trim()"
+            x-text="approvalSubmitBusy ? 'Verifying…' : 'Approve'"
+          ></button>
+        </form>
+        <div class="app-approval-error" x-show="approvalSubmitError" x-text="approvalSubmitError"></div>
       </div>
     </div>
 

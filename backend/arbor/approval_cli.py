@@ -1,12 +1,29 @@
 from __future__ import annotations
 
 import argparse
+import grp
+import io
 import json
 import os
+import pwd
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import daemon.main as daemon_main
+
+from .approval_mode import (
+    ApprovalMode,
+    ApprovalModeError,
+    build_totp_uri,
+    generate_totp_secret,
+    get_approval_mode,
+    get_totp_account_name,
+    get_totp_issuer,
+    get_totp_secret,
+    totp_secret_path,
+)
+from .config_env import env_file_path
 
 
 def _require_root() -> None:
@@ -63,6 +80,135 @@ def _print_request(request: dict) -> None:
     print(json.dumps(request.get("args", {}), indent=2, sort_keys=True))
 
 
+def _set_owner_if_present(path: Path, user: str = "arbor", group: str = "arbor") -> None:
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+        gid = grp.getgrnam(group).gr_gid
+        os.chown(path, uid, gid)
+    except (KeyError, PermissionError, OSError):
+        return
+
+
+def _write_secret_file(path: Path, secret: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{secret}\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    _set_owner_if_present(path)
+
+
+def _upsert_env_file(assignments: dict[str, str]) -> Path:
+    path = env_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    remaining = dict(assignments)
+    updated_lines: list[str] = []
+
+    for raw_line in existing_lines:
+        stripped = raw_line.strip()
+        if stripped.startswith("export "):
+            key, sep, _ = stripped[7:].partition("=")
+            prefix = "export "
+        else:
+            key, sep, _ = stripped.partition("=")
+            prefix = ""
+        key = key.strip()
+        if sep and key in remaining:
+            updated_lines.append(f"{prefix}{key}={remaining.pop(key)}")
+            continue
+        updated_lines.append(raw_line)
+
+    for key, value in remaining.items():
+        updated_lines.append(f"{key}={value}")
+
+    path.write_text("\n".join(updated_lines).rstrip() + "\n", encoding="utf-8")
+    os.chmod(path, 0o640)
+    _set_owner_if_present(path, user="root", group="arbor")
+    return path
+
+
+def _render_terminal_qr(uri: str) -> str:
+    try:
+        import qrcode
+    except ImportError as exc:
+        raise RuntimeError(
+            "terminal QR rendering requires the optional 'qrcode' Python package"
+        ) from exc
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(uri)
+    qr.make(fit=True)
+    out = io.StringIO()
+    qr.print_ascii(out=out, tty=False, invert=True)
+    return out.getvalue().rstrip()
+
+
+def _cmd_totp_setup(args: argparse.Namespace) -> int:
+    _require_root()
+    try:
+        mode = get_approval_mode()
+    except ApprovalModeError as exc:
+        print(f"[arbor-approve] ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    env_secret = os.environ.get("ARBOR_TOTP_SECRET", "").strip()
+    source = "environment"
+    status = "existing"
+    secret_path = totp_secret_path()
+    if env_secret:
+        if args.rotate:
+            print(
+                "[arbor-approve] ERROR: cannot rotate a TOTP secret provided through ARBOR_TOTP_SECRET; update the environment value or switch to ARBOR_TOTP_SECRET_FILE",
+                file=sys.stderr,
+            )
+            return 2
+        secret = get_totp_secret()
+    else:
+        source = str(secret_path)
+        if args.rotate or not secret_path.exists():
+            secret = generate_totp_secret()
+            _write_secret_file(secret_path, secret)
+            status = "generated"
+        else:
+            try:
+                secret = get_totp_secret()
+            except ApprovalModeError as exc:
+                print(f"[arbor-approve] ERROR: {exc}", file=sys.stderr)
+                return 2
+
+    issuer = args.issuer.strip() if args.issuer else get_totp_issuer()
+    account_name = args.account_name.strip() if args.account_name else get_totp_account_name()
+    uri = build_totp_uri(secret, issuer=issuer, account_name=account_name)
+    env_updates = {"ARBOR_AUTH_MODE": "totp"}
+    if not env_secret:
+        env_updates["ARBOR_TOTP_SECRET_FILE"] = str(secret_path)
+    if args.issuer:
+        env_updates["ARBOR_TOTP_ISSUER"] = issuer
+    if args.account_name:
+        env_updates["ARBOR_TOTP_ACCOUNT_NAME"] = account_name
+    updated_env_path = _upsert_env_file(env_updates)
+
+    print("Arbor TOTP provisioning")
+    print(f"mode:          {mode.value}")
+    print(f"secret source: {source} ({status})")
+    print(f"env file:      {updated_env_path}")
+    print(f"issuer:        {issuer}")
+    print(f"account:       {account_name}")
+    print()
+    print("Manual entry secret:")
+    print(secret)
+    print()
+    try:
+        print("Scan this QR code with Google Authenticator, Aegis, or another TOTP app:")
+        print(_render_terminal_qr(uri))
+        print()
+    except RuntimeError as exc:
+        print(f"[arbor-approve] WARNING: {exc}", file=sys.stderr)
+        print("QR rendering unavailable; use the secret or otpauth URI below for manual setup.")
+        print()
+    print("otpauth URI:")
+    print(uri)
+    return 0
+
+
 def _cmd_list(_args: argparse.Namespace) -> int:
     _require_root()
     daemon_main._db_init()
@@ -93,6 +239,16 @@ def _cmd_show(args: argparse.Namespace) -> int:
 
 def _cmd_approve(args: argparse.Namespace) -> int:
     _require_root()
+    try:
+        if get_approval_mode() is not ApprovalMode.CLI:
+            print(
+                "[arbor-approve] ERROR: ARBOR_AUTH_MODE must be 'cli' to approve from the terminal",
+                file=sys.stderr,
+            )
+            return 2
+    except ApprovalModeError as exc:
+        print(f"[arbor-approve] ERROR: {exc}", file=sys.stderr)
+        return 2
     daemon_main._db_init()
     request = daemon_main._approval_request_get(args.request_id)
     if not request:
@@ -116,7 +272,7 @@ def _cmd_approve(args: argparse.Namespace) -> int:
                     return _cancel_request(request)
     except KeyboardInterrupt:
         return _cancel_request(request)
-    issued = daemon_main._approval_issue_token(args.request_id)
+    issued = daemon_main._approval_issue_token(args.request_id, {"method": "cli"})
     if "error" in issued:
         print(f"[arbor-approve] ERROR: {issued['error']}", file=sys.stderr)
         return 1
@@ -144,6 +300,12 @@ def build_parser() -> argparse.ArgumentParser:
     approve_parser.add_argument("request_id")
     approve_parser.add_argument("-y", "--yes", action="store_true", help="Approve without interactive confirmation")
     approve_parser.set_defaults(func=_cmd_approve)
+
+    totp_parser = sub.add_parser("totp-setup", help="Show or generate the Arbor TOTP secret and QR code")
+    totp_parser.add_argument("--rotate", action="store_true", help="Generate and persist a fresh file-backed TOTP secret")
+    totp_parser.add_argument("--issuer", default="", help="Override the TOTP issuer label")
+    totp_parser.add_argument("--account-name", default="", help="Override the TOTP account label")
+    totp_parser.set_defaults(func=_cmd_totp_setup)
 
     return parser
 

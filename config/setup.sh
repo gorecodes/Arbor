@@ -75,6 +75,10 @@ ARBOR_PORT=8443
 ARBOR_CERT=/etc/arbor/cert.pem
 ARBOR_KEY=/etc/arbor/key.pem
 ARBOR_ENABLE_OVERLAY_ADD=0
+# ARBOR_AUTH_MODE=cli
+# ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
+# ARBOR_TOTP_ISSUER=Arbor
+# ARBOR_TOTP_ACCOUNT_NAME=arbor@my-host
 EOF
   fi
   echo "==> Created /etc/arbor/arbor.env"
