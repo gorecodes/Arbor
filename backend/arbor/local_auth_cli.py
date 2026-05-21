@@ -10,6 +10,7 @@ from .local_auth import (
     has_local_users,
     list_local_users,
     normalize_role,
+    password_min_length,
     set_local_user_role,
 )
 
@@ -50,8 +51,9 @@ def _cmd_create_owner(args: argparse.Namespace) -> int:
             return 2
         password = p1
 
-    if len(password) < 8:
-        print("[arbor-auth] ERROR: password too short (min 8 chars)", file=sys.stderr)
+    min_length = password_min_length()
+    if len(password) < min_length:
+        print(f"[arbor-auth] ERROR: password too short (min {min_length} chars)", file=sys.stderr)
         return 2
 
     user = create_local_user(username, password, role="owner")
@@ -79,8 +81,9 @@ def _cmd_create_user(args: argparse.Namespace) -> int:
             print("[arbor-auth] ERROR: password mismatch", file=sys.stderr)
             return 2
         password = p1
-    if len(password) < 8:
-        print("[arbor-auth] ERROR: password too short (min 8 chars)", file=sys.stderr)
+    min_length = password_min_length()
+    if len(password) < min_length:
+        print(f"[arbor-auth] ERROR: password too short (min {min_length} chars)", file=sys.stderr)
         return 2
     try:
         user = create_local_user(username, password, role=role)

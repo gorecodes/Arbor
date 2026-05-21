@@ -52,6 +52,10 @@ _KNOWN_DAEMON_COMMANDS = {
     "use_flag_origins",
     "use_flags",
     "world_updates",
+    "totp_status",
+    "totp_enroll_begin",
+    "totp_enroll_confirm",
+    "totp_disable",
 }
 
 _ROLE_ALLOWED_CLASSES = {
@@ -74,14 +78,15 @@ def set_current_principal(principal: Mapping[str, Any] | None) -> None:
 def current_principal() -> dict[str, Any]:
     principal = _principal_ctx.get()
     if principal is None:
-        # Backward-compatible default for token-only deployments.
-        return {"backend": "token", "role": "owner", "subject": "legacy-token"}
+        raise AuthorizationError("authentication context is missing")
     return principal
 
 
 def _principal_role(principal: Mapping[str, Any]) -> str:
-    raw_role = str(principal.get("role", "owner")).strip().lower()
-    return raw_role or "owner"
+    raw_role = str(principal.get("role", "")).strip().lower()
+    if not raw_role:
+        raise AuthorizationError("principal role is missing")
+    return raw_role
 
 
 def principal_role(principal: Mapping[str, Any] | None = None) -> str:

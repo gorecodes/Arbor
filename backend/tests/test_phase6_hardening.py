@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import arbor.config_env as config_env
+import arbor.approval_mode as approval_mode
 import arbor.main as web_main
 import arbor.server as server_mod
 import daemon.main as daemon_main
@@ -40,6 +41,26 @@ class ArborEnvLoadingTests(unittest.TestCase):
             with patch.dict("os.environ", {"ARBOR_ENV_FILE": str(env_file)}, clear=False):
                 self.assertEqual(config_env.env_value("ARBOR_HOST", "127.0.0.1"), "0.0.0.0")
                 self.assertTrue(config_env.env_enabled("ARBOR_ENABLE_OVERLAY_ADD"))
+
+    def test_file_first_env_overrides_stale_process_env_for_totp_settings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / "arbor.env"
+            env_file.write_text(
+                "ARBOR_AUTH_MODE=totp\nARBOR_TOTP_SECRET_FILE=/tmp/totp.secret\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "ARBOR_ENV_FILE": str(env_file),
+                    "ARBOR_AUTH_MODE": "cli",
+                    "ARBOR_TOTP_SECRET_FILE": "/stale/path",
+                },
+                clear=False,
+            ):
+                self.assertEqual(approval_mode.get_login_auth_mode(), approval_mode.ApprovalMode.TOTP)
+                self.assertEqual(str(approval_mode.totp_secret_path()), "/tmp/totp.secret")
 
     def test_server_run_reads_bind_and_tls_settings_from_arbor_env(self):
         with tempfile.TemporaryDirectory() as tmpdir:

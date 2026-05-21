@@ -18,6 +18,8 @@ _SESSION_TTL_ENV = "ARBOR_SESSION_TTL_SECONDS"
 _SESSION_TTL_DEFAULT = 43200
 _SESSION_IDLE_ENV = "ARBOR_SESSION_IDLE_TIMEOUT_SECONDS"
 _SESSION_IDLE_DEFAULT = 1800
+_SESSION_REVOKED_RETENTION_ENV = "ARBOR_SESSION_REVOKED_RETENTION_SECONDS"
+_SESSION_REVOKED_RETENTION_DEFAULT = 86400
 _LAST_SEEN_UPDATE_INTERVAL_SECONDS = 30
 
 
@@ -32,6 +34,10 @@ def session_ttl_seconds() -> int:
 
 def session_idle_timeout_seconds() -> int:
     return max(env_int(_SESSION_IDLE_ENV, _SESSION_IDLE_DEFAULT), 60)
+
+
+def session_revoked_retention_seconds() -> int:
+    return max(env_int(_SESSION_REVOKED_RETENTION_ENV, _SESSION_REVOKED_RETENTION_DEFAULT), 60)
 
 
 @contextmanager
@@ -80,20 +86,42 @@ def _now() -> float:
     return time.time()
 
 
-def create_session(user_id: str, *, remote_addr: str = "", user_agent: str = "") -> dict:
+def _cleanup_sessions(conn: sqlite3.Connection, now: float) -> None:
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+    conn.execute(
+        "DELETE FROM sessions WHERE revoked_at IS NOT NULL AND revoked_at < ?",
+        (now - session_revoked_retention_seconds(),),
+    )
+
+
+def create_session(user_id: str, *, remote_addr: str = "", user_agent: str = "", step_up_method: str = "") -> dict:
     ensure_session_db()
     now = _now()
     session_id = secrets.token_urlsafe(32)
     expires_at = now + session_ttl_seconds()
+    normalized_step_up = str(step_up_method or "").strip()
+    step_up_at = now if normalized_step_up else None
     with _db_conn() as conn:
+        _cleanup_sessions(conn, now)
         conn.execute(
             """
             INSERT INTO sessions (
                 session_id, user_id, session_version, created_at, last_seen_at,
-                expires_at, auth_time, remote_addr, user_agent
-            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+                expires_at, auth_time, step_up_at, step_up_method, remote_addr, user_agent
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, user_id, now, now, expires_at, now, remote_addr, user_agent),
+            (
+                session_id,
+                user_id,
+                now,
+                now,
+                expires_at,
+                now,
+                step_up_at,
+                normalized_step_up or None,
+                remote_addr,
+                user_agent,
+            ),
         )
         conn.execute(
             """
@@ -102,7 +130,54 @@ def create_session(user_id: str, *, remote_addr: str = "", user_agent: str = "")
             """,
             (now, user_id, session_id),
         )
-    return {"session_id": session_id, "expires_at": expires_at}
+    return {"session_id": session_id, "expires_at": expires_at, "step_up_method": normalized_step_up}
+
+
+def revoke_sessions_for_user(user_id: str, *, reason: str) -> None:
+    if not user_id:
+        return
+    ensure_session_db()
+    now = _now()
+    with _db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT session_id FROM sessions WHERE user_id=? AND revoked_at IS NULL",
+            (user_id,),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE sessions SET revoked_at=?, revoke_reason=? WHERE session_id=?",
+                (now, reason, row["session_id"]),
+            )
+            conn.execute(
+                """
+                INSERT INTO auth_events (created_at, user_id, session_id, event_type, result, details_json)
+                VALUES (?, ?, ?, 'session_revoked', 'ok', ?)
+                """,
+                (now, user_id, row["session_id"], json.dumps({"reason": reason}, separators=(",", ":"))),
+            )
+
+
+def revoke_all_sessions(*, reason: str) -> None:
+    ensure_session_db()
+    now = _now()
+    with _db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT session_id, user_id FROM sessions WHERE revoked_at IS NULL"
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE sessions SET revoked_at=?, revoke_reason=? WHERE session_id=?",
+                (now, reason, row["session_id"]),
+            )
+            conn.execute(
+                """
+                INSERT INTO auth_events (created_at, user_id, session_id, event_type, result, details_json)
+                VALUES (?, ?, ?, 'session_revoked', 'ok', ?)
+                """,
+                (now, row["user_id"], row["session_id"], json.dumps({"reason": reason}, separators=(",", ":"))),
+            )
 
 
 def revoke_session(session_id: str, *, reason: str = "logout") -> None:
@@ -139,10 +214,12 @@ def get_session(session_id: str, *, touch: bool = True) -> dict | None:
     idle_cutoff = now - session_idle_timeout_seconds()
     with _db_conn() as conn:
         conn.row_factory = sqlite3.Row
+        _cleanup_sessions(conn, now)
         row = conn.execute(
             """
             SELECT s.session_id, s.user_id, s.created_at, s.last_seen_at, s.expires_at, s.auth_time,
-                   s.step_up_at, s.step_up_method, s.revoked_at, u.username, u.role, u.disabled_at
+                   s.step_up_at, s.step_up_method, s.revoked_at, u.username, u.role, u.disabled_at,
+                   u.password_changed_at
             FROM sessions s
             JOIN local_user u ON u.user_id = s.user_id
             WHERE s.session_id=?
@@ -155,6 +232,12 @@ def get_session(session_id: str, *, touch: bool = True) -> dict | None:
         if data["revoked_at"] is not None:
             return None
         if data["disabled_at"] is not None:
+            return None
+        if data["password_changed_at"] is not None and float(data["auth_time"] or 0.0) < float(data["password_changed_at"]):
+            conn.execute(
+                "UPDATE sessions SET revoked_at=?, revoke_reason=? WHERE session_id=?",
+                (now, "password_changed", session_id),
+            )
             return None
         if float(data["expires_at"]) < now:
             return None

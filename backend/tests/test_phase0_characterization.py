@@ -122,21 +122,21 @@ class InstallSurfaceCharacterizationTests(unittest.TestCase):
         self.assertIn("Role: owner", app_js)
 
 
-class AuthCharacterizationTests(unittest.TestCase):
+class AuthCharacterizationTests(unittest.IsolatedAsyncioTestCase):
     def test_auth_backend_is_local_only(self):
         self.assertEqual(auth_mod.auth_backend(), "local")
 
-    def test_require_auth_rejects_missing_session(self):
+    async def test_require_auth_rejects_missing_session(self):
         with self.assertRaises(HTTPException) as ctx:
             request = SimpleNamespace(cookies={})
-            auth_mod.require_auth(request, None)
+            await auth_mod.require_auth(request, None)
         self.assertEqual(ctx.exception.status_code, 401)
         self.assertEqual(ctx.exception.detail, "Invalid or missing session")
 
-    def test_require_auth_accepts_valid_session_cookie(self):
+    async def test_require_auth_accepts_valid_session_cookie(self):
         request = SimpleNamespace(cookies={"arbor_session": "sid-1"})
         with patch.object(auth_mod, "get_session", return_value={"user_id": "u1", "role": "owner", "username": "owner"}):
-            self.assertEqual(auth_mod.require_auth(request, None), "u1")
+            self.assertEqual(await auth_mod.require_auth(request, None), "u1")
 
 
 class ServerApprovalModeTests(unittest.TestCase):
@@ -144,7 +144,7 @@ class ServerApprovalModeTests(unittest.TestCase):
         with patch("builtins.print") as printed:
             server_mod._report_approval_mode(server_mod.ApprovalMode.NONE)
         printed.assert_called_once()
-        self.assertIn("ARBOR_AUTH_MODE=none", printed.call_args.args[0])
+        self.assertIn("ARBOR_APPROVAL_MODE=none", printed.call_args.args[0])
 
     def test_run_refuses_invalid_approval_mode(self):
         with (
@@ -161,6 +161,12 @@ class ServerApprovalModeTests(unittest.TestCase):
 
 
 class ApiCharacterizationTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        web_main.set_current_principal({"backend": "local", "subject": "u1", "username": "owner", "role": "owner"})
+
+    async def asyncTearDown(self):
+        web_main.set_current_principal(None)
+
     async def test_overlay_add_is_forbidden_when_feature_flag_is_disabled(self):
         request = FakeRequest({"name": "test", "sync_type": "git", "sync_uri": "https://example.invalid/repo.git"})
         with patch.object(web_main, "_overlay_add_enabled", return_value=False):
@@ -191,6 +197,12 @@ class ApiCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 "approve_danger": False,
                 "approval_request_id": "",
                 "approval_token": "",
+                "request_principal": {
+                    "subject": "u1",
+                    "username": "owner",
+                    "role": "owner",
+                    "session_id": "",
+                },
             },
         )
 
@@ -258,7 +270,25 @@ class WebSocketCharacterizationTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(web_main, "query", fake_query):
                 await web_main._ws_emerge(websocket, "emerge_pretend", "sys-apps/portage", {"clean": False, "opts": ""})
 
-        self.assertEqual(calls, [("emerge_pretend", {"atom": "sys-apps/portage", "clean": False, "opts": ""})])
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "emerge_pretend",
+                    {
+                        "atom": "sys-apps/portage",
+                        "clean": False,
+                        "opts": "",
+                        "request_principal": {
+                            "subject": "u1",
+                            "username": "",
+                            "role": "owner",
+                            "session_id": "",
+                        },
+                    },
+                )
+            ],
+        )
         self.assertTrue(websocket.closed)
         self.assertEqual(
             [json.loads(payload) for payload in websocket.sent_texts],

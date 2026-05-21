@@ -22,6 +22,10 @@ class AuthorizationPolicyTests(unittest.TestCase):
         authz.set_current_principal({"backend": "local", "role": "owner", "subject": "u1"})
         authz.authorize_daemon_command("emerge_install", {"atom": "sys-apps/portage"})
 
+    def test_missing_principal_is_denied(self):
+        with self.assertRaises(authz.AuthorizationError):
+            authz.authorize_daemon_command("system_status", {})
+
 
 class DaemonClientAuthorizationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):

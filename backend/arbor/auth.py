@@ -59,7 +59,7 @@ def _store_request_principal(request: Request, principal: Mapping[str, object]) 
     state.arbor_principal = dict(principal)
 
 
-def require_auth(
+async def require_auth(
     request: Request,
     credentials: HTTPAuthorizationCredentials = Security(_bearer),
 ):

@@ -32,6 +32,7 @@ _READONLY_COMMANDS = {
     "history_log",
     "history_stats",
     "overlay_list",
+    "totp_status",
 }
 
 _PRETEND_COMMANDS = {
@@ -67,6 +68,8 @@ def classify_action(cmd: str, args: Mapping[str, Any] | None = None) -> str:
     if cmd in _PRETEND_COMMANDS:
         return PRETEND
     if cmd == "overlay_add":
+        return TRUST_HEAVY
+    if cmd in {"totp_enroll_begin", "totp_enroll_confirm", "totp_disable"}:
         return TRUST_HEAVY
     if cmd == "overlay_remove":
         return DESTRUCTIVE if bool(data.get("purge", False)) else TRUST_HEAVY

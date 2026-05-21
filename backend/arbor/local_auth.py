@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import logging
 import os
 import pwd
@@ -29,6 +30,8 @@ _SALT_BYTES = 16
 _SYSTEM_OWNER = "arbor"
 _SYSTEM_GROUP = "arbor"
 _ALLOWED_ROLES = {"owner", "operator", "viewer"}
+_PASSWORD_MIN_LENGTH_ENV = "ARBOR_AUTH_PASSWORD_MIN_LENGTH"
+_PASSWORD_MIN_LENGTH_DEFAULT = 12
 log = logging.getLogger(__name__)
 
 
@@ -185,9 +188,39 @@ def _scrypt_digest(password: str, salt: bytes) -> bytes:
     )
 
 
-def hash_password(password: str) -> str:
+def password_min_length() -> int:
+    raw = env_value(_PASSWORD_MIN_LENGTH_ENV, str(_PASSWORD_MIN_LENGTH_DEFAULT)).strip()
+    try:
+        return max(int(raw), 8)
+    except ValueError:
+        return _PASSWORD_MIN_LENGTH_DEFAULT
+
+
+def _validate_password_strength(password: str) -> None:
     if not password:
         raise ValueError("password must not be empty")
+    min_length = password_min_length()
+    if len(password) < min_length:
+        raise ValueError(f"password too short (min {min_length} chars)")
+
+
+def dummy_password_hash() -> str:
+    salt = b"\x00" * _SALT_BYTES
+    digest = _scrypt_digest("arbor-invalid-user-password", salt)
+    return "$".join(
+        (
+            _HASH_SCHEME,
+            str(_SCRYPT_N),
+            str(_SCRYPT_R),
+            str(_SCRYPT_P),
+            base64.b64encode(salt).decode("ascii"),
+            base64.b64encode(digest).decode("ascii"),
+        )
+    )
+
+
+def hash_password(password: str) -> str:
+    _validate_password_strength(password)
     salt = os.urandom(_SALT_BYTES)
     digest = _scrypt_digest(password, salt)
     return "$".join(
@@ -280,18 +313,26 @@ def set_local_user_role(username: str, role: str) -> dict | None:
     user_role = normalize_role(role)
     now = time.time()
     ensure_auth_db()
+    previous_role = None
     with _db_conn() as conn:
+        conn.row_factory = sqlite3.Row
+        existing = conn.execute(
+            "SELECT user_id, username, role FROM local_user WHERE username=?",
+            (uname,),
+        ).fetchone()
+        if existing is None:
+            return None
+        previous_role = str(existing["role"])
         conn.execute(
             "UPDATE local_user SET role=?, updated_at=? WHERE username=?",
             (user_role, now, uname),
         )
-        if conn.total_changes <= 0:
-            return None
-        conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT user_id, username, role FROM local_user WHERE username=?",
             (uname,),
         ).fetchone()
+    if row is not None and previous_role != user_role:
+        revoke_user_sessions(str(row["user_id"]), reason="role_changed")
     return dict(row) if row is not None else None
 
 
@@ -329,10 +370,18 @@ def mark_login_success(user_id: str) -> None:
         )
 
 
-def record_login_failure(username: str) -> None:
+def record_login_failure(username: str, *, remote_addr: str = "", user_agent: str = "", reason: str = "invalid_credentials") -> None:
     now = time.time()
     ensure_auth_db()
-    details = '{"username":"' + username.replace('"', '\\"') + '"}'
+    details = json.dumps(
+        {
+            "username": username,
+            "remote_addr": remote_addr,
+            "user_agent": user_agent,
+            "reason": reason,
+        },
+        separators=(",", ":"),
+    )
     with _db_conn() as conn:
         conn.execute(
             """
@@ -341,3 +390,11 @@ def record_login_failure(username: str) -> None:
             """,
             (now, details),
         )
+
+
+def revoke_user_sessions(user_id: str, *, reason: str) -> None:
+    if not user_id:
+        return
+    from .session import revoke_sessions_for_user
+
+    revoke_sessions_for_user(user_id, reason=reason)
