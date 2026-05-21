@@ -368,7 +368,7 @@ class ApprovalRequestDaemonTests(unittest.IsolatedAsyncioTestCase):
         chunks = [
             chunk
             async for chunk in daemon_main.cmd_overlay_remove(
-                {"name": "foo", "purge": False, "approve_danger": True, "approval_text": "REMOVE foo"}
+                {"name": "foo", "purge": False, "approve_danger": True}
             )
         ]
         self.assertEqual(

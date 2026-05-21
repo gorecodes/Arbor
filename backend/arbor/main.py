@@ -679,13 +679,11 @@ async def overlay_add(auth: Auth, request: Request):
     sync_type = str(body.get("sync_type", "git")).strip()
     sync_uri  = str(body.get("sync_uri", "")).strip()
     approve_danger = bool(body.get("approve_danger", False))
-    approval_text = str(body.get("approval_text", "")).strip()
     data = await query_one("overlay_add", {
         "name": name,
         "sync_type": sync_type,
         "sync_uri": sync_uri,
         "approve_danger": approve_danger,
-        "approval_text": approval_text,
         "approval_request_id": str(body.get("approval_request_id", "")).strip(),
         "approval_token": str(body.get("approval_token", "")).strip(),
     })
@@ -703,7 +701,6 @@ async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Q
         "name": name,
         "purge": bool(purge),
         "approve_danger": bool(body.get("approve_danger", False)),
-        "approval_text": str(body.get("approval_text", "")).strip(),
         "approval_request_id": str(body.get("approval_request_id", "")).strip(),
         "approval_token": str(body.get("approval_token", "")).strip(),
     })

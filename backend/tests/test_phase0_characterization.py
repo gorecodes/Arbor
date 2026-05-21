@@ -155,7 +155,6 @@ class ApiCharacterizationTests(unittest.IsolatedAsyncioTestCase):
                 "name": "test-overlay",
                 "purge": True,
                 "approve_danger": False,
-                "approval_text": "",
                 "approval_request_id": "",
                 "approval_token": "",
             },

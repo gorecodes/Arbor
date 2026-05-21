@@ -154,7 +154,7 @@ That directory is the canonical UI source and the one served in development and 
 
 - Install and uninstall runs now keep the browser-boundary checks aligned with the actual default loopback deployment: WebSocket/CORS allow `localhost`, `127.0.0.1`, and `[::1]` on port `8443` by default.
 - The Alpine frontend was migrated to the CSP-safe build and the template surface was refactored away from unsupported inline syntax such as template literals, optional chaining, and nullish coalescing in `x-*` expressions.
-- Overlay removal now requires an explicit confirmation phrase, and overlay add remains opt-in behind `ARBOR_ENABLE_OVERLAY_ADD=1`.
+- Overlay removal now requires an explicit dangerous-action acknowledgement, and overlay add remains opt-in behind `ARBOR_ENABLE_OVERLAY_ADD=1`.
 - Background job recovery now records checkpoints and PID identity metadata so daemon restarts report `orphaned` / `unknown` states honestly instead of pretending a lost job is still fully attached.
 - OpenRC services now use respawn supervision by default; systemd already had restart-on-failure behavior.
 

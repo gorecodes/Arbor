@@ -136,15 +136,15 @@
   const overlays = {
     list:   ()                             => _get('/overlays'),
     config: ()                             => _get('/overlays/config'),
-    add:    (name, sync_type, sync_uri, approve_danger, approval_text, approval = null) =>
+    add:    (name, sync_type, sync_uri, approve_danger, approval = null) =>
       _post('/overlays', {
-        name, sync_type, sync_uri, approve_danger, approval_text,
+        name, sync_type, sync_uri, approve_danger,
         approval_request_id: approval && approval.request_id ? approval.request_id : '',
         approval_token: approval && approval.approval_token ? approval.approval_token : '',
       }),
-    remove: (name, purge = false, approve_danger = false, approval_text = '', approval = null) =>
+    remove: (name, purge = false, approve_danger = false, approval = null) =>
       _del('/overlays/' + encodeURIComponent(name) + (purge ? '?purge=1' : ''), {
-        approve_danger, approval_text,
+        approve_danger,
         approval_request_id: approval && approval.request_id ? approval.request_id : '',
         approval_token: approval && approval.approval_token ? approval.approval_token : '',
       }),
@@ -3778,12 +3778,12 @@ ${labels}
           const approval = await _approvalRequestReady(
             this,
             'overlay_add',
-            { name, sync_type: this.addSyncType, sync_uri: syncUri, approve_danger: this.addDangerAck, approval_text: '' },
+            { name, sync_type: this.addSyncType, sync_uri: syncUri, approve_danger: this.addDangerAck },
             lines => { this.approvalLines = lines },
             () => this.add(),
           )
           if (!approval) return
-          const res = await overlays.add(name, this.addSyncType, syncUri, this.addDangerAck, '', approval)
+          const res = await overlays.add(name, this.addSyncType, syncUri, this.addDangerAck, approval)
           clearApprovalState(this)
           this.approvalLines = []
           this.addShow = false
@@ -3798,12 +3798,12 @@ ${labels}
           const approval = await _approvalRequestReady(
             this,
             'overlay_remove',
-            { name, purge, approve_danger: true, approval_text: '' },
+            { name, purge, approve_danger: true },
             lines => { this.approvalLines = lines },
             () => this._removeConfirmed(name, purge),
           )
           if (!approval) return
-          await overlays.remove(name, purge, true, '', approval)
+          await overlays.remove(name, purge, true, approval)
           clearApprovalState(this)
           this.approvalLines = []
           if (this.expanded === name) this.expanded = null
