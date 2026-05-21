@@ -369,7 +369,10 @@ class LocalAuthApiTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     request = FakeRequest({"code": "123456"}, cookies={session_mod.session_cookie_name(): session["session_id"]})
                     query_one = AsyncMock(return_value={"enabled": True, "pending_enrollment": False, "secret_file": str(Path(tmpdir) / "totp.secret")})
-                    with patch.object(web_main, "query_one", query_one):
+                    with (
+                        patch.object(web_main, "query_one", query_one),
+                        patch.object(web_main, "env_file_value", return_value="totp"),
+                    ):
                         response = await web_main.auth_totp_confirm(owner["user_id"], request)
                     self.assertIsNone(session_mod.get_session(session["session_id"]))
                 finally:
@@ -378,6 +381,30 @@ class LocalAuthApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(json.loads(response.body)["reauth_required"])
         self.assertIn("Max-Age=0", response.headers.get("set-cookie", ""))
+
+    async def test_auth_totp_confirm_rejects_unpersisted_login_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_db = Path(tmpdir) / "auth.db"
+            env = {
+                "ARBOR_AUTH_DB": str(auth_db),
+                "ARBOR_TOTP_SECRET_FILE": str(Path(tmpdir) / "totp.secret"),
+            }
+            with patch.dict(os.environ, env, clear=False):
+                owner = local_auth.create_local_user("owner", "secret-password", role="owner")
+                authz.set_current_principal({"backend": "local", "subject": owner["user_id"], "username": "owner", "role": "owner"})
+                try:
+                    request = FakeRequest({"code": "123456"})
+                    query_one = AsyncMock(return_value={"enabled": True, "pending_enrollment": False, "secret_file": str(Path(tmpdir) / "totp.secret")})
+                    with (
+                        patch.object(web_main, "query_one", query_one),
+                        patch.object(web_main, "env_file_value", return_value=""),
+                    ):
+                        response = await web_main.auth_totp_confirm(owner["user_id"], request)
+                finally:
+                    authz.set_current_principal(None)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(json.loads(response.body)["error"], "failed to persist TOTP login mode to arbor.env")
 
     async def test_auth_totp_disable_requires_password_and_totp(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -404,7 +431,10 @@ class LocalAuthApiTests(unittest.IsolatedAsyncioTestCase):
                         cookies={session_mod.session_cookie_name(): session["session_id"]},
                     )
                     query_one = AsyncMock(return_value={"enabled": False, "pending_enrollment": False})
-                    with patch.object(web_main, "query_one", query_one):
+                    with (
+                        patch.object(web_main, "query_one", query_one),
+                        patch.object(web_main, "env_file_value", return_value="cli"),
+                    ):
                         ok_resp = await web_main.auth_totp_disable(owner["user_id"], ok_req)
                     self.assertIsNone(session_mod.get_session(session["session_id"]))
                 finally:
@@ -413,6 +443,33 @@ class LocalAuthApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ok_resp.status_code, 200)
         self.assertTrue(json.loads(ok_resp.body)["reauth_required"])
         self.assertIn("Max-Age=0", ok_resp.headers.get("set-cookie", ""))
+
+    async def test_auth_totp_disable_rejects_unpersisted_login_mode_reset(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_db = Path(tmpdir) / "auth.db"
+            env = {
+                "ARBOR_AUTH_DB": str(auth_db),
+                "ARBOR_AUTH_MODE": "totp",
+                "ARBOR_TOTP_SECRET": "JBSWY3DPEHPK3PXP",
+            }
+            with patch.dict(os.environ, env, clear=False):
+                owner = local_auth.create_local_user("owner", "secret-password", role="owner")
+                authz.set_current_principal({"backend": "local", "subject": owner["user_id"], "username": "owner", "role": "owner"})
+                try:
+                    ok_req = FakeRequest(
+                        {"password": "secret-password", "totp_code": approval_mode.totp_code("JBSWY3DPEHPK3PXP")},
+                    )
+                    query_one = AsyncMock(return_value={"enabled": False, "pending_enrollment": False})
+                    with (
+                        patch.object(web_main, "query_one", query_one),
+                        patch.object(web_main, "env_file_value", return_value=""),
+                    ):
+                        response = await web_main.auth_totp_disable(owner["user_id"], ok_req)
+                finally:
+                    authz.set_current_principal(None)
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(json.loads(response.body)["error"], "failed to persist login mode reset to arbor.env")
 
 
 if __name__ == "__main__":

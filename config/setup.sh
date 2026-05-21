@@ -1,5 +1,5 @@
 #!/bin/bash
-# Arbor first-time setup: creates user, dirs, self-signed cert, local-auth bootstrap
+# Arbor first-time setup: creates user, dirs, local-auth bootstrap, and IPC key
 # Usage: setup.sh [REPO_DIR]
 #   REPO_DIR — optional path to the source repo (used to copy arbor.env template)
 
@@ -28,27 +28,6 @@ install -d -m 750 -o arbor -g arbor /var/log/arbor
 echo "==> Creating /var/lib/arbor"
 install -d -m 750 -o arbor -g arbor /var/lib/arbor
 
-# --- TLS certificate ---
-if [[ -f /etc/arbor/cert.pem ]]; then
-  echo "==> TLS certificate already exists — skipping"
-else
-  echo "==> Generating self-signed TLS certificate (valid 10 years)"
-  HOSTNAME_SAN=$(hostname -f 2>/dev/null || hostname)
-  openssl req -x509 -newkey rsa:4096 -keyout /etc/arbor/key.pem \
-    -out /etc/arbor/cert.pem -sha256 -days 3650 -nodes \
-    -subj "/CN=${HOSTNAME_SAN}" \
-    -addext "subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:${HOSTNAME_SAN}" \
-    2>/dev/null
-  chmod 600 /etc/arbor/key.pem
-  chown arbor:arbor /etc/arbor/key.pem
-  chmod 644 /etc/arbor/cert.pem
-  chown root:root /etc/arbor/cert.pem
-fi
-chmod 600 /etc/arbor/key.pem
-chown arbor:arbor /etc/arbor/key.pem
-chmod 644 /etc/arbor/cert.pem
-chown root:root /etc/arbor/cert.pem
-
 # --- env config ---
 if [[ -f /etc/arbor/arbor.env ]]; then
   echo "==> /etc/arbor/arbor.env already exists — skipping"
@@ -59,8 +38,7 @@ else
     cat > /etc/arbor/arbor.env <<'EOF'
 ARBOR_HOST=127.0.0.1
 ARBOR_PORT=8443
-ARBOR_CERT=/etc/arbor/cert.pem
-ARBOR_KEY=/etc/arbor/key.pem
+ARBOR_TLS=0
 ARBOR_ENABLE_OVERLAY_ADD=0
 ARBOR_AUTH_BACKEND=local
 # ARBOR_AUTH_MODE=cli
@@ -68,6 +46,10 @@ ARBOR_AUTH_BACKEND=local
 # ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
 # ARBOR_TOTP_ISSUER=Arbor
 # ARBOR_TOTP_ACCOUNT_NAME=arbor@my-host
+# Direct TLS on Arbor itself (optional)
+# ARBOR_TLS=1
+# ARBOR_CERT=/etc/arbor/cert.pem
+# ARBOR_KEY=/etc/arbor/key.pem
 EOF
   fi
   echo "==> Created /etc/arbor/arbor.env"

@@ -1,6 +1,6 @@
 """
-Entry point: starts uvicorn with TLS.
-Certificate paths are read from /etc/arbor/arbor.env or env vars.
+Entry point: starts uvicorn with optional TLS.
+Certificate paths are read from /etc/arbor/arbor.env or env vars when TLS is enabled.
 """
 
 import copy
@@ -14,6 +14,9 @@ from uvicorn.config import LOGGING_CONFIG
 from .approval_mode import ApprovalMode, ApprovalModeError, validate_approval_mode_config
 from .config_env import env_int, env_value
 from .ipc_auth import IPCAuthError, load_ipc_key
+
+_TLS_ENABLED_VALUES = {"1", "true", "yes", "on"}
+_TLS_DISABLED_VALUES = {"0", "false", "no", "off"}
 
 
 class _StripQueryStringFilter(logging.Filter):
@@ -53,26 +56,54 @@ def _report_approval_mode(mode: ApprovalMode) -> None:
     print("[arbor] INFO: ARBOR_APPROVAL_MODE=cli — approvals require arbor-approve in a root shell", flush=True)
 
 
+def _tls_override() -> bool | None:
+    raw = env_value("ARBOR_TLS", "").strip().lower()
+    if not raw:
+        return None
+    if raw in _TLS_ENABLED_VALUES:
+        return True
+    if raw in _TLS_DISABLED_VALUES:
+        return False
+    print(
+        f"[arbor] ERROR: invalid ARBOR_TLS={raw!r}; expected one of: "
+        "1/0, true/false, yes/no, on/off",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def run():
     host = env_value("ARBOR_HOST", "127.0.0.1")
     port = env_int("ARBOR_PORT", 8443)
-    cert = env_value("ARBOR_CERT", "/etc/arbor/cert.pem")
-    key = env_value("ARBOR_KEY", "/etc/arbor/key.pem")
-
-    tls = os.path.exists(cert) and os.path.exists(key)
-    if not tls:
-        # The bearer token would be sent in clear over plain HTTP. Require an
-        # explicit opt-in so accidental misconfiguration doesn't silently
-        # downgrade security.
-        if env_value("ARBOR_ALLOW_PLAINTEXT") != "1":
-            print(
-                f"[arbor] ERROR: TLS cert/key not found ({cert}, {key}).\n"
-                f"[arbor] Refusing to start in plain HTTP. Either provide the\n"
-                f"[arbor] certificate or set ARBOR_ALLOW_PLAINTEXT=1 for dev.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        print("[arbor] WARNING: ARBOR_ALLOW_PLAINTEXT=1 — running plain HTTP", flush=True)
+    tls_override = _tls_override()
+    cert = None
+    key = None
+    tls = False
+    if tls_override is False:
+        print("[arbor] INFO: ARBOR_TLS=0 — running plain HTTP", flush=True)
+    else:
+        cert = env_value("ARBOR_CERT", "/etc/arbor/cert.pem")
+        key = env_value("ARBOR_KEY", "/etc/arbor/key.pem")
+        tls = os.path.exists(cert) and os.path.exists(key)
+        if tls_override is True:
+            if not tls:
+                print(
+                    f"[arbor] ERROR: ARBOR_TLS=1 but TLS cert/key not found ({cert}, {key}).",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        elif not tls:
+            # Legacy behavior for existing deployments that still rely on
+            # auto-detecting cert/key presence.
+            if env_value("ARBOR_ALLOW_PLAINTEXT") != "1":
+                print(
+                    f"[arbor] ERROR: TLS cert/key not found ({cert}, {key}).\n"
+                    f"[arbor] Refusing to start in plain HTTP. Either provide the\n"
+                    f"[arbor] certificate, set ARBOR_TLS=0, or set ARBOR_ALLOW_PLAINTEXT=1.",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            print("[arbor] WARNING: ARBOR_ALLOW_PLAINTEXT=1 — running plain HTTP", flush=True)
 
     try:
         load_ipc_key()
@@ -90,8 +121,8 @@ def run():
         "arbor.main:app",
         host=host,
         port=port,
-        ssl_certfile=cert if tls else None,
-        ssl_keyfile=key if tls else None,
+        ssl_certfile=cert if tls and cert else None,
+        ssl_keyfile=key if tls and key else None,
         log_level="info",
         log_config=_log_config(),
     )
