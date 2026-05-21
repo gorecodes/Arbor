@@ -205,6 +205,19 @@ async def approval_request_create(auth: Auth, request: Request):
     return data
 
 
+@app.post("/api/approval-requests/{request_id}/approve")
+async def approval_request_approve(auth: Auth, request_id: str, request: Request):
+    body = await _json_object_body(request, allow_empty=False)
+    if isinstance(body, JSONResponse):
+        return body
+    code = str(body.get("code", "")).strip()
+    data = await query_one("approval_request_approve", {"request_id": request_id, "code": code})
+    if "error" in data:
+        status = 404 if data["error"] == "approval request not found" else 400
+        return JSONResponse(status_code=status, content=data)
+    return data
+
+
 # ---------------------------------------------------------------------------
 # emerge — REST + WebSocket endpoints
 # ---------------------------------------------------------------------------

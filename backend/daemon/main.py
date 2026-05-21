@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from arbor.action_security import action_metadata, infer_job_action
+from arbor.approval_mode import ApprovalMode, verify_totp_code, get_approval_mode
 from arbor.config_env import env_enabled
 from arbor.ipc_auth import IPCAuthError, load_ipc_key, verify_request
 
@@ -45,6 +46,7 @@ _HISTORY_TAIL_BYTES = max(
 )
 ALLOWED_COMMANDS = {
     "approval_request_create",
+    "approval_request_approve",
     "approval_request_list",
     "approval_request_show",
     "world_updates",
@@ -321,6 +323,8 @@ _db_lock = threading.Lock()
 _APPROVAL_REQUEST_TTL_SECONDS = 3600
 _APPROVAL_APPROVED_GRACE_SECONDS = 300
 _APPROVAL_MAX_PENDING_REQUESTS = 25
+_APPROVAL_TOTP_FAIL_BASE_DELAY_SECONDS = 2
+_APPROVAL_TOTP_FAIL_MAX_DELAY_SECONDS = 60
 _APPROVAL_ARG_KEYS = {"approval_request_id", "approval_token"}
 
 
@@ -394,9 +398,13 @@ def _db_init():
                     status TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL,
-                    approved_at REAL
+                    approved_at REAL,
+                    failed_attempts INTEGER NOT NULL DEFAULT 0,
+                    last_failed_at REAL
                 )
             """)
+            _db_ensure_column(conn, "approval_requests", "failed_attempts", "INTEGER NOT NULL DEFAULT 0")
+            _db_ensure_column(conn, "approval_requests", "last_failed_at", "REAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS approval_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -693,7 +701,36 @@ def _approval_request_row_to_dict(row: sqlite3.Row | None) -> dict | None:
         data.get("action_target", ""),
         data["request_id"],
     )
+    data["approval_mode"] = get_approval_mode().value
     return data
+
+
+def _approval_totp_backoff_seconds(failed_attempts: int) -> int:
+    if failed_attempts <= 1:
+        return 0
+    return min(
+        _APPROVAL_TOTP_FAIL_BASE_DELAY_SECONDS * (2 ** (failed_attempts - 2)),
+        _APPROVAL_TOTP_FAIL_MAX_DELAY_SECONDS,
+    )
+
+
+def _approval_auto_response(action_cmd: str, clean_args: dict, meta: dict[str, object]) -> dict:
+    now = time.time()
+    return {
+        "request_id": "",
+        "action_cmd": action_cmd,
+        "action_class": meta["action_class"],
+        "action_target": meta.get("action_target", ""),
+        "request_hash": _approval_request_hash(action_cmd, clean_args),
+        "args": clean_args,
+        "status": "approved",
+        "created_at": now,
+        "expires_at": now + _APPROVAL_APPROVED_GRACE_SECONDS,
+        "approved_at": now,
+        "confirmation_phrase": _approval_confirmation_phrase(str(meta.get("action_target", "")), ""),
+        "approval_mode": ApprovalMode.NONE.value,
+        "auto_approved": True,
+    }
 
 
 def _approval_request_create(action_cmd: str, args: dict | None) -> dict:
@@ -701,6 +738,8 @@ def _approval_request_create(action_cmd: str, args: dict | None) -> dict:
     meta = action_metadata(action_cmd, clean_args)
     if not meta["approval_required"]:
         return {"error": "approval is not required for this action"}
+    if get_approval_mode() is ApprovalMode.NONE:
+        return _approval_auto_response(action_cmd, clean_args, meta)
     request_id = str(uuid.uuid4())
     now = time.time()
     expires_at = now + _APPROVAL_REQUEST_TTL_SECONDS
@@ -798,7 +837,7 @@ def _approval_request_get(request_id: str) -> dict | None:
     return _approval_request_row_to_dict(row)
 
 
-def _approval_issue_token(request_id: str) -> dict:
+def _approval_issue_token(request_id: str, details: dict | None = None) -> dict:
     now = time.time()
     with _db_lock:
         with _db_conn(begin_immediate=True) as conn:
@@ -815,7 +854,9 @@ def _approval_issue_token(request_id: str) -> dict:
                 return {"error": f"approval request is not pending (status={row['status']})"}
             expires_at = max(float(row["expires_at"]), now + _APPROVAL_APPROVED_GRACE_SECONDS)
             conn.execute(
-                "UPDATE approval_requests SET status='approved', approved_at=?, expires_at=? WHERE request_id=?",
+                "UPDATE approval_requests "
+                "SET status='approved', approved_at=?, expires_at=?, failed_attempts=0, last_failed_at=NULL "
+                "WHERE request_id=?",
                 (now, expires_at, request_id),
             )
             _approval_event_log(
@@ -826,7 +867,7 @@ def _approval_issue_token(request_id: str) -> dict:
                 row["action_class"],
                 row["action_target"],
                 now,
-                {"status_from": row["status"], "status_to": "approved", "expires_at": expires_at},
+                {"status_from": row["status"], "status_to": "approved", "expires_at": expires_at, **(details or {})},
             )
     return {"request_id": request_id, "approval_token": "", "approved_at": now, "expires_at": expires_at}
 
@@ -862,10 +903,100 @@ def _approval_cancel(request_id: str) -> dict:
     return {"request_id": request_id, "status": "cancelled"}
 
 
+def _approval_request_approve(request_id: str, code: str) -> dict:
+    mode = get_approval_mode()
+    if mode is ApprovalMode.CLI:
+        return {"error": "web approval is disabled in cli mode"}
+    if mode is ApprovalMode.NONE:
+        return {"error": "approval is disabled in none mode"}
+    now = time.time()
+    with _db_lock:
+        with _db_conn(begin_immediate=True) as conn:
+            _approval_expire_stale(conn, now)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT request_id, action_cmd, action_class, action_target, status, expires_at, "
+                "failed_attempts, last_failed_at "
+                "FROM approval_requests WHERE request_id=?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                return {"error": "approval request not found"}
+            if row["status"] != "pending":
+                return {"error": f"approval request is not pending (status={row['status']})"}
+            if row["expires_at"] < now:
+                return {"error": "approval request has expired"}
+            failed_attempts = int(row["failed_attempts"] or 0)
+            last_failed_at = float(row["last_failed_at"]) if row["last_failed_at"] is not None else None
+            retry_after = 0
+            if last_failed_at is not None:
+                locked_until = last_failed_at + _approval_totp_backoff_seconds(failed_attempts)
+                if locked_until > now:
+                    retry_after = max(1, int(locked_until - now + 0.999))
+                    _approval_event_log(
+                        conn,
+                        request_id,
+                        "totp_throttled",
+                        row["action_cmd"],
+                        row["action_class"],
+                        row["action_target"],
+                        now,
+                        {"failed_attempts": failed_attempts, "retry_after": retry_after},
+                    )
+                    log.warning(
+                        "totp approval throttled request_id=%s action=%s retry_after=%ss",
+                        request_id,
+                        row["action_cmd"],
+                        retry_after,
+                    )
+                    return {"error": f"approval temporarily throttled; retry in {retry_after}s", "retry_after": retry_after}
+            if not verify_totp_code(code):
+                failed_attempts += 1
+                retry_after = _approval_totp_backoff_seconds(failed_attempts)
+                conn.execute(
+                    "UPDATE approval_requests SET failed_attempts=?, last_failed_at=? WHERE request_id=?",
+                    (failed_attempts, now, request_id),
+                )
+                _approval_event_log(
+                    conn,
+                    request_id,
+                    "totp_failed",
+                    row["action_cmd"],
+                    row["action_class"],
+                    row["action_target"],
+                    now,
+                    {"failed_attempts": failed_attempts, "retry_after": retry_after},
+                )
+                log.warning(
+                    "totp approval failed request_id=%s action=%s failed_attempts=%s retry_after=%ss",
+                    request_id,
+                    row["action_cmd"],
+                    failed_attempts,
+                    retry_after,
+                )
+                payload = {"error": "invalid TOTP code"}
+                if retry_after > 0:
+                    payload["retry_after"] = retry_after
+                return payload
+    issued = _approval_issue_token(request_id, {"method": "totp"})
+    if "error" in issued:
+        return issued
+    request = _approval_request_get(request_id)
+    return request or {"error": "approval request not found"}
+
+
 def _require_approval(action_cmd: str, args: dict) -> dict | None:
     clean_args = _canonical_approval_args(action_cmd, args)
     meta = action_metadata(action_cmd, clean_args)
     if not meta["approval_required"]:
+        return None
+    if get_approval_mode() is ApprovalMode.NONE:
+        log.warning(
+            "approval bypassed mode=none action=%s class=%s target=%s",
+            action_cmd,
+            meta["action_class"],
+            meta.get("action_target", ""),
+        )
         return None
     request_id = str(args.get("approval_request_id", "")).strip()
     if not request_id:
@@ -2874,6 +3005,18 @@ async def cmd_approval_request_create(args):
     yield await in_thread(_approval_request_create, action_cmd, action_args)
 
 
+async def cmd_approval_request_approve(args):
+    request_id = str(args.get("request_id", "")).strip()
+    if not request_id:
+        yield {"error": "request_id is required"}
+        return
+    code = str(args.get("code", "")).strip()
+    if not code:
+        yield {"error": "code is required"}
+        return
+    yield await in_thread(_approval_request_approve, request_id, code)
+
+
 async def cmd_approval_request_list(args):
     status = str(args.get("status", "pending")).strip() or "pending"
     items = await in_thread(_approval_request_list, status)
@@ -2896,6 +3039,7 @@ async def cmd_approval_request_show(args):
 
 HANDLERS = {
     "approval_request_create": cmd_approval_request_create,
+    "approval_request_approve": cmd_approval_request_approve,
     "approval_request_list":   cmd_approval_request_list,
     "approval_request_show":   cmd_approval_request_show,
     "system_status":      cmd_system_status,

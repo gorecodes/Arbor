@@ -11,6 +11,7 @@ import sys
 import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 
+from .approval_mode import ApprovalMode, ApprovalModeError, validate_approval_mode_config
 from .config_env import env_int, env_value
 from .ipc_auth import IPCAuthError, load_ipc_key
 
@@ -36,6 +37,20 @@ def _log_config():
     if access is not None:
         access.setdefault("filters", []).append("strip_query_string")
     return config
+
+
+def _report_approval_mode(mode: ApprovalMode) -> None:
+    if mode is ApprovalMode.NONE:
+        print(
+            "[arbor] WARNING: ARBOR_AUTH_MODE=none — secondary approval is disabled; "
+            "privileged operations will run without extra confirmation",
+            flush=True,
+        )
+        return
+    if mode is ApprovalMode.TOTP:
+        print("[arbor] INFO: ARBOR_AUTH_MODE=totp — approvals use a Web UI TOTP prompt", flush=True)
+        return
+    print("[arbor] INFO: ARBOR_AUTH_MODE=cli — approvals require arbor-approve in a root shell", flush=True)
 
 
 def run():
@@ -64,6 +79,12 @@ def run():
     except IPCAuthError as exc:
         print(f"[arbor] ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
+    try:
+        mode = validate_approval_mode_config()
+    except ApprovalModeError as exc:
+        print(f"[arbor] ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+    _report_approval_mode(mode)
 
     uvicorn.run(
         "arbor.main:app",
