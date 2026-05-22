@@ -1,0 +1,135 @@
+# AppArmor profile for /usr/bin/arbor-daemon
+#
+# *** UNTESTED ***
+#
+# This profile is provided as a starting point for hardening Arbor's
+# privilege daemon under AppArmor on Gentoo (USE flag apparmor on
+# sys-apps/apparmor and a kernel built with CONFIG_SECURITY_APPARMOR).
+# It has *not* been validated against a full emerge workflow yet.
+# Treat it as a draft and iterate against real installs on a test box.
+#
+# To activate (manual, opt-in):
+#   sudo cp apparmor/usr.bin.arbor-daemon /etc/apparmor.d/
+#   sudo apparmor_parser -r /etc/apparmor.d/usr.bin.arbor-daemon
+#   sudo rc-service arbor-daemon restart   # or systemctl restart arbor-daemon
+#
+# To run in complain-mode while iterating:
+#   sudo aa-complain /etc/apparmor.d/usr.bin.arbor-daemon
+# When happy:
+#   sudo aa-enforce /etc/apparmor.d/usr.bin.arbor-daemon
+
+#include <tunables/global>
+
+profile arbor-daemon /usr/bin/arbor-daemon {
+  #include <abstractions/base>
+  #include <abstractions/python>
+  #include <abstractions/openssl>
+
+  # ---- capabilities ----
+  capability chown,
+  capability dac_override,
+  capability dac_read_search,
+  capability fowner,
+  capability fsetid,
+  capability setgid,
+  capability setuid,
+  capability sys_chroot,
+  capability mknod,
+  capability kill,
+  capability sys_admin,
+  capability sys_ptrace,
+  capability setpcap,
+  capability sys_resource,
+
+  # Explicitly deny what setpriv / CapabilityBoundingSet would also drop.
+  audit deny capability net_raw,
+  audit deny capability net_admin,
+  audit deny capability sys_module,
+  audit deny capability sys_boot,
+  audit deny capability sys_time,
+  audit deny capability syslog,
+  audit deny capability bpf,
+  audit deny capability perfmon,
+
+  # ---- network ----
+  # Daemon only listens on /run/arbor/daemon.sock; no inet sockets.
+  network unix,
+  audit deny network inet,
+  audit deny network inet6,
+  audit deny network netlink,
+  audit deny network raw,
+
+  # ---- arbor own state ----
+  /usr/bin/arbor-daemon mr,
+  /usr/bin/setpriv ix,
+  /usr/lib/arbor/** mr,
+  /etc/arbor/ r,
+  /etc/arbor/arbor.env r,
+  /etc/arbor/ipc.key r,
+  /etc/arbor/totp.secret r,
+  /var/lib/arbor/ rw,
+  /var/lib/arbor/** rwk,
+  /var/log/arbor/ rw,
+  /var/log/arbor/** rw,
+  /run/arbor/ rw,
+  /run/arbor/** rwk,
+
+  # ---- Portage paths ----
+  /etc/portage/ r,
+  /etc/portage/** rw,
+  /var/db/pkg/ rw,
+  /var/db/pkg/** rwk,
+  /var/db/repos/ r,
+  /var/db/repos/** r,
+  /var/cache/distfiles/ rw,
+  /var/cache/distfiles/** rwk,
+  /var/cache/binpkgs/ rw,
+  /var/cache/binpkgs/** rwk,
+  /var/cache/edb/ rw,
+  /var/cache/edb/** rwk,
+  /var/tmp/portage/ rw,
+  /var/tmp/portage/** rwklmix,
+  /var/lib/portage/ rw,
+  /var/lib/portage/** rwk,
+
+  # ---- emerge tools the daemon execs ----
+  /usr/bin/emerge ix,
+  /usr/bin/portageq ix,
+  /usr/bin/eselect ix,
+  /usr/bin/ebuild ix,
+  /usr/bin/eclean ix,
+  /usr/bin/equery ix,
+  /usr/sbin/etc-update ix,
+  /usr/sbin/dispatch-conf ix,
+  /usr/bin/python3* ix,
+  /usr/bin/find ix,
+  /bin/sh ix,
+  /bin/bash ix,
+
+  # ---- system bits emerge needs ----
+  /proc/ r,
+  /proc/sys/kernel/random/uuid r,
+  /proc/[0-9]*/ r,
+  /proc/[0-9]*/status r,
+  /proc/[0-9]*/cmdline r,
+  /proc/[0-9]*/stat r,
+  /sys/devices/system/cpu/ r,
+  /sys/devices/system/cpu/** r,
+  /dev/null rw,
+  /dev/zero rw,
+  /dev/urandom r,
+  /dev/random r,
+  /dev/tty rw,
+  /tmp/ r,
+  /tmp/** rw,
+
+  # ---- explicit deny on sensitive paths ----
+  audit deny /home/** rwklx,
+  audit deny /root/** rwklx,
+  audit deny /etc/shadow* rwklx,
+  audit deny /etc/sudoers* rwklx,
+  audit deny /etc/ssh/ssh_host_*_key rwklx,
+  audit deny /proc/sys/kernel/core_pattern w,
+  audit deny /proc/sys/kernel/modprobe w,
+  audit deny /sys/kernel/security/** w,
+}
