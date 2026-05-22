@@ -32,8 +32,15 @@
 
   const _ROLE_RANK = { viewer: 0, operator: 1, owner: 2 }
 
-  function _hdr() {
-    return { 'Content-Type': 'application/json' }
+  function _csrfToken() {
+    const m = document.cookie.match(/(?:^|;\s*)arbor_csrf=([^;]+)/)
+    return m ? decodeURIComponent(m[1]) : ''
+  }
+
+  function _hdr(mutating) {
+    const h = { 'Content-Type': 'application/json' }
+    if (mutating) h['X-CSRF-Token'] = _csrfToken()
+    return h
   }
 
   async function _apiError(res) {
@@ -53,14 +60,14 @@
   }
 
   async function _post(path, body) {
-    const res = await fetch(BASE + path, { method: 'POST', headers: _hdr(), body: JSON.stringify(body) })
+    const res = await fetch(BASE + path, { method: 'POST', headers: _hdr(true), body: JSON.stringify(body) })
     if (res.status === 401) throw new Error('Unauthorized')
     if (!res.ok) await _apiError(res)
     return res.json()
   }
 
   async function _del(path, body) {
-    const opts = { method: 'DELETE', headers: _hdr() }
+    const opts = { method: 'DELETE', headers: _hdr(true) }
     if (body !== undefined) opts.body = JSON.stringify(body)
     const res = await fetch(BASE + path, opts)
     if (res.status === 401) throw new Error('Unauthorized')
@@ -161,7 +168,7 @@
     const ws = new WebSocket(_wsProto() + '://' + location.host + path)
     let done = false
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'auth' }))
+      ws.send(JSON.stringify({ type: 'auth', csrf: _csrfToken() }))
     }
     ws.onmessage = e => { const m = JSON.parse(e.data); if (m.done) done = true; onMsg(m) }
     ws.onerror   = () => { if (!done) { done = true; onMsg({ done: true, returncode: -1, error: 'WebSocket error' }) } }

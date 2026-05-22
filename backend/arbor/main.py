@@ -19,6 +19,14 @@ from .approval_mode import LOGIN_AUTH_MODE_ENV, TOTP_SECRET_ENV, TOTP_SECRET_FIL
 from .auth import auth_backend, require_auth, resolve_ws_principal
 from .authorization import AuthorizationError, current_principal, require_min_role, set_current_principal
 from .config_env import env_enabled, env_file_value, env_list
+from .csrf import (
+    CSRF_HEADER_NAME,
+    clear_csrf_cookie,
+    csrf_cookie_from_request,
+    generate_csrf_token,
+    set_csrf_cookie,
+    verify_csrf_tokens,
+)
 from .daemon_client import query, query_all, query_one
 from .emerge_log import compile_time_by_category
 from .local_auth import dummy_password_hash, find_user_by_username, has_local_users, mark_login_success, record_login_failure, verify_password
@@ -58,12 +66,34 @@ _SECURITY_HEADERS = {
 }
 
 
+_HSTS_VALUE = "max-age=63072000; includeSubDomains"
+
+
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     for header, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(header, value)
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", _HSTS_VALUE)
     return response
+
+
+# Mutating methods on these paths skip the CSRF check. Login cannot have a
+# cookie yet, and the static asset routes are never written to.
+_CSRF_MUTATING_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+_CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login"})
+
+
+@app.middleware("http")
+async def csrf_protect(request: Request, call_next):
+    if request.method in _CSRF_MUTATING_METHODS and request.url.path not in _CSRF_EXEMPT_PATHS:
+        cookie_token = csrf_cookie_from_request(request)
+        header_token = request.headers.get(CSRF_HEADER_NAME, "")
+        if not verify_csrf_tokens(cookie_token, header_token):
+            return JSONResponse(status_code=403, content={"error": "csrf token missing or invalid"})
+    return await call_next(request)
+
 
 def _default_loopback_origins() -> list[str]:
     origins: list[str] = []
@@ -84,7 +114,7 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", CSRF_HEADER_NAME],
 )
 
 Auth = Annotated[str, Depends(require_auth)]
@@ -216,6 +246,7 @@ async def auth_login(request: Request):
         },
     )
     set_session_cookie(response, session["session_id"])
+    set_csrf_cookie(response, generate_csrf_token())
     return response
 
 
@@ -225,6 +256,7 @@ async def auth_logout(request: Request):
     revoke_session(session_id, reason="logout")
     response = JSONResponse(status_code=200, content={"ok": True})
     clear_session_cookie(response)
+    clear_csrf_cookie(response)
     return response
 
 
@@ -278,6 +310,7 @@ async def auth_totp_confirm(auth: Auth, request: Request):
     revoke_all_sessions(reason="totp_enabled")
     response = JSONResponse(status_code=200, content={**data, "reauth_required": True})
     clear_session_cookie(response)
+    clear_csrf_cookie(response)
     return response
 
 
@@ -316,6 +349,7 @@ async def auth_totp_disable(auth: Auth, request: Request):
     revoke_all_sessions(reason="totp_disabled")
     response = JSONResponse(status_code=200, content={**data, "reauth_required": True})
     clear_session_cookie(response)
+    clear_csrf_cookie(response)
     return response
 
 @app.get("/api/status")
@@ -466,9 +500,16 @@ async def _ws_fail(websocket: WebSocket, code: int, error: str):
         pass
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "ip6-localhost"}
+_BIND_IS_LOOPBACK = os.environ.get("ARBOR_HOST", "127.0.0.1").strip().lower() in _LOOPBACK_HOSTS
+
+
 def _ws_origin_allowed(origin: str | None) -> bool:
     if not origin:
-        return True
+        # Non-browser clients (curl, native tooling) omit Origin. Allow that
+        # only when bound to loopback; on any LAN/Internet bind, require an
+        # explicit Origin in the CORS allowlist.
+        return _BIND_IS_LOOPBACK
     return origin in _cors_origins
 
 
