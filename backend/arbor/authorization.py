@@ -130,6 +130,31 @@ def require_recent_step_up(
         raise StepUpRequiredError("step_up_required")
 
 
+def require_recent_step_up_unless_cli_mode(
+    max_age_seconds: float = DEFAULT_STEP_UP_MAX_AGE_SECONDS,
+    *,
+    principal: Mapping[str, Any] | None = None,
+) -> None:
+    """Enforce step-up unless the system is in ARBOR_APPROVAL_MODE=cli.
+
+    In cli mode the secondary approval is the arbor-approve confirmation
+    on a root shell, which is itself a stronger step-up than re-typing a
+    password in the browser. Adding password step-up on top would just
+    burn UX without adding security.
+
+    In any other mode (currently only 'none' with explicit ack) we
+    require a recent step-up: a session cookie alone is not enough to
+    launch mutating actions.
+    """
+    # Local import: approval_mode imports config_env, not this module,
+    # so there is no cycle, but it keeps the dependency direction tidy.
+    from .approval_mode import ApprovalMode, effective_approval_mode
+
+    if effective_approval_mode() is ApprovalMode.CLI:
+        return
+    require_recent_step_up(max_age_seconds, principal=principal)
+
+
 def authorize_daemon_command(
     cmd: str,
     args: Mapping[str, Any] | None = None,
