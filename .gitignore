@@ -15,7 +15,6 @@ node_modules/
 CODE_REVIEW.md
 EMERGE_OPTIONS.md
 ARBOR_AUDIT_REPORT.md
-sync_installed_dev.sh
 purge_installed_dev.sh
 security_fixes
 audit v2
