@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 import logging
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -1260,11 +1260,62 @@ async def _terminate_subprocess(proc, timeout: float = 5.0):
         await proc.wait()
 
 
+_REPLAY_WINDOW_SECONDS = 30.0
+_REPLAY_CACHE_TTL_SECONDS = 300.0
+_REPLAY_CACHE_MAX_SIZE = 4096
+
+
+class _ReplayGuard:
+    """Bounded LRU of recently-seen IPC nonces with timestamp window check."""
+
+    def __init__(
+        self,
+        *,
+        max_size: int = _REPLAY_CACHE_MAX_SIZE,
+        ttl: float = _REPLAY_CACHE_TTL_SECONDS,
+        window: float = _REPLAY_WINDOW_SECONDS,
+    ) -> None:
+        self._max_size = max_size
+        self._ttl = ttl
+        self._window = window
+        self._seen: "OrderedDict[str, float]" = OrderedDict()
+        self._lock = asyncio.Lock()
+
+    async def check_and_record(self, nonce: str, ts: float) -> tuple[bool, str]:
+        now = time.time()
+        if abs(now - ts) > self._window:
+            return False, "stale or skewed IPC timestamp"
+        async with self._lock:
+            self._evict_expired(now)
+            if nonce in self._seen:
+                return False, "replayed IPC nonce"
+            self._seen[nonce] = now + self._ttl
+            while len(self._seen) > self._max_size:
+                self._seen.popitem(last=False)
+        return True, ""
+
+    def _evict_expired(self, now: float) -> None:
+        while self._seen:
+            oldest_nonce = next(iter(self._seen))
+            if self._seen[oldest_nonce] > now:
+                break
+            self._seen.popitem(last=False)
+
+
+_replay_guard = _ReplayGuard()
+
+
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     try:
         raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
         request = json.loads(raw.decode())
-        cmd, args, _nonce, _ts = verify_request(request)
+        cmd, args, nonce, ts = verify_request(request)
+
+        ok, reason = await _replay_guard.check_and_record(nonce, ts)
+        if not ok:
+            log.warning("ipc rejected: %s (cmd=%s)", reason, cmd)
+            await send(writer, {"error": reason})
+            return
 
         if cmd not in ALLOWED_COMMANDS:
             await send(writer, {"error": f"command '{cmd}' not allowed"})
