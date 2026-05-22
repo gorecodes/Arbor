@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .action_security import PRETEND, READONLY, classify_action
 from .approval_mode import LOGIN_AUTH_MODE_ENV, TOTP_SECRET_ENV, TOTP_SECRET_FILE_ENV, ApprovalMode, login_totp_required, verify_totp_code
 from .auth import auth_backend, require_auth, resolve_ws_principal
 from .authorization import (
@@ -23,6 +24,7 @@ from .authorization import (
     current_principal,
     require_min_role,
     require_recent_step_up,
+    require_recent_step_up_unless_cli_mode,
     set_current_principal,
 )
 from .config_env import env_enabled, env_file_value, env_list
@@ -270,6 +272,16 @@ async def auth_logout(request: Request):
     clear_session_cookie(response)
     clear_csrf_cookie(response)
     return response
+
+
+@app.post("/api/auth/step-up/ensure")
+async def auth_step_up_ensure(auth: Auth):
+    """Preflight: returns 200 if step-up is fresh (or not required at all
+    in cli mode), 401 step_up_required otherwise. Used by the frontend
+    before opening a mutating WebSocket so the password prompt can be
+    handled with the same modal as REST."""
+    require_recent_step_up_unless_cli_mode()
+    return {"ok": True}
 
 
 @app.post("/api/auth/step-up")
@@ -584,8 +596,27 @@ async def _ws_require_auth(websocket: WebSocket) -> bool:
     return True
 
 
+async def _ws_step_up_if_mutating(websocket: WebSocket, daemon_cmd: str, args: dict | None = None) -> bool:
+    """Run mode-aware step-up if the daemon command would mutate state.
+
+    Returns True if the connection may proceed, False if it was failed
+    (the caller must return immediately).
+    """
+    action_class = classify_action(daemon_cmd, args)
+    if action_class in (READONLY, PRETEND):
+        return True
+    try:
+        require_recent_step_up_unless_cli_mode()
+    except StepUpRequiredError:
+        await _ws_fail(websocket, 4401, "step_up_required")
+        return False
+    return True
+
+
 async def _ws_emerge(websocket: WebSocket, cmd: str, atom: str, extra_args: dict | None = None):
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, cmd, {"atom": atom, **(extra_args or {})}):
         return
     if not atom:
         await _ws_fail(websocket, 4400, "missing atom")
@@ -612,6 +643,8 @@ async def _ws_emerge(websocket: WebSocket, cmd: str, atom: str, extra_args: dict
 async def _ws_job_cmd(websocket: WebSocket, daemon_cmd: str, args: dict):
     """Start (or resume) a background job and stream its output."""
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, daemon_cmd, args):
         return
     try:
         job_id = None
@@ -822,6 +855,7 @@ async def job_status(auth: Auth, job_id: str):
 @app.post("/api/jobs/{job_id}/cancel")
 async def job_cancel(auth: Auth, job_id: str, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -885,6 +919,7 @@ async def history_log(auth: Auth, job_id: str):
 @app.delete("/api/history/{job_id}")
 async def history_delete(auth: Auth, job_id: str, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -905,6 +940,7 @@ async def history_delete(auth: Auth, job_id: str, request: Request):
 @app.post("/api/history/purge")
 async def history_purge(auth: Auth, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -949,6 +985,7 @@ async def analytics_compile_time(auth: Auth):
 @app.post("/api/emerge/etc-update/resolve")
 async def etc_update_resolve(auth: Auth, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -987,7 +1024,7 @@ async def overlay_add(auth: Auth, request: Request):
     require_min_role("owner")
     if not _overlay_add_enabled():
         return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
-    require_recent_step_up()
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -1012,6 +1049,7 @@ async def overlay_add(auth: Auth, request: Request):
 @app.delete("/api/overlays/{name}")
 async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Query(default=0)):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -1036,6 +1074,8 @@ async def ws_overlay_sync(
     approval_token: str = Query(default=""),
 ):
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, "overlay_sync", {"name": name}):
         return
     try:
         job_id = None
