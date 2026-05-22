@@ -14,39 +14,30 @@ Privileged operations use a separate control, `ARBOR_APPROVAL_MODE`, so login re
 
 The mode applies to install, uninstall, world update, sync, preserved-rebuild, depclean, overlay changes, and other root-backed admin operations.
 
-Minimal `/etc/arbor/arbor.env` examples:
+Two independent knobs control security after installation:
+
+- **`ARBOR_AUTH_MODE`** — what is required *at login* (password only, or password + TOTP)
+- **`ARBOR_APPROVAL_MODE`** — what is required *per privileged action* after login
+
+They are independent: you can have TOTP at login with CLI approval, or no TOTP with step-up re-auth, or any combination.
+
+**Important:** `ARBOR_AUTH_MODE=totp` requires that TOTP has already been enabled from the **Security page** in the web UI, which generates `/etc/arbor/totp.secret` automatically. Do not add `ARBOR_AUTH_MODE=totp` to the config before doing this or Arbor will refuse to start.
+
+Common `/etc/arbor/arbor.env` setups:
 
 ```bash
-# local-first HTTP on loopback (bootstrap default)
+# Default: password login, root-shell approval for privileged actions
 ARBOR_TLS=0
+# (ARBOR_APPROVAL_MODE defaults to cli — no extra lines needed)
 
-# password login + CLI approval for privileged operations (default)
-ARBOR_APPROVAL_MODE=cli
-
-# direct HTTPS on Arbor itself (optional)
-# ARBOR_TLS=1
-# ARBOR_CERT=/etc/arbor/cert.pem
-# ARBOR_KEY=/etc/arbor/key.pem
-#
-# password + TOTP at login, no per-action approval prompt — auto-approve
-# must be acknowledged explicitly because it removes the second gate
-ARBOR_AUTH_MODE=totp
+# Step-up re-auth in the browser instead of root-shell arbor-approve.
+# The browser prompts for the password before every mutating action.
 ARBOR_APPROVAL_MODE=none
 ARBOR_ALLOW_AUTO_APPROVAL=1
-ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
 
-# password + TOTP at login, plus CLI approval for privileged operations
+# Add TOTP at login on top of either of the above:
 ARBOR_AUTH_MODE=totp
-ARBOR_APPROVAL_MODE=cli
-ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
-
-# Optional
-# ARBOR_TOTP_ISSUER=Arbor
-# ARBOR_TOTP_ACCOUNT_NAME=arbor@my-host
-
-# no per-action approval (refused at boot without the explicit ack)
-ARBOR_APPROVAL_MODE=none
-ARBOR_ALLOW_AUTO_APPROVAL=1
+ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret  # created by the Security page
 ```
 
 ### Login-time TOTP (2FA)
