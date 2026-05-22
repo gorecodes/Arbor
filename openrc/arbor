@@ -1,8 +1,12 @@
 #!/sbin/openrc-run
 
 description="Arbor web UI"
-command="/usr/bin/arbor"
-command_user="arbor"
+
+# Hardening: drop to the unprivileged arbor user and lock no_new_privs so
+# the web process cannot regain capabilities by exec'ing a setuid binary.
+command="/usr/bin/setpriv"
+command_args="--reuid=arbor --regid=arbor --init-groups --no-new-privs -- /usr/bin/arbor"
+
 command_background=true
 supervisor="supervise-daemon"
 respawn_delay=5
@@ -26,4 +30,8 @@ start_pre() {
     touch /var/log/arbor/web.log
     chown arbor:arbor /var/log/arbor/web.log
     chmod 0640 /var/log/arbor/web.log
+    if [ ! -x /usr/bin/setpriv ]; then
+        eerror "setpriv not found (sys-apps/util-linux). Cannot apply web hardening."
+        return 1
+    fi
 }

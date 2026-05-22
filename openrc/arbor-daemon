@@ -1,7 +1,25 @@
 #!/sbin/openrc-run
 
 description="Arbor privilege daemon"
-command="/usr/bin/arbor-daemon"
+
+# Hardening: launch arbor-daemon under setpriv with:
+#   --no-new-privs   prevent any exec from regaining privileges
+#   --bounding-set   drop kernel capabilities the daemon does not need.
+#
+# Kept (used by Portage during emerge): CHOWN, DAC_OVERRIDE, DAC_READ_SEARCH,
+# FOWNER, FSETID, SETGID, SETUID, SYS_CHROOT, MKNOD, KILL, SYS_ADMIN
+# (FEATURES=sandbox uses mount namespaces), SYS_PTRACE (sandbox ptrace),
+# SETPCAP (drop privs on forked children), SYS_RESOURCE.
+command="/usr/bin/setpriv"
+command_args="--no-new-privs \
+--bounding-set=-cap_audit_control,-cap_audit_read,-cap_audit_write,\
+-cap_block_suspend,-cap_bpf,-cap_lease,-cap_linux_immutable,\
+-cap_mac_admin,-cap_mac_override,-cap_net_admin,-cap_net_bind_service,\
+-cap_net_broadcast,-cap_net_raw,-cap_perfmon,-cap_setfcap,\
+-cap_sys_boot,-cap_sys_module,-cap_sys_rawio,-cap_sys_time,\
+-cap_syslog,-cap_wake_alarm \
+-- /usr/bin/arbor-daemon"
+
 command_background=true
 supervisor="supervise-daemon"
 respawn_delay=5
@@ -24,4 +42,8 @@ start_pre() {
     touch /var/log/arbor/daemon.log
     chown root:arbor /var/log/arbor/daemon.log
     chmod 0640 /var/log/arbor/daemon.log
+    if [ ! -x /usr/bin/setpriv ]; then
+        eerror "setpriv not found (sys-apps/util-linux). Cannot apply daemon hardening."
+        return 1
+    fi
 }
