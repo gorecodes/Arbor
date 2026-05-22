@@ -11,7 +11,7 @@ node_modules/
 # GitHub Copilot
 .claude/
 .copilot/
-.github/
+.github/copilot-instructions.md
 CODE_REVIEW.md
 EMERGE_OPTIONS.md
 ARBOR_AUDIT_REPORT.md
