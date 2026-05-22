@@ -1,0 +1,34 @@
+# /etc/logrotate.d/arbor — installed by config/setup.sh
+#
+# Both arbor.service / arbor-daemon.service append to plain files under
+# /var/log/arbor. Without rotation those grow unbounded; a long
+# emerge --sync history can hit hundreds of MB. Daily rotation with
+# size threshold + a small retention window keeps things bounded
+# without losing recent forensic data.
+
+/var/log/arbor/*.log {
+    daily
+    rotate 14
+    size 10M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0640 arbor arbor
+    sharedscripts
+    # Both supervisors handle SIGHUP politely. systemd's reload-or-restart
+    # is a no-op for Type=simple services without ExecReload, so it falls
+    # back to restart (acceptable: the daemon is idle-recoverable).
+    postrotate
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet arbor.service; then
+            systemctl reload-or-restart arbor.service >/dev/null 2>&1 || true
+        elif command -v rc-service >/dev/null 2>&1 && rc-service arbor status >/dev/null 2>&1; then
+            rc-service arbor restart >/dev/null 2>&1 || true
+        fi
+        if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet arbor-daemon.service; then
+            systemctl reload-or-restart arbor-daemon.service >/dev/null 2>&1 || true
+        elif command -v rc-service >/dev/null 2>&1 && rc-service arbor-daemon status >/dev/null 2>&1; then
+            rc-service arbor-daemon restart >/dev/null 2>&1 || true
+        fi
+    endscript
+}
