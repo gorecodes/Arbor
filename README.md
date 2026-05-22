@@ -6,6 +6,24 @@ A local-first web UI for managing Portage from a browser on the same machine.
 
 Designed for Gentoo systems in a local environment. Not intended to be exposed to the internet.
 
+## Table of contents
+
+- [Prerequisites](#prerequisites)
+- [Install](#install)
+- [First run](#first-run)
+- [Update](#update)
+- [Uninstall](#uninstall)
+- [Authentication and approval](#authentication-and-approval)
+- [Local users and roles](#local-users-and-roles)
+- [LAN access](#lan-access)
+- [Configuration reference](#configuration)
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [Architecture](#architecture)
+- [Security hardening](#security-hardening)
+- [Development](#development)
+- [Logs](#logs)
+
 ## Authentication and approval
 
 **Out of the box after a clean install:** password-only login, and privileged actions (install, uninstall, sync, etc.) require a password re-prompt in the browser (step-up re-auth) before they start. No root shell needed.
