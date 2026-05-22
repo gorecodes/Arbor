@@ -6,6 +6,201 @@ A local-first web UI for managing Portage from a browser on the same machine.
 
 Designed for Gentoo systems in a local environment. Not intended to be exposed to the internet.
 
+## Table of contents
+
+- [Prerequisites](#prerequisites)
+- [Install](#install)
+- [First run](#first-run)
+- [Start at boot](#start-at-boot)
+- [Update](#update)
+- [Uninstall](#uninstall)
+- [Authentication and approval](#authentication-and-approval)
+- [Local users and roles](#local-users-and-roles)
+- [LAN access](#lan-access)
+- [Configuration](#configuration)
+- [Features](#features)
+- [Screenshots](#screenshots)
+- [Architecture](#architecture)
+- [Security hardening](#security-hardening)
+- [Development](#development)
+- [Logs](#logs)
+
+## Prerequisites
+
+- Gentoo Linux
+- Python 3.11+
+- `openssl`
+- OpenRC or systemd
+
+## Install
+
+### Via Portage overlay
+
+```bash
+eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
+emaint sync -r arbor-overlay
+echo 'app-admin/arbor openrc' >> /etc/portage/package.use/arbor   # or: systemd
+emerge app-admin/arbor
+bash /usr/share/arbor/setup.sh
+```
+
+After every package upgrade, run setup again:
+
+```bash
+bash /usr/share/arbor/setup.sh
+```
+
+This keeps `/etc/arbor` assets and `/var/lib/arbor` permissions aligned with the current release (including local-auth DB ownership).
+
+By default this installs the stable overlay version. If you want the live ebuild that tracks `main`:
+
+```bash
+echo '=app-admin/arbor-9999 **' >> /etc/portage/package.accept_keywords/arbor
+emerge =app-admin/arbor-9999
+bash /usr/share/arbor/setup.sh
+```
+
+### Via install script
+
+```bash
+git clone https://github.com/gorecodes/Arbor
+cd Arbor
+sudo bash install.sh
+```
+
+The installer will:
+
+1. Install the backend to `/usr/lib/arbor/`
+2. Create a Python virtual environment with Arbor installed into it
+3. Install the Alpine frontend to `/usr/lib/arbor/frontend/`
+4. Create `/usr/bin/arbor` and `/usr/bin/arbor-daemon`
+5. Install OpenRC or systemd service files, depending on the detected init system
+6. Create the `arbor` system user
+7. Enforce local auth mode in `/etc/arbor/arbor.env` (`ARBOR_AUTH_BACKEND=local`)
+8. Create `/etc/arbor/arbor.env` if it does not already exist
+9. Default Arbor to local-first plain HTTP (`ARBOR_TLS=0`)
+10. Generate an IPC key in `/etc/arbor/ipc.key` if one does not already exist
+
+After script-based upgrades, run setup again to refresh runtime permissions:
+
+```bash
+sudo bash config/setup.sh
+```
+
+## First run
+
+**OpenRC:**
+```bash
+rc-service arbor-daemon start
+rc-service arbor start
+```
+
+**systemd:**
+```bash
+systemctl start arbor-daemon arbor
+```
+
+Open `http://localhost:8443` or `http://127.0.0.1:8443` in your browser and sign in with the local owner username/password created during setup.
+
+For a first install, keep Arbor on localhost until you are comfortable with the model: an authenticated local session unlocks root-backed package actions, and LAN exposure is still a deliberate tradeoff rather than the default.
+
+## Start at boot
+
+**OpenRC:**
+```bash
+rc-update add arbor-daemon default
+rc-update add arbor default
+```
+
+**systemd:**
+```bash
+systemctl enable arbor-daemon arbor
+```
+
+## Update
+
+### Via Portage overlay
+
+```bash
+emaint sync -r arbor-overlay
+emerge app-admin/arbor
+bash /usr/share/arbor/setup.sh
+```
+
+For the live ebuild instead:
+
+```bash
+emaint sync -r arbor-overlay
+emerge =app-admin/arbor-9999
+bash /usr/share/arbor/setup.sh
+```
+
+Then restart the services:
+
+- **OpenRC:** `rc-service arbor-daemon restart && rc-service arbor restart`
+- **systemd:** `systemctl restart arbor-daemon arbor`
+
+### Via install script
+
+```bash
+git pull
+sudo bash install.sh
+```
+
+Then restart the services:
+
+- **OpenRC:** `rc-service arbor-daemon restart && rc-service arbor restart`
+- **systemd:** `systemctl restart arbor-daemon arbor`
+
+## Uninstall
+
+### Via Portage overlay
+
+```bash
+emerge --unmerge app-admin/arbor
+```
+
+Then stop and disable the services:
+
+- **OpenRC:** `rc-service arbor stop && rc-service arbor-daemon stop && rc-update del arbor default && rc-update del arbor-daemon default`
+- **systemd:** `systemctl stop arbor arbor-daemon && systemctl disable arbor-daemon arbor`
+
+```bash
+userdel arbor
+```
+
+### If installed with `install.sh`
+
+**OpenRC:**
+```bash
+rc-service arbor stop
+rc-service arbor-daemon stop
+rc-update del arbor default
+rc-update del arbor-daemon default
+rm -f /etc/init.d/arbor /etc/init.d/arbor-daemon
+```
+
+**systemd:**
+```bash
+systemctl stop arbor arbor-daemon
+systemctl disable arbor arbor-daemon
+rm -f /usr/lib/systemd/system/arbor.service /usr/lib/systemd/system/arbor-daemon.service
+systemctl daemon-reload
+```
+
+```bash
+rm -f /usr/bin/arbor /usr/bin/arbor-daemon /usr/bin/arbor-approve \
+      /usr/local/bin/arbor /usr/local/bin/arbor-daemon /usr/local/bin/arbor-approve
+rm -rf /usr/lib/arbor
+userdel arbor
+```
+
+Configuration, runtime state, logs, and the persisted SQLite job history are not removed automatically:
+
+```bash
+rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
+```
+
 ## Authentication and approval
 
 **Out of the box after a clean install:** password-only login, and privileged actions (install, uninstall, sync, etc.) require a password re-prompt in the browser (step-up re-auth) before they start. No root shell needed.
@@ -77,284 +272,6 @@ This is the original shell-first model.
 3. On a root shell, run `arbor-approve approve <request_id>`.
 4. The browser notices the approval and starts the action automatically.
 
-If you answer **No** in `arbor-approve`, the request is cancelled, the frontend unlocks, and you can retry without reloading the page.
-
-This means:
-
-- the browser can **request** dangerous actions, but it does not directly self-authorize them
-- the approval decision happens in a **root shell**
-- refreshing the UI does **not** lose a pending approval request; Arbor restores it and reopens the relevant page
-
-#### `none`
-
-In `none` mode, Arbor skips the extra approval step entirely and starts privileged actions immediately after the authenticated browser request.
-
-This exists for fully trusted environments only. Arbor logs a startup warning when `ARBOR_APPROVAL_MODE=none` is enabled.
-
-## Features
-
-- **Local auth with roles** — local users with `owner`, `operator`, and `viewer` roles
-- **Optional TOTP at login** — require a 6-digit TOTP code during sign-in when `ARBOR_AUTH_MODE=totp`
-- **Dashboard** — summary cards, recent job activity, compile time by category, source/binary mix, keyword posture, top enabled USE flags, and multi-slot package summaries
-- **Installed packages** — filter installed packages, open package details, inspect metadata, USE state, and runtime dependencies
-- **Search packages** — search the Portage tree and jump to the selected package
-- **USE flags** — inspect global USE state, package-specific overrides, installed build state, and mismatch indicators
-- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and require approval before the real root action starts
-- **Autounmask flow** — for masked install targets, Arbor can write accepted keywords to `/etc/portage/package.accept_keywords`
-- **etc-update review** — after successful installs, pending `._cfg*` files can be reviewed and resolved in the UI
-- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with approval on privileged steps
-- **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with explicit danger acknowledgement plus approval
-- **Jobs** — view active jobs, reopen live output, browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`), and surface recovered orphaned/unknown jobs after daemon restart
-
-## Screenshots
-
-### Dashboard
-
-<img src="https://i.imgur.com/n2h8c4B.png" alt="Arbor dashboard" width="900">
-
-### Installed packages
-
-<img src="https://i.imgur.com/67lOVIN.png" alt="Arbor installed packages list" width="900">
-
-<img src="https://i.imgur.com/yS2qw6s.png" alt="Arbor package dependency view" width="900">
-
-### USE flags
-
-<img src="https://i.imgur.com/YbyPToC.png" alt="Arbor USE flags view" width="900">
-
-### Install / Uninstall
-
-<img src="https://i.imgur.com/H5ix75g.png" alt="Arbor install flow" width="900">
-
-### Maintenance
-
-<img src="https://i.imgur.com/De6G4ng.png" alt="Arbor maintenance view" width="900">
-
-## Architecture
-
-Two processes run with separate privileges:
-
-- **`arbor-daemon`** (root) — performs Portage operations, tracks long-running jobs, and listens on `/run/arbor/daemon.sock`
-- **`arbor`** (unprivileged `arbor` user) — FastAPI/uvicorn web server, serves the frontend, and proxies requests to the daemon
-
-The frontend is a no-build Alpine.js app in `frontend/alpine/`.
-That directory is the canonical UI source and the one served in development and install-script deployments; there is no separate frontend build step to run for normal development.
-
-## Security hardening
-
-Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over plain HTTP on port `8443`, and it is **not intended for direct internet exposure**. The recommended remote-access pattern is reverse-proxy with TLS termination (see [LAN access](#lan-access)) on a private network or VPN.
-
-### Trust model
-
-- Treat an authenticated Arbor session as **root-equivalent intent**: once logged in, the UI can request root-backed package actions (subject to approval mode and role checks).
-- In `cli` mode, root-backed actions are intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
-- `none` mode removes the secondary approval gate entirely. It is refused at startup unless `ARBOR_ALLOW_AUTO_APPROVAL=1` is set, so the trade-off is always explicit.
-- TOTP at login is a convenience tradeoff for trusted local/LAN use. It adds a second factor in the browser, but it does **not** make Arbor safe to expose on the open internet — a valid session plus the shared TOTP secret is not the same as a per-user, phishing-resistant auth design.
-
-### Web edge
-
-- **CSRF**: every state-changing request (`POST`, `PUT`, `DELETE`, `PATCH`) requires a matching `X-CSRF-Token` header that echoes the `arbor_csrf` cookie. The cookie is set at login, rotated on logout/TOTP changes, and verified by middleware before the handler runs. The first WebSocket auth frame must include the same token. The login endpoint itself is the only exemption.
-- **Cookies**: both `arbor_session` (HttpOnly) and `arbor_csrf` are `Secure` and `SameSite=Strict`. Cross-site navigations no longer carry the session, which closes most CSRF vectors at the browser level.
-- **HSTS**: emitted as `Strict-Transport-Security: max-age=63072000; includeSubDomains` when the request is served over HTTPS (including via a reverse proxy that sets `X-Forwarded-Proto: https`).
-- **TLS bind enforcement**: a non-loopback bind (`ARBOR_HOST` other than `127.0.0.1`/`::1`/`localhost`) requires TLS to be active. Arbor refuses to start in plain HTTP on a public interface. `ARBOR_ALLOW_PLAINTEXT=1` is honored only on loopback.
-- **WebSocket origin**: a missing `Origin` header is accepted only when bound to loopback. On any public bind, the connecting `Origin` must be in `ARBOR_CORS_ORIGINS`.
-- **Security response headers**: a strict CSP (`script-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. `/docs`, `/redoc`, and `/openapi.json` are disabled.
-
-### IPC and daemon
-
-- **Authenticated channel**: web → daemon over `/run/arbor/daemon.sock`, signed with an HMAC-SHA256 key in `/etc/arbor/ipc.key`.
-- **Protocol v2**: every signed payload now includes a 16-byte nonce and a unix timestamp. The daemon enforces freshness (`|now − ts| ≤ 30s`) and rejects replays via a bounded LRU nonce cache (4096 entries, 5-minute TTL). Captured frames cannot be re-injected, even by a local attacker with read access to the socket.
-- **Peer credential check** (`SO_PEERCRED`): the daemon refuses any connection whose peer uid is not in the allowlist. Default: `uid("arbor")`. Override with `ARBOR_IPC_ALLOWED_UIDS` (comma-separated uids) for atypical setups.
-- **Boot guards**: the daemon (and web) refuse to start with `ARBOR_APPROVAL_MODE=totp` (legacy, removed) and with `ARBOR_APPROVAL_MODE=none` unless the explicit ack flag is set. `ARBOR_TOTP_SECRET` in the process environment is also refused because it leaks via `/proc/<pid>/environ`; use `ARBOR_TOTP_SECRET_FILE` (default `/etc/arbor/totp.secret`, mode `0600`).
-
-### Step-up re-auth
-
-- Every state-changing REST endpoint (`POST`, `PUT`, `DELETE`, `PATCH`) and every mutating WebSocket command requires a fresh password confirmation within the last 120 seconds when `ARBOR_APPROVAL_MODE` is not `cli`. A stolen session cookie alone is not enough to launch privileged actions. The frontend handles the re-prompt transparently via a modal; on success the original request is retried automatically. Step-up is a no-op in `cli` mode, where the root-shell approval already acts as the second gate.
-
-### Process sandboxing
-
-Both services apply privilege reduction at exec time. The mechanism depends on what is available:
-
-- **`arbor-daemon`** keeps only the capabilities Portage genuinely needs (`CHOWN`, `DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER`, `FSETID`, `SETGID`, `SETUID`, `SYS_CHROOT`, `MKNOD`, `KILL`, `SYS_ADMIN` for sandbox mount namespaces, `SYS_PTRACE`, `SETPCAP`, `SYS_RESOURCE`) and drops everything else from the bounding set. A RCE in the daemon cannot load kernel modules, open raw sockets to scan the LAN, mess with the clock, reconfigure audit, or exec a setuid helper to climb back to full root.
-- **`arbor`** (web) always runs as `uid:gid arbor:arbor`. If `setpriv` is present, `no_new_privs` is also applied.
-
-On **systemd** the hardening is unconditional (`NoNewPrivileges=` and `CapabilityBoundingSet=` in the unit files). On **OpenRC** the init scripts use `setpriv` from `sys-apps/util-linux` when available. If `setpriv` is not installed (it requires `USE=setpriv` on Gentoo — the flag is not always set by default), the services start without the capability bounding set and log a warning. To enable full hardening:
-
-```bash
-USE=setpriv emerge sys-apps/util-linux
-```
-
-#### Optional AppArmor profile (untested)
-
-Two draft profiles are shipped in `apparmor/usr.bin.arbor-daemon` and `apparmor/usr.bin.arbor`. They restrict the filesystem and capabilities reachable from each process — `arbor-daemon` to Portage paths only, `arbor` to `/var/lib/arbor` and `/var/log/arbor` plus the IPC socket. They are **not enabled by default** and have **not been tested end-to-end against a full emerge workflow**. Treat them as a starting draft for hardening, not as a guarantee.
-
-To try them on a test box (Gentoo with the `apparmor` USE flag and kernel support for `CONFIG_SECURITY_APPARMOR`):
-
-```bash
-sudo cp apparmor/usr.bin.arbor-daemon /etc/apparmor.d/
-sudo cp apparmor/usr.bin.arbor        /etc/apparmor.d/
-sudo apparmor_parser -r /etc/apparmor.d/usr.bin.arbor-daemon
-sudo apparmor_parser -r /etc/apparmor.d/usr.bin.arbor
-
-# Iterate in complain-mode first so failures land in dmesg / journalctl
-# without breaking real installs:
-sudo aa-complain /etc/apparmor.d/usr.bin.arbor-daemon
-sudo aa-complain /etc/apparmor.d/usr.bin.arbor
-
-# When happy:
-sudo aa-enforce /etc/apparmor.d/usr.bin.arbor-daemon
-sudo aa-enforce /etc/apparmor.d/usr.bin.arbor
-
-sudo rc-service arbor-daemon restart   # or: systemctl restart arbor-daemon
-sudo rc-service arbor       restart    # or: systemctl restart arbor
-```
-
-If you confirm the profiles work on your setup, please share back the corrections so the "untested" disclaimer can be removed.
-
-### Log rotation
-
-`config/logrotate.d/arbor` is installed into `/etc/logrotate.d/arbor` by `config/setup.sh`. Daily rotation, 10 MB threshold, 14 rotations kept, gzip with `delaycompress`, recreated as `0640 arbor:arbor`. Post-rotate triggers a soft restart on whichever supervisor is active (systemd or OpenRC).
-
-### Other defaults
-
-- Local auth uses scrypt with strong parameters; password comparison and TOTP code comparison are timing-safe (`hmac.compare_digest`).
-- Login throttle works on three scopes (IP, username, pair) with exponential backoff; failures are persisted in `auth.db` so a restart does not reset the counter.
-- Overlay add remains opt-in behind `ARBOR_ENABLE_OVERLAY_ADD=1`. Even when enabled, adding an untrusted overlay still means trusting it with root-level code execution during package builds.
-- The etc-update resolve path refuses unsafe symlinked overwrite targets, and job handling is more honest after restarts: active jobs are snapshotted to disk and may come back as `orphaned` or `unknown` rather than being treated as live.
-- Live job buffers and stored history logs are intentionally bounded. Very large jobs may show truncated live output or truncated saved logs.
-- Local auth DB ownership is auto-healed on system paths when initialized by root. This behavior is enabled by default and can be disabled with `ARBOR_AUTH_AUTOHEAL_PERMS=0` if you prefer setup/package-hook-only permission management.
-
-### Supply chain
-
-CI runs `pip-audit` against the committed `requirements.lock` on every push, every PR, and weekly via cron. Bandit and Semgrep run on the same triggers (`p/python`, `p/security-audit`, `p/owasp-top-ten` rule packs). Dependabot opens PRs for dependency bumps on Mondays. A new CVE in a pinned transitive dep shows up as a red build within seven days even with zero code change.
-
-## Recent fixes
-
-### Hardening track (PR 1 + PR 2 + PR 3 + PR 4 + PR 5)
-
-- **Process sandboxing**: `setpriv --no-new-privs` + bounding set on the daemon; `NoNewPrivileges` on the web. Draft AppArmor profiles in `apparmor/` (untested, opt-in).
-- **CI security**: pip-audit, bandit, semgrep on every push/PR + weekly cron. Dependabot for dep bumps.
-- **Log rotation**: daily, 10 MB threshold, 14 generations, drop-in installed by `config/setup.sh`.
-- **Step-up password universal**: every mutating REST endpoint and WebSocket requires a fresh password (≤120s) when `ARBOR_APPROVAL_MODE != cli`. Frontend modal handles the prompt transparently.
-- **Log scrubbing**: `user:password@` inside URLs is replaced with `***:***@` before any chunk hits the log file, history DB, or WebSocket stream.
-- **`ARBOR_TRUSTED_PROXIES`**: makes uvicorn's `forwarded_allow_ips` configurable for reverse-proxy deployments off-host.
-- **DDL identifier safety**: `_quote_ident` helper validates SQL identifiers; closes the f-string DDL pattern future-proofing.
-
-### Hardening track (PR 1 + PR 2)
-
-- **CSRF middleware** with double-submit cookies (`arbor_csrf` + `X-CSRF-Token` header) on every mutating request, including the first WebSocket auth frame.
-- **`SameSite=Strict`** on session and CSRF cookies. **HSTS** emitted on HTTPS responses (or behind a TLS-terminating reverse proxy via `X-Forwarded-Proto`).
-- **TLS enforcement at bind time**: a public bind without TLS is refused at startup.
-- **WebSocket origin** check tightened: a missing `Origin` is accepted only on loopback binds.
-- **IPC protocol v2**: each web→daemon request carries a nonce and timestamp inside the HMAC payload; the daemon rejects stale or replayed frames.
-- **`SO_PEERCRED`** enforcement on `/run/arbor/daemon.sock`: only the `arbor` uid (or an explicit allowlist) can connect.
-- **Boot guards** for unsafe configurations: `ARBOR_APPROVAL_MODE=totp` is now a startup error (legacy mode removed), and `ARBOR_APPROVAL_MODE=none` requires `ARBOR_ALLOW_AUTO_APPROVAL=1`.
-- **TOTP secret** refused from the process environment (only the secret file is accepted).
-- **Step-up re-auth** scaffolding: `POST /api/auth/step-up` re-verifies the password, and `POST /api/overlays` (overlay add) requires a step-up within the last 120 seconds.
-
-### Earlier
-
-- Install and uninstall runs now keep the browser-boundary checks aligned with the actual default loopback deployment: WebSocket/CORS allow `localhost`, `127.0.0.1`, and `[::1]` on port `8443` by default.
-- The Alpine frontend was migrated to the CSP-safe build and the template surface was refactored away from unsupported inline syntax such as template literals, optional chaining, and nullish coalescing in `x-*` expressions.
-- Overlay removal now requires an explicit dangerous-action acknowledgement, and overlay add remains opt-in behind `ARBOR_ENABLE_OVERLAY_ADD=1`.
-- Background job recovery now records checkpoints and PID identity metadata so daemon restarts report `orphaned` / `unknown` states honestly instead of pretending a lost job is still fully attached.
-- OpenRC services now use respawn supervision by default; systemd already had restart-on-failure behavior.
-
-## Prerequisites
-
-- Gentoo Linux
-- Python 3.11+
-- `openssl`
-- OpenRC or systemd
-
-## Install
-
-### Via Portage overlay
-
-```bash
-eselect repository add arbor-overlay git https://github.com/gorecodes/arbor-overlay.git
-emaint sync -r arbor-overlay
-echo 'app-admin/arbor systemd' >> /etc/portage/package.use/arbor   # or: openrc
-emerge app-admin/arbor
-bash /usr/share/arbor/setup.sh
-```
-
-After every package upgrade, run setup again:
-
-```bash
-bash /usr/share/arbor/setup.sh
-```
-
-This keeps `/etc/arbor` assets and `/var/lib/arbor` permissions aligned with the current release (including local-auth DB ownership).
-
-By default this installs the stable overlay version. If you want the live ebuild that tracks `main`:
-
-```bash
-echo '=app-admin/arbor-9999 **' >> /etc/portage/package.accept_keywords/arbor
-emerge =app-admin/arbor-9999
-bash /usr/share/arbor/setup.sh
-```
-
-Choose your init system via USE flag before installing, then start the services as shown below.
-
-### Via install script
-
-```bash
-git clone https://github.com/gorecodes/Arbor
-cd Arbor
-sudo bash install.sh
-```
-
-The installer will:
-
-1. Install the backend to `/usr/lib/arbor/`
-2. Create a Python virtual environment with Arbor installed into it
-3. Install the Alpine frontend to `/usr/lib/arbor/frontend/`
-4. Create `/usr/bin/arbor` and `/usr/bin/arbor-daemon`
-5. Install OpenRC or systemd service files, depending on the detected init system
-6. Create the `arbor` system user
-7. Enforce local auth mode in `/etc/arbor/arbor.env` (`ARBOR_AUTH_BACKEND=local`)
-8. Create `/etc/arbor/arbor.env` if it does not already exist
-9. Default Arbor to local-first plain HTTP (`ARBOR_TLS=0`)
-10. Generate an IPC key in `/etc/arbor/ipc.key` if one does not already exist
-
-After script-based upgrades, run setup again to refresh runtime permissions:
-
-```bash
-sudo bash config/setup.sh
-```
-
-## First run
-
-**OpenRC:**
-```bash
-rc-service arbor-daemon start
-rc-service arbor start
-```
-
-**systemd:**
-```bash
-systemctl start arbor-daemon arbor
-```
-
-Open `http://localhost:8443` or `http://127.0.0.1:8443` in your browser and sign in with the local owner username/password created during setup. If `ARBOR_AUTH_MODE=totp` is enabled, the login form also requires the current TOTP code.
-
-Arbor uses local username/password auth only (`ARBOR_AUTH_BACKEND=local`). Rerun setup after upgrades so owner bootstrap and auth DB permissions are applied:
-
-```bash
-bash /usr/share/arbor/setup.sh
-```
-
-For a first install, keep Arbor on localhost until you are comfortable with the model: an authenticated local session unlocks root-backed package actions, and LAN exposure is still a deliberate tradeoff rather than the default.
-
-When you start a privileged action from the UI, Arbor's behavior depends on `ARBOR_APPROVAL_MODE`:
-
-- `cli`: Arbor pauses and waits for `arbor-approve approve <request_id>` from a root shell.
-- `totp`: **refused at startup** (legacy mode removed). Migrate to `cli`, or `none` with `ARBOR_ALLOW_AUTO_APPROVAL=1`.
-- `none`: Arbor starts the privileged action immediately with no second prompt.
-
-For `cli`, use:
-
 ```bash
 arbor-approve list
 arbor-approve approve <request_id>
@@ -379,163 +296,6 @@ arbor-auth list-users
 # change role
 arbor-auth set-role --username bob --role operator
 ```
-
-## Start at boot
-
-**OpenRC:**
-```bash
-rc-update add arbor-daemon default
-rc-update add arbor default
-```
-
-**systemd:**
-```bash
-systemctl enable arbor-daemon arbor
-```
-
-## Development
-
-Backend setup:
-
-```bash
-cd backend
-python3 -m venv .venv
-.venv/bin/pip install -e .
-```
-
-Run the web server in local-first HTTP mode:
-
-```bash
-ARBOR_TLS=0 .venv/bin/arbor
-```
-
-The frontend does not need a build step; it is served directly from `frontend/alpine/`, which is the canonical frontend source tree for this repository.
-
-The daemon still requires root privileges and a working Portage environment.
-
-Local-auth setup should create the owner account via `arbor-auth`. If no local users exist, login is intentionally unavailable until bootstrap is completed.
-
-## Update
-
-### Via Portage overlay
-
-```bash
-emaint sync -r arbor-overlay
-emerge app-admin/arbor
-```
-
-For the live ebuild instead:
-
-```bash
-emaint sync -r arbor-overlay
-emerge =app-admin/arbor-9999
-```
-
-Then restart the services:
-
-- **OpenRC:** `rc-service arbor-daemon restart && rc-service arbor restart`
-- **systemd:** `systemctl restart arbor-daemon arbor`
-
-### Via install script
-
-```bash
-git pull
-sudo bash install.sh
-```
-
-Then restart the services:
-
-- **OpenRC:** `rc-service arbor-daemon restart && rc-service arbor restart`
-- **systemd:** `systemctl restart arbor-daemon arbor`
-
-## Uninstall
-
-### Via Portage overlay
-
-```bash
-emerge --unmerge app-admin/arbor
-```
-
-Then stop and disable the services:
-
-- **OpenRC:** `rc-service arbor stop && rc-service arbor-daemon stop && rc-update del arbor default && rc-update del arbor-daemon default`
-- **systemd:** `systemctl stop arbor arbor-daemon && systemctl disable arbor-daemon arbor`
-
-```bash
-userdel arbor
-```
-
-### If installed with `install.sh`
-
-**OpenRC:**
-```bash
-rc-service arbor stop
-rc-service arbor-daemon stop
-rc-update del arbor default
-rc-update del arbor-daemon default
-rm -f /etc/init.d/arbor /etc/init.d/arbor-daemon
-```
-
-**systemd:**
-```bash
-systemctl stop arbor arbor-daemon
-systemctl disable arbor arbor-daemon
-rm -f /usr/lib/systemd/system/arbor.service /usr/lib/systemd/system/arbor-daemon.service
-systemctl daemon-reload
-```
-
-```bash
-rm -f /usr/bin/arbor /usr/bin/arbor-daemon /usr/bin/arbor-approve \
-      /usr/local/bin/arbor /usr/local/bin/arbor-daemon /usr/local/bin/arbor-approve
-rm -rf /usr/lib/arbor
-userdel arbor
-```
-
-Configuration, runtime state, logs, and the persisted SQLite job history are not removed automatically:
-
-```bash
-rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
-```
-
-## Logs
-
-```
-/var/log/arbor/daemon.log   # arbor-daemon output
-/var/log/arbor/web.log      # arbor web server output
-```
-
-## Configuration
-
-`/etc/arbor/arbor.env` is loaded by both the web service and the daemon:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `ARBOR_HOST` | `127.0.0.1` | Bind address; change explicitly for LAN access |
-| `ARBOR_PORT` | `8443` | Web server port |
-| `ARBOR_TLS` | unset (`0` in the bootstrap config) | Set to `0` to disable TLS without checking cert files; set to `1` to require `ARBOR_CERT` and `ARBOR_KEY` |
-| `ARBOR_CERT` | `/etc/arbor/cert.pem` | TLS certificate path when `ARBOR_TLS=1` |
-| `ARBOR_KEY` | `/etc/arbor/key.pem` | TLS key path when `ARBOR_TLS=1` |
-| `ARBOR_AUTH_MODE` | `cli` | Login auth mode; set to `totp` to require a TOTP code during login |
-| `ARBOR_APPROVAL_MODE` | derived from `ARBOR_AUTH_MODE` | Privileged operation approval mode; use `cli` for root-shell confirmation or `none` (plus the ack flag below) for no extra prompt. The legacy `totp` value is refused at startup. |
-| `ARBOR_ALLOW_AUTO_APPROVAL` | unset | Required acknowledgement to start with `ARBOR_APPROVAL_MODE=none`. Set to `1` only after understanding that any authenticated session can immediately launch privileged operations. |
-| `ARBOR_TOTP_SECRET` | unset | **No longer accepted from the process environment** (it would leak via `/proc/<pid>/environ`). Use `ARBOR_TOTP_SECRET_FILE`. |
-| `ARBOR_TOTP_SECRET_FILE` | `/etc/arbor/totp.secret` when configured | File containing the base32 TOTP secret for `totp` mode (mode `0600`). |
-| `ARBOR_TOTP_ISSUER` | `Arbor` | Issuer label embedded in the `otpauth://` TOTP URI |
-| `ARBOR_TOTP_ACCOUNT_NAME` | host-derived | Account label embedded in the `otpauth://` TOTP URI |
-| `ARBOR_ENABLE_OVERLAY_ADD` | `0` | Enable the dangerous overlay-add flow; overlays are disabled by default because new ebuilds run as root |
-| `ARBOR_IPC_KEY` | unset | Optional env override for the shared HMAC key used to authenticate web-to-daemon IPC requests |
-| `ARBOR_IPC_KEY_FILE` | `/etc/arbor/ipc.key` | Shared HMAC key file, generated by setup by default |
-| `ARBOR_IPC_ALLOWED_UIDS` | unset (defaults to uid of user `arbor`) | Comma-separated peer uid allowlist for `/run/arbor/daemon.sock`. Anything outside this set is rejected via `SO_PEERCRED`. |
-| `ARBOR_TRUSTED_PROXIES` | `127.0.0.1` | Comma-separated IPs passed to uvicorn's `forwarded_allow_ips`. Controls which proxy addresses are trusted to set `X-Forwarded-For` / `X-Forwarded-Proto`. |
-| `ARBOR_ALLOW_PLAINTEXT` | unset | Legacy fallback: allow plain HTTP on **loopback only** when `ARBOR_TLS` is unset and cert/key are missing. Refused on public binds. |
-| `ARBOR_CORS_ORIGINS` | loopback `http(s)` on `localhost`, `127.0.0.1`, `[::1]` (port `8443`) | Comma-separated allowed origins |
-| `ARBOR_STATIC_DIR` | auto-detected | Override the frontend static directory |
-
-Overlay add is disabled by default. To enable it, set `ARBOR_ENABLE_OVERLAY_ADD=1` in `/etc/arbor/arbor.env`, restart the services, and use the two-step confirmation flow in the UI. Adding an overlay is equivalent to trusting that repository with root-level code execution during package builds.
-
-For TOTP login, prefer storing the secret in `ARBOR_TOTP_SECRET_FILE` instead of `ARBOR_TOTP_SECRET` so it stays out of process listings and service unit overrides. Arbor manages this file when an owner enables TOTP from the web UI.
-
-`ARBOR_APPROVAL_MODE=none` is intentionally noisy: Arbor prints a startup warning because authenticated browser access can immediately trigger privileged actions in that mode.
 
 ## LAN access
 
@@ -598,3 +358,197 @@ Then restart the services and open `https://<hostname>:8443`. You will need to a
 - Sessions made before the change carry the old cookie attributes — log out + log in again to pick up `SameSite=Strict` and the CSRF cookie.
 - Hard-refresh the browser to bypass cached `app.js`. Otherwise mutating requests will fail with `403 csrf token missing or invalid` until the new JS is loaded.
 - Create and use a local owner account; do not share tokens or shells.
+
+## Configuration
+
+`/etc/arbor/arbor.env` is loaded by both the web service and the daemon:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ARBOR_HOST` | `127.0.0.1` | Bind address; change explicitly for LAN access |
+| `ARBOR_PORT` | `8443` | Web server port |
+| `ARBOR_TLS` | `0` in the bootstrap config | Set to `0` to disable TLS without checking cert files; set to `1` to require `ARBOR_CERT` and `ARBOR_KEY` |
+| `ARBOR_CERT` | `/etc/arbor/cert.pem` | TLS certificate path when `ARBOR_TLS=1` |
+| `ARBOR_KEY` | `/etc/arbor/key.pem` | TLS key path when `ARBOR_TLS=1` |
+| `ARBOR_AUTH_MODE` | unset (password only) | Set to `totp` to require a TOTP code during login. Enable TOTP from the Security page first. |
+| `ARBOR_APPROVAL_MODE` | `none` | Privileged operation approval mode: `none` for browser step-up re-auth (requires `ARBOR_ALLOW_AUTO_APPROVAL=1`), `cli` for root-shell `arbor-approve`. The legacy `totp` value is refused at startup. |
+| `ARBOR_ALLOW_AUTO_APPROVAL` | unset | Required alongside `ARBOR_APPROVAL_MODE=none`. Set to `1` to acknowledge that any authenticated session can trigger privileged operations. |
+| `ARBOR_TOTP_SECRET` | unset | **No longer accepted from the process environment** (it would leak via `/proc/<pid>/environ`). Use `ARBOR_TOTP_SECRET_FILE`. |
+| `ARBOR_TOTP_SECRET_FILE` | `/etc/arbor/totp.secret` when configured | File containing the base32 TOTP secret for `totp` mode (mode `0600`). Managed by the Security page. |
+| `ARBOR_TOTP_ISSUER` | `Arbor` | Issuer label embedded in the `otpauth://` TOTP URI |
+| `ARBOR_TOTP_ACCOUNT_NAME` | host-derived | Account label embedded in the `otpauth://` TOTP URI |
+| `ARBOR_ENABLE_OVERLAY_ADD` | `0` | Enable the dangerous overlay-add flow; overlays are disabled by default because new ebuilds run as root |
+| `ARBOR_IPC_KEY` | unset | Optional env override for the shared HMAC key used to authenticate web-to-daemon IPC requests |
+| `ARBOR_IPC_KEY_FILE` | `/etc/arbor/ipc.key` | Shared HMAC key file, generated by setup by default |
+| `ARBOR_IPC_ALLOWED_UIDS` | uid of user `arbor` | Comma-separated peer uid allowlist for `/run/arbor/daemon.sock`. Anything outside this set is rejected via `SO_PEERCRED`. |
+| `ARBOR_TRUSTED_PROXIES` | `127.0.0.1` | Comma-separated IPs passed to uvicorn's `forwarded_allow_ips`. Controls which proxy addresses are trusted to set `X-Forwarded-For` / `X-Forwarded-Proto`. |
+| `ARBOR_ALLOW_PLAINTEXT` | unset | Allow plain HTTP on **loopback only** when `ARBOR_TLS` is unset and cert/key are missing. Refused on public binds. |
+| `ARBOR_CORS_ORIGINS` | loopback `http(s)` on `localhost`, `127.0.0.1`, `[::1]` (port `8443`) | Comma-separated allowed origins |
+| `ARBOR_STATIC_DIR` | auto-detected | Override the frontend static directory |
+
+Overlay add is disabled by default. To enable it, set `ARBOR_ENABLE_OVERLAY_ADD=1` in `/etc/arbor/arbor.env`, restart the services, and use the two-step confirmation flow in the UI. Adding an overlay is equivalent to trusting that repository with root-level code execution during package builds.
+
+## Features
+
+- **Local auth with roles** — local users with `owner`, `operator`, and `viewer` roles
+- **Optional TOTP at login** — require a 6-digit TOTP code during sign-in when `ARBOR_AUTH_MODE=totp`
+- **Dashboard** — summary cards, recent job activity, compile time by category, source/binary mix, keyword posture, top enabled USE flags, and multi-slot package summaries
+- **Installed packages** — filter installed packages, open package details, inspect metadata, USE state, and runtime dependencies
+- **Search packages** — search the Portage tree and jump to the selected package
+- **USE flags** — inspect global USE state, package-specific overrides, installed build state, and mismatch indicators
+- **Install / Uninstall** — pretend first, stream live output, resume running jobs, and require approval before the real root action starts
+- **Autounmask flow** — for masked install targets, Arbor can write accepted keywords to `/etc/portage/package.accept_keywords`
+- **etc-update review** — after successful installs, pending `._cfg*` files can be reviewed and resolved in the UI
+- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with approval on privileged steps
+- **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with explicit danger acknowledgement plus approval
+- **Jobs** — view active jobs, reopen live output, browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`), and surface recovered orphaned/unknown jobs after daemon restart
+
+## Screenshots
+
+### Dashboard
+
+<img src="https://i.imgur.com/n2h8c4B.png" alt="Arbor dashboard" width="900">
+
+### Installed packages
+
+<img src="https://i.imgur.com/67lOVIN.png" alt="Arbor installed packages list" width="900">
+
+<img src="https://i.imgur.com/yS2qw6s.png" alt="Arbor package dependency view" width="900">
+
+### USE flags
+
+<img src="https://i.imgur.com/YbyPToC.png" alt="Arbor USE flags view" width="900">
+
+### Install / Uninstall
+
+<img src="https://i.imgur.com/H5ix75g.png" alt="Arbor install flow" width="900">
+
+### Maintenance
+
+<img src="https://i.imgur.com/De6G4ng.png" alt="Arbor maintenance view" width="900">
+
+## Architecture
+
+Two processes run with separate privileges:
+
+- **`arbor-daemon`** (root) — performs Portage operations, tracks long-running jobs, and listens on `/run/arbor/daemon.sock`
+- **`arbor`** (unprivileged `arbor` user) — FastAPI/uvicorn web server, serves the frontend, and proxies requests to the daemon
+
+The frontend is a no-build Alpine.js app in `frontend/alpine/`.
+That directory is the canonical UI source and the one served in development and install-script deployments; there is no separate frontend build step to run for normal development.
+
+## Security hardening
+
+Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over plain HTTP on port `8443`, and it is **not intended for direct internet exposure**. The recommended remote-access pattern is reverse-proxy with TLS termination (see [LAN access](#lan-access)) on a private network or VPN.
+
+### Trust model
+
+- Treat an authenticated Arbor session as **root-equivalent intent**: once logged in, the UI can request root-backed package actions (subject to approval mode and role checks).
+- In `cli` mode, root-backed actions are intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
+- `none` mode requires a password re-prompt in the browser before each privileged action. It is refused at startup unless `ARBOR_ALLOW_AUTO_APPROVAL=1` is set, so the trade-off is always explicit.
+- TOTP at login is a convenience tradeoff for trusted local/LAN use. It adds a second factor in the browser, but it does **not** make Arbor safe to expose on the open internet — a valid session plus the shared TOTP secret is not the same as a per-user, phishing-resistant auth design.
+
+### Web edge
+
+- **CSRF**: every state-changing request (`POST`, `PUT`, `DELETE`, `PATCH`) requires a matching `X-CSRF-Token` header that echoes the `arbor_csrf` cookie. The cookie is set at login, rotated on logout/TOTP changes, and verified by middleware before the handler runs. The first WebSocket auth frame must include the same token. The login endpoint itself is the only exemption.
+- **Cookies**: both `arbor_session` (HttpOnly) and `arbor_csrf` are `Secure` and `SameSite=Strict`. Cross-site navigations no longer carry the session, which closes most CSRF vectors at the browser level.
+- **HSTS**: emitted as `Strict-Transport-Security: max-age=63072000; includeSubDomains` when the request is served over HTTPS (including via a reverse proxy that sets `X-Forwarded-Proto: https`).
+- **TLS bind enforcement**: a non-loopback bind (`ARBOR_HOST` other than `127.0.0.1`/`::1`/`localhost`) requires TLS to be active. Arbor refuses to start in plain HTTP on a public interface.
+- **WebSocket origin**: a missing `Origin` header is accepted only when bound to loopback. On any public bind, the connecting `Origin` must be in `ARBOR_CORS_ORIGINS`.
+- **Security response headers**: a strict CSP (`script-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. `/docs`, `/redoc`, and `/openapi.json` are disabled.
+
+### IPC and daemon
+
+- **Authenticated channel**: web → daemon over `/run/arbor/daemon.sock`, signed with an HMAC-SHA256 key in `/etc/arbor/ipc.key`.
+- **Protocol v2**: every signed payload includes a 16-byte nonce and a unix timestamp. The daemon enforces freshness (`|now − ts| ≤ 30s`) and rejects replays via a bounded LRU nonce cache (4096 entries, 5-minute TTL). Captured frames cannot be re-injected.
+- **Peer credential check** (`SO_PEERCRED`): the daemon refuses any connection whose peer uid is not in the allowlist. Default: `uid("arbor")`. Override with `ARBOR_IPC_ALLOWED_UIDS`.
+- **Boot guards**: the daemon (and web) refuse to start with `ARBOR_APPROVAL_MODE=totp` (legacy, removed) and with `ARBOR_APPROVAL_MODE=none` unless `ARBOR_ALLOW_AUTO_APPROVAL=1` is set. `ARBOR_TOTP_SECRET` in the process environment is refused; use `ARBOR_TOTP_SECRET_FILE`.
+
+### Step-up re-auth
+
+Every state-changing REST endpoint (`POST`, `PUT`, `DELETE`, `PATCH`) and every mutating WebSocket command requires a fresh password confirmation within the last 120 seconds when `ARBOR_APPROVAL_MODE` is not `cli`. A stolen session cookie alone is not enough to launch privileged actions. The frontend handles the re-prompt transparently via a modal; on success the original request is retried automatically.
+
+### Process sandboxing
+
+Both services apply privilege reduction at exec time. The mechanism depends on what is available:
+
+- **`arbor-daemon`** keeps only the capabilities Portage genuinely needs (`CHOWN`, `DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER`, `FSETID`, `SETGID`, `SETUID`, `SYS_CHROOT`, `MKNOD`, `KILL`, `SYS_ADMIN` for sandbox mount namespaces, `SYS_PTRACE`, `SETPCAP`, `SYS_RESOURCE`) and drops everything else from the bounding set. A RCE in the daemon cannot load kernel modules, open raw sockets to scan the LAN, mess with the clock, reconfigure audit, or exec a setuid helper to climb back to full root.
+- **`arbor`** (web) always runs as `uid:gid arbor:arbor`. If `setpriv` is present, `no_new_privs` is also applied.
+
+On **systemd** the hardening is unconditional (`NoNewPrivileges=` and `CapabilityBoundingSet=` in the unit files). On **OpenRC** the init scripts use `setpriv` from `sys-apps/util-linux` when available. If `setpriv` is not installed (it requires `USE=setpriv` on Gentoo — the flag is not always set by default), the services start without the capability bounding set and log a warning. To enable full hardening:
+
+```bash
+USE=setpriv emerge sys-apps/util-linux
+```
+
+#### Optional AppArmor profile (untested)
+
+Two draft profiles are shipped in `apparmor/usr.bin.arbor-daemon` and `apparmor/usr.bin.arbor`. They restrict the filesystem and capabilities reachable from each process — `arbor-daemon` to Portage paths only, `arbor` to `/var/lib/arbor` and `/var/log/arbor` plus the IPC socket. They are **not enabled by default** and have **not been tested end-to-end against a full emerge workflow**. Treat them as a starting draft for hardening, not as a guarantee.
+
+To try them on a test box (Gentoo with the `apparmor` USE flag and kernel support for `CONFIG_SECURITY_APPARMOR`):
+
+```bash
+sudo cp apparmor/usr.bin.arbor-daemon /etc/apparmor.d/
+sudo cp apparmor/usr.bin.arbor        /etc/apparmor.d/
+sudo apparmor_parser -r /etc/apparmor.d/usr.bin.arbor-daemon
+sudo apparmor_parser -r /etc/apparmor.d/usr.bin.arbor
+
+# Iterate in complain-mode first so failures land in dmesg / journalctl
+# without breaking real installs:
+sudo aa-complain /etc/apparmor.d/usr.bin.arbor-daemon
+sudo aa-complain /etc/apparmor.d/usr.bin.arbor
+
+# When happy:
+sudo aa-enforce /etc/apparmor.d/usr.bin.arbor-daemon
+sudo aa-enforce /etc/apparmor.d/usr.bin.arbor
+
+sudo rc-service arbor-daemon restart   # or: systemctl restart arbor-daemon
+sudo rc-service arbor       restart    # or: systemctl restart arbor
+```
+
+If you confirm the profiles work on your setup, please share back the corrections so the "untested" disclaimer can be removed.
+
+### Log rotation
+
+`config/logrotate.d/arbor` is installed into `/etc/logrotate.d/arbor` by `config/setup.sh`. Daily rotation, 10 MB threshold, 14 rotations kept, gzip with `delaycompress`, recreated as `0640 arbor:arbor`. Post-rotate triggers a soft restart on whichever supervisor is active (systemd or OpenRC).
+
+### Other defaults
+
+- Local auth uses scrypt with strong parameters; password comparison and TOTP code comparison are timing-safe (`hmac.compare_digest`).
+- Login throttle works on three scopes (IP, username, pair) with exponential backoff; failures are persisted in `auth.db` so a restart does not reset the counter.
+- Overlay add remains opt-in behind `ARBOR_ENABLE_OVERLAY_ADD=1`. Even when enabled, adding an untrusted overlay still means trusting it with root-level code execution during package builds.
+- The etc-update resolve path refuses unsafe symlinked overwrite targets, and job handling is more honest after restarts: active jobs are snapshotted to disk and may come back as `orphaned` or `unknown` rather than being treated as live.
+- Live job buffers and stored history logs are intentionally bounded. Very large jobs may show truncated live output or truncated saved logs.
+
+### Supply chain
+
+CI runs `pip-audit` against the committed `requirements.lock` on every push, every PR, and weekly via cron. Bandit and Semgrep run on the same triggers (`p/python`, `p/security-audit`, `p/owasp-top-ten` rule packs). Dependabot opens PRs for dependency bumps on Mondays. A new CVE in a pinned transitive dep shows up as a red build within seven days even with zero code change.
+
+## Development
+
+Backend setup:
+
+```bash
+cd backend
+python3 -m venv .venv
+.venv/bin/pip install -e .
+```
+
+Run the web server in local-first HTTP mode:
+
+```bash
+ARBOR_TLS=0 .venv/bin/arbor
+```
+
+The frontend does not need a build step; it is served directly from `frontend/alpine/`, which is the canonical frontend source tree for this repository.
+
+The daemon still requires root privileges and a working Portage environment.
+
+Local-auth setup should create the owner account via `arbor-auth`. If no local users exist, login is intentionally unavailable until bootstrap is completed.
+
+## Logs
+
+```
+/var/log/arbor/daemon.log   # arbor-daemon output
+/var/log/arbor/web.log      # arbor web server output
+```
