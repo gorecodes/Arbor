@@ -99,7 +99,7 @@ def _fix_system_auth_db_permissions(path: Path) -> None:
     except OSError:
         pass
     os.chown(parent, uid, gid)
-    os.chmod(parent, 0o750)
+    os.chmod(parent, 0o750)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
     if path.exists():
         try:
             file_stat = path.stat()

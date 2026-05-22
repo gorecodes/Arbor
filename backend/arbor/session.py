@@ -249,6 +249,21 @@ def get_session(session_id: str, *, touch: bool = True) -> dict | None:
         return data
 
 
+def record_step_up(session_id: str, *, method: str = "password") -> bool:
+    """Mark the session's step_up_at to now. Returns True if a row was updated."""
+    if not session_id:
+        return False
+    ensure_session_db()
+    now = _now()
+    with _db_conn() as conn:
+        cur = conn.execute(
+            "UPDATE sessions SET step_up_at=?, step_up_method=? "
+            "WHERE session_id=? AND revoked_at IS NULL",
+            (now, method, session_id),
+        )
+        return cur.rowcount > 0
+
+
 def session_from_cookie_header(cookie_header: str | None) -> str:
     if not cookie_header:
         return ""
@@ -267,7 +282,7 @@ def set_session_cookie(response: Response, session_id: str) -> None:
         value=session_id,
         httponly=True,
         secure=True,
-        samesite="lax",
+        samesite="strict",
         max_age=session_ttl_seconds(),
         path="/",
     )

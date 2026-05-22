@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import time
 from contextvars import ContextVar
 from typing import Any, Mapping
 
 from .action_security import APPROVAL_REQUIRED, DESTRUCTIVE, PRETEND, READONLY, TRUST_HEAVY, classify_action
 
+DEFAULT_STEP_UP_MAX_AGE_SECONDS = 120.0
+
 
 class AuthorizationError(PermissionError):
+    pass
+
+
+class StepUpRequiredError(PermissionError):
+    """Raised when an endpoint needs a recent re-auth (password or TOTP)."""
     pass
 
 
@@ -103,6 +111,48 @@ def require_min_role(required_role: str, principal: Mapping[str, Any] | None = N
     current_rank = _ROLE_ORDER.get(current, _ROLE_ORDER["viewer"])
     if current_rank < required_rank:
         raise AuthorizationError(f"role '{current}' is not allowed for this endpoint")
+
+
+def require_recent_step_up(
+    max_age_seconds: float = DEFAULT_STEP_UP_MAX_AGE_SECONDS,
+    *,
+    principal: Mapping[str, Any] | None = None,
+) -> None:
+    effective = dict(principal) if principal is not None else current_principal()
+    step_up_at = effective.get("step_up_at")
+    if step_up_at is None:
+        raise StepUpRequiredError("step_up_required")
+    try:
+        age = time.time() - float(step_up_at)
+    except (TypeError, ValueError):
+        raise StepUpRequiredError("step_up_required")
+    if age > max_age_seconds:
+        raise StepUpRequiredError("step_up_required")
+
+
+def require_recent_step_up_unless_cli_mode(
+    max_age_seconds: float = DEFAULT_STEP_UP_MAX_AGE_SECONDS,
+    *,
+    principal: Mapping[str, Any] | None = None,
+) -> None:
+    """Enforce step-up unless the system is in ARBOR_APPROVAL_MODE=cli.
+
+    In cli mode the secondary approval is the arbor-approve confirmation
+    on a root shell, which is itself a stronger step-up than re-typing a
+    password in the browser. Adding password step-up on top would just
+    burn UX without adding security.
+
+    In any other mode (currently only 'none' with explicit ack) we
+    require a recent step-up: a session cookie alone is not enough to
+    launch mutating actions.
+    """
+    # Local import: approval_mode imports config_env, not this module,
+    # so there is no cycle, but it keeps the dependency direction tidy.
+    from .approval_mode import ApprovalMode, effective_approval_mode
+
+    if effective_approval_mode() is ApprovalMode.CLI:
+        return
+    require_recent_step_up(max_age_seconds, principal=principal)
 
 
 def authorize_daemon_command(

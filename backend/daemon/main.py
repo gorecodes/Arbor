@@ -8,15 +8,18 @@ import errno
 import hashlib
 import json
 import os
+import pwd
 import re
+import socket as socket_mod
 import sqlite3
 import stat
+import struct
 import sys
 import threading
 import time
 import uuid
 import logging
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import contextmanager
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
@@ -25,10 +28,12 @@ from urllib.parse import urlparse
 from arbor.action_security import action_metadata, infer_job_action
 from arbor.approval_mode import (
     ApprovalMode,
+    ApprovalModeError,
     effective_approval_mode,
     get_approval_mode,
     get_login_auth_mode,
     totp_secret_path,
+    validate_approval_mode_config,
     verify_totp_code_for_secret,
 )
 from arbor.config_env import env_enabled
@@ -243,7 +248,9 @@ class _Job:
         self.status_updated_at = time.time() if when is None else when
 
     def _push(self, chunk: dict):
-        stored = dict(chunk)
+        stored = _scrub_chunk(chunk)
+        if stored is chunk:
+            stored = dict(chunk)
         size = _chunk_bytes(stored)
         self.logs.append((stored, size))
         self._log_bytes += size
@@ -366,10 +373,34 @@ def _db_conn(*, begin_immediate: bool = False):
         conn.close()
 
 
+_SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_ident(name: str) -> str:
+    """Validate a SQL identifier (table or column name).
+
+    SQLite does not accept placeholders in DDL or PRAGMA statements, so we
+    fall back to string interpolation. _quote_ident guards that path: only
+    [A-Za-z_][A-Za-z0-9_]* is allowed. Any other input raises ValueError
+    so a regression cannot quietly introduce a DDL injection vector.
+
+    Call sites in this module currently pass string literals, so the
+    helper is defence in depth — but it makes future drift loud.
+    """
+    if not isinstance(name, str) or not _SQL_IDENT_RE.match(name):
+        raise ValueError(f"invalid SQL identifier: {name!r}")
+    return name
+
+
 def _db_ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str):
-    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    safe_table = _quote_ident(table)
+    safe_column = _quote_ident(column)
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({safe_table})")}
+    if safe_column not in columns:
+        # `definition` is intentionally not validated: call sites pass
+        # trusted literal SQL fragments (e.g. "TEXT NOT NULL DEFAULT ''").
+        # Identifier injection is the realistic vector and is closed above.
+        conn.execute(f"ALTER TABLE {safe_table} ADD COLUMN {safe_column} {definition}")
 
 
 def _db_init():
@@ -1260,11 +1291,124 @@ async def _terminate_subprocess(proc, timeout: float = 5.0):
         await proc.wait()
 
 
+_REPLAY_WINDOW_SECONDS = 30.0
+_REPLAY_CACHE_TTL_SECONDS = 300.0
+_REPLAY_CACHE_MAX_SIZE = 4096
+
+
+class _ReplayGuard:
+    """Bounded LRU of recently-seen IPC nonces with timestamp window check."""
+
+    def __init__(
+        self,
+        *,
+        max_size: int = _REPLAY_CACHE_MAX_SIZE,
+        ttl: float = _REPLAY_CACHE_TTL_SECONDS,
+        window: float = _REPLAY_WINDOW_SECONDS,
+    ) -> None:
+        self._max_size = max_size
+        self._ttl = ttl
+        self._window = window
+        self._seen: "OrderedDict[str, float]" = OrderedDict()
+        self._lock = asyncio.Lock()
+
+    async def check_and_record(self, nonce: str, ts: float) -> tuple[bool, str]:
+        now = time.time()
+        if abs(now - ts) > self._window:
+            return False, "stale or skewed IPC timestamp"
+        async with self._lock:
+            self._evict_expired(now)
+            if nonce in self._seen:
+                return False, "replayed IPC nonce"
+            self._seen[nonce] = now + self._ttl
+            while len(self._seen) > self._max_size:
+                self._seen.popitem(last=False)
+        return True, ""
+
+    def _evict_expired(self, now: float) -> None:
+        while self._seen:
+            oldest_nonce = next(iter(self._seen))
+            if self._seen[oldest_nonce] > now:
+                break
+            self._seen.popitem(last=False)
+
+
+_replay_guard = _ReplayGuard()
+
+
+# SO_PEERCRED is the Linux-specific socket option that returns the connecting
+# peer's pid/uid/gid. The constant is not exported by Python's socket module on
+# all releases; 17 is the stable value for Linux.
+_SO_PEERCRED = getattr(socket_mod, "SO_PEERCRED", 17)
+_ALLOWED_PEER_UIDS: set[int] = set()
+
+
+def _init_peer_uid_allowlist() -> None:
+    global _ALLOWED_PEER_UIDS
+    override = os.environ.get("ARBOR_IPC_ALLOWED_UIDS", "").strip()
+    if override:
+        ids: set[int] = set()
+        for token in override.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                ids.add(int(token))
+            except ValueError:
+                log.warning(
+                    "ignoring invalid ARBOR_IPC_ALLOWED_UIDS=%r (must be comma-separated integers)",
+                    override,
+                )
+                return
+        _ALLOWED_PEER_UIDS = ids
+        log.info("ipc peer uid allowlist (from env): %s", sorted(_ALLOWED_PEER_UIDS))
+        return
+    try:
+        _ALLOWED_PEER_UIDS = {pwd.getpwnam("arbor").pw_uid}
+        log.info("ipc peer uid allowlist: %s (user 'arbor')", sorted(_ALLOWED_PEER_UIDS))
+    except KeyError:
+        log.warning(
+            "ipc peercred enforcement disabled: user 'arbor' not found and "
+            "ARBOR_IPC_ALLOWED_UIDS is unset — set it explicitly in non-prod setups"
+        )
+
+
+def _peer_uid(writer: asyncio.StreamWriter) -> int | None:
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return None
+    try:
+        creds = sock.getsockopt(socket_mod.SOL_SOCKET, _SO_PEERCRED, struct.calcsize("3i"))
+    except OSError:
+        return None
+    try:
+        _pid, uid, _gid = struct.unpack("3i", creds)
+    except struct.error:
+        return None
+    return uid
+
+
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    if _ALLOWED_PEER_UIDS:
+        uid = _peer_uid(writer)
+        if uid is None or uid not in _ALLOWED_PEER_UIDS:
+            log.warning("ipc rejected: peer uid=%r not in allowlist", uid)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
     try:
         raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
         request = json.loads(raw.decode())
-        cmd, args = verify_request(request)
+        cmd, args, nonce, ts = verify_request(request)
+
+        ok, reason = await _replay_guard.check_and_record(nonce, ts)
+        if not ok:
+            log.warning("ipc rejected: %s (cmd=%s)", reason, cmd)
+            await send(writer, {"error": reason})
+            return
 
         if cmd not in ALLOWED_COMMANDS:
             await send(writer, {"error": f"command '{cmd}' not allowed"})
@@ -1297,8 +1441,43 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.wait_closed()
 
 
+_SCRUB_URL_AUTH_RE = re.compile(
+    r"(?P<scheme>https?|ftp|git|rsync|svn)://[^:/\s@]+:[^@/\s]+@",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Mask inline basic-auth credentials in URLs.
+
+    Emerge can echo SRC_URI fetched values; if an ebuild used a URL like
+    https://user:token@host/foo.tar.gz the credential would otherwise land
+    in /var/log/arbor/daemon.log, /var/lib/arbor/history.db, and the WS
+    stream. Replace user:pwd with ***:***.
+    """
+    if not text or "@" not in text:
+        return text
+    return _SCRUB_URL_AUTH_RE.sub(lambda m: f"{m.group('scheme')}://***:***@", text)
+
+
+def _scrub_chunk(chunk: dict) -> dict:
+    """Return a chunk with 'line'/'error' text fields scrubbed of secrets."""
+    line = chunk.get("line") if isinstance(chunk, dict) else None
+    error = chunk.get("error") if isinstance(chunk, dict) else None
+    needs_line = isinstance(line, str) and "@" in line
+    needs_error = isinstance(error, str) and "@" in error
+    if not needs_line and not needs_error:
+        return chunk
+    out = dict(chunk)
+    if needs_line:
+        out["line"] = _scrub_secrets(line)
+    if needs_error:
+        out["error"] = _scrub_secrets(error)
+    return out
+
+
 async def send(writer: asyncio.StreamWriter, data: dict):
-    writer.write(json.dumps(data).encode() + b"\n")
+    writer.write(json.dumps(_scrub_chunk(data)).encode() + b"\n")
     await writer.drain()
 
 
@@ -3128,22 +3307,30 @@ async def main():
         sys.exit(1)
 
     try:
+        validate_approval_mode_config()
+    except ApprovalModeError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
+
+    try:
         arbor_gid = grp.getgrnam("arbor").gr_gid
     except KeyError:
         log.error("group 'arbor' not found — create it before running the daemon")
         sys.exit(1)
 
+    _init_peer_uid_allowlist()
+
     socket_dir = Path(SOCKET_PATH).parent
     socket_dir.mkdir(parents=True, exist_ok=True)
     os.chown(socket_dir, 0, arbor_gid)
-    os.chmod(socket_dir, 0o750)
+    os.chmod(socket_dir, 0o750)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
 
     if Path(SOCKET_PATH).exists():
         Path(SOCKET_PATH).unlink()
 
     server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
     os.chown(SOCKET_PATH, 0, arbor_gid)
-    os.chmod(SOCKET_PATH, 0o660)
+    os.chmod(SOCKET_PATH, 0o660)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
 
     _db_init()
     _jobs.update(_load_recovered_jobs())

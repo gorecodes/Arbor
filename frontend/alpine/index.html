@@ -13,6 +13,47 @@
 </head>
 <body x-data>
 
+  <!-- ── Step-up password modal (mode != cli) ──────────────────────────── -->
+  <div
+    x-show="$store.stepUp && $store.stepUp.open"
+    x-cloak
+    class="app-approval-lock"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="stepup-title"
+  >
+    <div class="app-approval-card">
+      <div class="app-approval-title" id="stepup-title">Confirm with password</div>
+      <div class="app-approval-line">
+        This action requires a recent password confirmation.
+      </div>
+      <form class="app-approval-form" @submit.prevent="$store.stepUp.submit()">
+        <input
+          id="stepup-password"
+          class="app-approval-input"
+          type="password"
+          autocomplete="current-password"
+          x-model="$store.stepUp.password"
+          :disabled="$store.stepUp.pending"
+        >
+        <span class="error" x-show="$store.stepUp.error" x-text="$store.stepUp.error"></span>
+        <div class="app-approval-actions">
+          <button
+            type="button"
+            class="app-approval-secondary"
+            @click="$store.stepUp.cancel()"
+            :disabled="$store.stepUp.pending"
+          >Cancel</button>
+          <button
+            type="submit"
+            :disabled="!$store.stepUp.password || $store.stepUp.pending"
+            x-text="$store.stepUp.pending ? 'Verifying…' : 'Confirm'"
+          ></button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- ── Login ──────────────────────────────────────────────────────────── -->
   <div x-show="$store.auth.ready && !$store.auth.isLoggedIn" x-cloak x-data="loginComponent">
     <div class="login">

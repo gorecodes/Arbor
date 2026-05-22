@@ -12,11 +12,31 @@ import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 
 from .approval_mode import ApprovalMode, ApprovalModeError, validate_approval_mode_config
-from .config_env import env_int, env_value
+from .config_env import env_int, env_list, env_value
 from .ipc_auth import IPCAuthError, load_ipc_key
+
+ARBOR_TRUSTED_PROXIES_ENV = "ARBOR_TRUSTED_PROXIES"
 
 _TLS_ENABLED_VALUES = {"1", "true", "yes", "on"}
 _TLS_DISABLED_VALUES = {"0", "false", "no", "off"}
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "ip6-localhost"}
+
+
+def _is_loopback_host(host: str) -> bool:
+    return host.strip().lower() in _LOOPBACK_HOSTS
+
+
+def _enforce_loopback_or_tls(host: str, tls: bool) -> None:
+    if tls or _is_loopback_host(host):
+        return
+    print(
+        f"[arbor] ERROR: refusing to bind {host!r} without TLS. Plain HTTP is only\n"
+        f"[arbor] permitted on loopback (127.0.0.1, ::1, localhost). Provide a\n"
+        f"[arbor] TLS certificate (ARBOR_CERT, ARBOR_KEY) or place this instance\n"
+        f"[arbor] behind a TLS-terminating reverse proxy and bind to 127.0.0.1.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 class _StripQueryStringFilter(logging.Filter):
@@ -40,6 +60,29 @@ def _log_config():
     if access is not None:
         access.setdefault("filters", []).append("strip_query_string")
     return config
+
+
+def _resolve_trusted_proxies() -> str:
+    """Return the forwarded_allow_ips value for uvicorn.
+
+    Behavior:
+      - ARBOR_TRUSTED_PROXIES unset: uvicorn default ('127.0.0.1' only).
+      - ARBOR_TRUSTED_PROXIES=<csv list>: that exact list is trusted.
+      - ARBOR_TRUSTED_PROXIES='*': trust any peer (use only when the bind
+        is otherwise unreachable, e.g. a Unix socket); logs a WARNING.
+    """
+    raw = env_list(ARBOR_TRUSTED_PROXIES_ENV, [])
+    if not raw:
+        return "127.0.0.1"
+    if raw == ["*"]:
+        print(
+            "[arbor] WARNING: ARBOR_TRUSTED_PROXIES=* — accepting X-Forwarded-* "
+            "from any peer; only safe if the bind is not directly reachable",
+            flush=True,
+        )
+        return "*"
+    print(f"[arbor] INFO: trusting X-Forwarded-* from {raw}", flush=True)
+    return ",".join(raw)
 
 
 def _report_approval_mode(mode: ApprovalMode) -> None:
@@ -105,6 +148,8 @@ def run():
                 sys.exit(2)
             print("[arbor] WARNING: ARBOR_ALLOW_PLAINTEXT=1 — running plain HTTP", flush=True)
 
+    _enforce_loopback_or_tls(host, tls)
+
     try:
         load_ipc_key()
     except IPCAuthError as exc:
@@ -125,6 +170,8 @@ def run():
         ssl_keyfile=key if tls and key else None,
         log_level="info",
         log_config=_log_config(),
+        proxy_headers=True,
+        forwarded_allow_ips=_resolve_trusted_proxies(),
     )
 
 

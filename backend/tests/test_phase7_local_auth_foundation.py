@@ -306,10 +306,12 @@ class LocalAuthApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_login_requires_totp_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             auth_db = Path(tmpdir) / "auth.db"
+            secret_file = Path(tmpdir) / "totp.secret"
+            secret_file.write_text("JBSWY3DPEHPK3PXP")
             env = {
                 "ARBOR_AUTH_DB": str(auth_db),
                 "ARBOR_AUTH_MODE": "totp",
-                "ARBOR_TOTP_SECRET": "JBSWY3DPEHPK3PXP",
+                "ARBOR_TOTP_SECRET_FILE": str(secret_file),
             }
             with patch.dict(os.environ, env, clear=False):
                 local_auth.create_local_user("owner", "secret-password", role="owner")
@@ -409,10 +411,12 @@ class LocalAuthApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_auth_totp_disable_requires_password_and_totp(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             auth_db = Path(tmpdir) / "auth.db"
+            secret_file = Path(tmpdir) / "totp.secret"
+            secret_file.write_text("JBSWY3DPEHPK3PXP")
             env = {
                 "ARBOR_AUTH_DB": str(auth_db),
                 "ARBOR_AUTH_MODE": "totp",
-                "ARBOR_TOTP_SECRET": "JBSWY3DPEHPK3PXP",
+                "ARBOR_TOTP_SECRET_FILE": str(secret_file),
             }
             with patch.dict(os.environ, env, clear=False):
                 owner = local_auth.create_local_user("owner", "secret-password", role="owner")
@@ -447,10 +451,12 @@ class LocalAuthApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_auth_totp_disable_rejects_unpersisted_login_mode_reset(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             auth_db = Path(tmpdir) / "auth.db"
+            secret_file = Path(tmpdir) / "totp.secret"
+            secret_file.write_text("JBSWY3DPEHPK3PXP")
             env = {
                 "ARBOR_AUTH_DB": str(auth_db),
                 "ARBOR_AUTH_MODE": "totp",
-                "ARBOR_TOTP_SECRET": "JBSWY3DPEHPK3PXP",
+                "ARBOR_TOTP_SECRET_FILE": str(secret_file),
             }
             with patch.dict(os.environ, env, clear=False):
                 owner = local_auth.create_local_user("owner", "secret-password", role="owner")

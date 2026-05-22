@@ -11,11 +11,10 @@ node_modules/
 # GitHub Copilot
 .claude/
 .copilot/
-.github/
+.github/copilot-instructions.md
 CODE_REVIEW.md
 EMERGE_OPTIONS.md
 ARBOR_AUDIT_REPORT.md
-sync_installed_dev.sh
 purge_installed_dev.sh
 security_fixes
 audit v2
@@ -27,3 +26,5 @@ ONLINE_EXPOSURE_POLICY_MATRIX.md
 ONLINE_EXPOSURE_IMPLEMENTATION_PLAN.md
 ONLINE_AUTH_DATA_MODEL.md
 ONLINE_AUTH_BOOTSTRAP_CONFIG.md
+ARBOR_REMEDIATION_PLAN.md
+ARBOR_ARCHITECTURE_ROADMAP.md

@@ -15,15 +15,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .action_security import PRETEND, READONLY, classify_action
 from .approval_mode import LOGIN_AUTH_MODE_ENV, TOTP_SECRET_ENV, TOTP_SECRET_FILE_ENV, ApprovalMode, login_totp_required, verify_totp_code
 from .auth import auth_backend, require_auth, resolve_ws_principal
-from .authorization import AuthorizationError, current_principal, require_min_role, set_current_principal
+from .authorization import (
+    AuthorizationError,
+    StepUpRequiredError,
+    current_principal,
+    require_min_role,
+    require_recent_step_up,
+    require_recent_step_up_unless_cli_mode,
+    set_current_principal,
+)
 from .config_env import env_enabled, env_file_value, env_list
+from .csrf import (
+    CSRF_HEADER_NAME,
+    clear_csrf_cookie,
+    csrf_cookie_from_request,
+    generate_csrf_token,
+    set_csrf_cookie,
+    verify_csrf_tokens,
+)
 from .daemon_client import query, query_all, query_one
 from .emerge_log import compile_time_by_category
 from .local_auth import dummy_password_hash, find_user_by_username, has_local_users, mark_login_success, record_login_failure, verify_password
 from .login_throttle import login_retry_after, register_login_failure, register_login_success
-from .session import clear_session_cookie, create_session, revoke_all_sessions, revoke_session, set_session_cookie, session_cookie_name
+from .session import clear_session_cookie, create_session, record_step_up, revoke_all_sessions, revoke_session, set_session_cookie, session_cookie_name
 from .totp_admin import sync_runtime_env
 
 logging.basicConfig(
@@ -37,6 +54,11 @@ app = FastAPI(title="Arbor", version="0.1.0", docs_url=None, redoc_url=None)
 @app.exception_handler(AuthorizationError)
 async def authorization_error_handler(_request: Request, exc: AuthorizationError):
     return JSONResponse(status_code=403, content={"error": str(exc)})
+
+
+@app.exception_handler(StepUpRequiredError)
+async def step_up_required_handler(_request: Request, exc: StepUpRequiredError):
+    return JSONResponse(status_code=401, content={"error": str(exc) or "step_up_required"})
 
 # The frontend uses Alpine's CSP-friendly build, so script-src can omit
 # unsafe-eval. Inline styles are still used by the current UI.
@@ -58,12 +80,34 @@ _SECURITY_HEADERS = {
 }
 
 
+_HSTS_VALUE = "max-age=63072000; includeSubDomains"
+
+
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     for header, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(header, value)
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", _HSTS_VALUE)
     return response
+
+
+# Mutating methods on these paths skip the CSRF check. Login cannot have a
+# cookie yet, and the static asset routes are never written to.
+_CSRF_MUTATING_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+_CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login"})
+
+
+@app.middleware("http")
+async def csrf_protect(request: Request, call_next):
+    if request.method in _CSRF_MUTATING_METHODS and request.url.path not in _CSRF_EXEMPT_PATHS:
+        cookie_token = csrf_cookie_from_request(request)
+        header_token = request.headers.get(CSRF_HEADER_NAME, "")
+        if not verify_csrf_tokens(cookie_token, header_token):
+            return JSONResponse(status_code=403, content={"error": "csrf token missing or invalid"})
+    return await call_next(request)
+
 
 def _default_loopback_origins() -> list[str]:
     origins: list[str] = []
@@ -84,7 +128,7 @@ app.add_middleware(
     allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_headers=["Authorization", "Content-Type", CSRF_HEADER_NAME],
 )
 
 Auth = Annotated[str, Depends(require_auth)]
@@ -216,6 +260,7 @@ async def auth_login(request: Request):
         },
     )
     set_session_cookie(response, session["session_id"])
+    set_csrf_cookie(response, generate_csrf_token())
     return response
 
 
@@ -225,7 +270,42 @@ async def auth_logout(request: Request):
     revoke_session(session_id, reason="logout")
     response = JSONResponse(status_code=200, content={"ok": True})
     clear_session_cookie(response)
+    clear_csrf_cookie(response)
     return response
+
+
+@app.post("/api/auth/step-up/ensure")
+async def auth_step_up_ensure(auth: Auth):
+    """Preflight: returns 200 if step-up is fresh (or not required at all
+    in cli mode), 401 step_up_required otherwise. Used by the frontend
+    before opening a mutating WebSocket so the password prompt can be
+    handled with the same modal as REST."""
+    require_recent_step_up_unless_cli_mode()
+    return {"ok": True}
+
+
+@app.post("/api/auth/step-up")
+async def auth_step_up(auth: Auth, request: Request):
+    """Re-verify the session owner's password and refresh step_up_at.
+
+    Used by privileged endpoints that require a recent re-auth (see
+    require_recent_step_up). Returns 200 on success, 401 on bad password.
+    """
+    body = await _json_object_body(request, allow_empty=False)
+    if isinstance(body, JSONResponse):
+        return body
+    password = str(body.get("password", ""))
+    if not password:
+        return JSONResponse(status_code=400, content={"error": "password is required"})
+    principal = current_principal()
+    username = str(principal.get("username", "")).strip()
+    user = find_user_by_username(username)
+    password_hash = str(user["password_hash"]) if user is not None else dummy_password_hash()
+    if user is None or not verify_password(password, password_hash):
+        return JSONResponse(status_code=401, content={"error": "invalid password"})
+    session_id = request.cookies.get(session_cookie_name(), "")
+    record_step_up(session_id, method="password")
+    return {"ok": True}
 
 
 @app.get("/api/auth/totp")
@@ -278,6 +358,7 @@ async def auth_totp_confirm(auth: Auth, request: Request):
     revoke_all_sessions(reason="totp_enabled")
     response = JSONResponse(status_code=200, content={**data, "reauth_required": True})
     clear_session_cookie(response)
+    clear_csrf_cookie(response)
     return response
 
 
@@ -316,6 +397,7 @@ async def auth_totp_disable(auth: Auth, request: Request):
     revoke_all_sessions(reason="totp_disabled")
     response = JSONResponse(status_code=200, content={**data, "reauth_required": True})
     clear_session_cookie(response)
+    clear_csrf_cookie(response)
     return response
 
 @app.get("/api/status")
@@ -466,9 +548,16 @@ async def _ws_fail(websocket: WebSocket, code: int, error: str):
         pass
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "ip6-localhost"}
+_BIND_IS_LOOPBACK = os.environ.get("ARBOR_HOST", "127.0.0.1").strip().lower() in _LOOPBACK_HOSTS
+
+
 def _ws_origin_allowed(origin: str | None) -> bool:
     if not origin:
-        return True
+        # Non-browser clients (curl, native tooling) omit Origin. Allow that
+        # only when bound to loopback; on any LAN/Internet bind, require an
+        # explicit Origin in the CORS allowlist.
+        return _BIND_IS_LOOPBACK
     return origin in _cors_origins
 
 
@@ -507,8 +596,27 @@ async def _ws_require_auth(websocket: WebSocket) -> bool:
     return True
 
 
+async def _ws_step_up_if_mutating(websocket: WebSocket, daemon_cmd: str, args: dict | None = None) -> bool:
+    """Run mode-aware step-up if the daemon command would mutate state.
+
+    Returns True if the connection may proceed, False if it was failed
+    (the caller must return immediately).
+    """
+    action_class = classify_action(daemon_cmd, args)
+    if action_class in (READONLY, PRETEND):
+        return True
+    try:
+        require_recent_step_up_unless_cli_mode()
+    except StepUpRequiredError:
+        await _ws_fail(websocket, 4401, "step_up_required")
+        return False
+    return True
+
+
 async def _ws_emerge(websocket: WebSocket, cmd: str, atom: str, extra_args: dict | None = None):
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, cmd, {"atom": atom, **(extra_args or {})}):
         return
     if not atom:
         await _ws_fail(websocket, 4400, "missing atom")
@@ -535,6 +643,8 @@ async def _ws_emerge(websocket: WebSocket, cmd: str, atom: str, extra_args: dict
 async def _ws_job_cmd(websocket: WebSocket, daemon_cmd: str, args: dict):
     """Start (or resume) a background job and stream its output."""
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, daemon_cmd, args):
         return
     try:
         job_id = None
@@ -745,6 +855,7 @@ async def job_status(auth: Auth, job_id: str):
 @app.post("/api/jobs/{job_id}/cancel")
 async def job_cancel(auth: Auth, job_id: str, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -808,6 +919,7 @@ async def history_log(auth: Auth, job_id: str):
 @app.delete("/api/history/{job_id}")
 async def history_delete(auth: Auth, job_id: str, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -828,6 +940,7 @@ async def history_delete(auth: Auth, job_id: str, request: Request):
 @app.post("/api/history/purge")
 async def history_purge(auth: Auth, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -872,6 +985,7 @@ async def analytics_compile_time(auth: Auth):
 @app.post("/api/emerge/etc-update/resolve")
 async def etc_update_resolve(auth: Auth, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -910,6 +1024,7 @@ async def overlay_add(auth: Auth, request: Request):
     require_min_role("owner")
     if not _overlay_add_enabled():
         return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -934,6 +1049,7 @@ async def overlay_add(auth: Auth, request: Request):
 @app.delete("/api/overlays/{name}")
 async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Query(default=0)):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -958,6 +1074,8 @@ async def ws_overlay_sync(
     approval_token: str = Query(default=""),
 ):
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, "overlay_sync", {"name": name}):
         return
     try:
         job_id = None

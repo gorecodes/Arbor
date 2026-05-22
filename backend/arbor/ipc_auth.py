@@ -1,17 +1,25 @@
 """
 Shared IPC authentication helpers for web <-> daemon requests.
+
+Protocol v2 (current): each request carries a 16-byte nonce and a unix
+timestamp inside the HMAC-signed payload. The daemon checks freshness
+(|now - ts| <= 30s) and rejects replays via an LRU nonce cache; this
+module is wire-only.
 """
 
 import hashlib
 import hmac
 import json
 import os
+import secrets
+import time
 from pathlib import Path
 
 IPC_KEY_ENV = "ARBOR_IPC_KEY"
 IPC_KEY_FILE_ENV = "ARBOR_IPC_KEY_FILE"
 DEFAULT_IPC_KEY_FILE = "/etc/arbor/ipc.key"
 IPC_AUTH_ALG = "hmac-sha256"
+IPC_PROTOCOL_VERSION = 2
 
 _cached_ipc_key: bytes | None = None
 
@@ -51,47 +59,58 @@ def load_ipc_key() -> bytes:
     return _cached_ipc_key
 
 
-def _canonical_request(cmd: str, args: dict) -> bytes:
+def _canonical_request(cmd: str, args: dict, nonce: str, ts: float) -> bytes:
     return json.dumps(
-        {"cmd": cmd, "args": args},
+        {"v": IPC_PROTOCOL_VERSION, "cmd": cmd, "args": args, "nonce": nonce, "ts": ts},
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
 
 
-def build_auth(cmd: str, args: dict) -> dict:
-    sig = hmac.new(
-        load_ipc_key(),
-        _canonical_request(cmd, args),
-        hashlib.sha256,
-    ).hexdigest()
-    return {"alg": IPC_AUTH_ALG, "sig": sig}
+def _hmac_hex(payload: bytes) -> str:
+    return hmac.new(load_ipc_key(), payload, hashlib.sha256).hexdigest()
 
 
 def sign_request(cmd: str, args: dict | None = None) -> dict:
     normalized_args = args or {}
     if not isinstance(normalized_args, dict):
         raise IPCAuthError("IPC args must be an object")
+    nonce = secrets.token_hex(16)
+    ts = time.time()
+    payload = _canonical_request(cmd, normalized_args, nonce, ts)
     return {
+        "v": IPC_PROTOCOL_VERSION,
         "cmd": cmd,
         "args": normalized_args,
-        "auth": build_auth(cmd, normalized_args),
+        "nonce": nonce,
+        "ts": ts,
+        "auth": {"alg": IPC_AUTH_ALG, "sig": _hmac_hex(payload)},
     }
 
 
-def verify_request(request: dict) -> tuple[str, dict]:
+def verify_request(request: dict) -> tuple[str, dict, str, float]:
     if not isinstance(request, dict):
         raise IPCAuthError("invalid request object")
 
+    version = request.get("v")
+    if version != IPC_PROTOCOL_VERSION:
+        raise IPCAuthError(f"unsupported IPC protocol version: {version!r}")
+
     cmd = request.get("cmd")
     args = request.get("args", {})
+    nonce = request.get("nonce")
+    ts = request.get("ts")
     auth = request.get("auth")
 
     if not isinstance(cmd, str) or not cmd:
         raise IPCAuthError("missing command")
     if not isinstance(args, dict):
         raise IPCAuthError("invalid args")
+    if not isinstance(nonce, str) or len(nonce) != 32:
+        raise IPCAuthError("missing or invalid nonce")
+    if not isinstance(ts, (int, float)):
+        raise IPCAuthError("missing or invalid timestamp")
     if not isinstance(auth, dict):
         raise IPCAuthError("missing IPC auth")
     if auth.get("alg") != IPC_AUTH_ALG:
@@ -101,8 +120,8 @@ def verify_request(request: dict) -> tuple[str, dict]:
     if not isinstance(sig, str) or not sig:
         raise IPCAuthError("missing IPC auth signature")
 
-    expected = build_auth(cmd, args)["sig"]
+    expected = _hmac_hex(_canonical_request(cmd, args, nonce, float(ts)))
     if not hmac.compare_digest(sig, expected):
         raise IPCAuthError("invalid IPC auth signature")
 
-    return cmd, args
+    return cmd, args, nonce, float(ts)

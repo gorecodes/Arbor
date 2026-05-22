@@ -7,6 +7,7 @@ from fastapi import HTTPException, Request, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .authorization import set_current_principal
+from .csrf import csrf_cookie_from_header, verify_csrf_tokens
 from .session import get_session, session_cookie_name, session_from_cookie_header
 
 _bearer = HTTPBearer(auto_error=False)
@@ -35,14 +36,20 @@ def _local_principal(session: Mapping[str, object]) -> dict:
         "role": str(session.get("role", "owner")),
         "subject": str(session.get("user_id", "")),
         "username": str(session.get("username", "")),
+        "session_id": str(session.get("session_id", "")),
+        "step_up_at": session.get("step_up_at"),
     }
 
 
 def resolve_ws_principal(payload: Mapping[str, object] | None, headers: Mapping[str, str]) -> dict | None:
-    _ = payload or {}
+    data = payload or {}
     session_id = session_from_cookie_header(headers.get("cookie"))
     session = get_session(session_id, touch=False)
     if session is None:
+        return None
+    csrf_cookie = csrf_cookie_from_header(headers.get("cookie"))
+    csrf_payload = str(data.get("csrf", "") or "")
+    if not verify_csrf_tokens(csrf_cookie, csrf_payload):
         return None
     return _local_principal(session)
 
