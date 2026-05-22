@@ -43,13 +43,32 @@
     return h
   }
 
-  async function _apiError(res) {
-    let detail = 'HTTP ' + res.status
+  async function _safeJsonError(res) {
     try {
       const data = await res.json()
-      if (data && data.error) detail = data.error
-    } catch (_) {}
+      return data && data.error ? data.error : ''
+    } catch (_) {
+      return ''
+    }
+  }
+
+  async function _apiError(res) {
+    const detail = (await _safeJsonError(res)) || ('HTTP ' + res.status)
     throw new Error(detail)
+  }
+
+  async function _maybeStepUp(res) {
+    if (res.status !== 401) return false
+    const errText = await _safeJsonError(res)
+    if (errText !== 'step_up_required') {
+      // Wrap original error in a thrown Error so caller path is uniform.
+      throw new Error(errText || 'Unauthorized')
+    }
+    const store = window.Alpine && Alpine.store('stepUp')
+    if (!store) throw new Error('step_up_required')
+    const ok = await store.prompt()
+    if (!ok) throw new Error('step_up_cancelled')
+    return true
   }
 
   async function _get(path) {
@@ -60,19 +79,30 @@
   }
 
   async function _post(path, body) {
-    const res = await fetch(BASE + path, { method: 'POST', headers: _hdr(true), body: JSON.stringify(body) })
-    if (res.status === 401) throw new Error('Unauthorized')
-    if (!res.ok) await _apiError(res)
-    return res.json()
+    while (true) {
+      const res = await fetch(BASE + path, { method: 'POST', headers: _hdr(true), body: JSON.stringify(body) })
+      if (await _maybeStepUp(res)) continue
+      if (!res.ok) await _apiError(res)
+      return res.json()
+    }
   }
 
   async function _del(path, body) {
-    const opts = { method: 'DELETE', headers: _hdr(true) }
-    if (body !== undefined) opts.body = JSON.stringify(body)
-    const res = await fetch(BASE + path, opts)
-    if (res.status === 401) throw new Error('Unauthorized')
-    if (!res.ok) await _apiError(res)
-    return res.json()
+    while (true) {
+      const opts = { method: 'DELETE', headers: _hdr(true) }
+      if (body !== undefined) opts.body = JSON.stringify(body)
+      const res = await fetch(BASE + path, opts)
+      if (await _maybeStepUp(res)) continue
+      if (!res.ok) await _apiError(res)
+      return res.json()
+    }
+  }
+
+  async function _ensureStepUp() {
+    // Reuses the 401 step_up_required loop in _post via the step-up
+    // ensure endpoint. Resolves once the step-up is fresh, throws if
+    // the user cancels the modal.
+    await _post('/auth/step-up/ensure', {})
   }
 
   const api = {
@@ -80,6 +110,7 @@
     authSession: () => _get('/auth/session'),
     loginLocal: (username, password, totpCode = '') => _post('/auth/login', { username, password, totp_code: totpCode }),
     logoutLocal: () => _post('/auth/logout', {}),
+    stepUp: (password) => _post('/auth/step-up', { password }),
     authTotpStatus: () => _get('/auth/totp'),
     authTotpEnroll: () => _post('/auth/totp/enroll', {}),
     authTotpConfirm: (code) => _post('/auth/totp/confirm', { code }),
@@ -164,7 +195,7 @@
     return qs ? path + '?' + qs : path
   }
 
-  function _openAuthedWebSocket(path, onMsg) {
+  function _openAuthedWebSocketRaw(path, onMsg) {
     const ws = new WebSocket(_wsProto() + '://' + location.host + path)
     let done = false
     ws.onopen = () => {
@@ -176,12 +207,56 @@
     return ws
   }
 
+  function _openAuthedWebSocket(path, onMsg, opts) {
+    if (!opts || !opts.requiresStepUp) {
+      return _openAuthedWebSocketRaw(path, onMsg)
+    }
+    // For mutating WS: preflight step-up via REST (which surfaces the
+    // password modal on 401 step_up_required), then open the WS.
+    // Caller sees a stub it can .close() before the real socket exists.
+    let realWs = null
+    let cancelled = false
+    const stub = {
+      close() {
+        cancelled = true
+        if (realWs) try { realWs.close() } catch (_) {}
+      },
+    }
+    _ensureStepUp()
+      .then(() => {
+        if (cancelled) {
+          onMsg({ done: true, returncode: -1, error: 'cancelled' })
+          return
+        }
+        realWs = _openAuthedWebSocketRaw(path, onMsg)
+      })
+      .catch(err => {
+        onMsg({ done: true, returncode: -1, error: (err && err.message) || 'step_up_required' })
+      })
+    return stub
+  }
+
+  // WS endpoints that mutate state require a fresh step-up. Pretend variants
+  // and read-only attaches do not.
+  const _MUTATING_EMERGE_CMDS = new Set([
+    'install', 'uninstall', 'autounmask',
+    'world-update', 'depclean', 'preserved-rebuild', 'sync',
+  ])
+
   function wsEmerge(cmd, atom, onMsg, extra = {}) {
-    return _openAuthedWebSocket(_withQuery('/ws/emerge/' + cmd, { atom, ...extra }), onMsg)
+    return _openAuthedWebSocket(
+      _withQuery('/ws/emerge/' + cmd, { atom, ...extra }),
+      onMsg,
+      { requiresStepUp: _MUTATING_EMERGE_CMDS.has(cmd) },
+    )
   }
 
   function wsGlobalEmerge(cmd, onMsg, extra = {}) {
-    return _openAuthedWebSocket(_withQuery('/ws/emerge/' + cmd, extra), onMsg)
+    return _openAuthedWebSocket(
+      _withQuery('/ws/emerge/' + cmd, extra),
+      onMsg,
+      { requiresStepUp: _MUTATING_EMERGE_CMDS.has(cmd) },
+    )
   }
 
   function wsJobAttach(jobId, onMsg) {
@@ -189,7 +264,11 @@
   }
 
   function wsOverlaySync(name, onMsg, extra = {}) {
-    return _openAuthedWebSocket(_withQuery('/ws/overlays/sync/' + encodeURIComponent(name), extra), onMsg)
+    return _openAuthedWebSocket(
+      _withQuery('/ws/overlays/sync/' + encodeURIComponent(name), extra),
+      onMsg,
+      { requiresStepUp: true },
+    )
   }
 
   function approvalCommand(request) {
@@ -3793,6 +3872,55 @@ ${labels}
   // ── ALPINE STORES + INIT ──────────────────────────────────────────────────
 
   document.addEventListener('alpine:init', () => {
+    // Modal-backed step-up: any 401 step_up_required from the backend
+    // (REST or via the ensure preflight before opening a mutating WS)
+    // surfaces here. The modal lives in index.html bound to $store.stepUp.
+    Alpine.store('stepUp', {
+      open: false,
+      password: '',
+      error: '',
+      pending: false,
+      _resolve: null,
+      prompt() {
+        return new Promise((resolve) => {
+          this._resolve = resolve
+          this.open = true
+          this.password = ''
+          this.error = ''
+          this.pending = false
+          Alpine.nextTick(() => {
+            const el = document.getElementById('stepup-password')
+            if (el && typeof el.focus === 'function') el.focus()
+          })
+        })
+      },
+      async submit() {
+        if (!this.password || this.pending) return
+        this.pending = true
+        this.error = ''
+        try {
+          await api.stepUp(this.password)
+          this._finish(true)
+        } catch (e) {
+          this.error = (e && e.message) || 'Invalid password'
+          this.pending = false
+          this.password = ''
+        }
+      },
+      cancel() {
+        this._finish(false)
+      },
+      _finish(ok) {
+        this.open = false
+        const r = this._resolve
+        this._resolve = null
+        this.password = ''
+        this.pending = false
+        this.error = ''
+        if (r) r(ok)
+      },
+    })
+
     Alpine.store('auth', {
       backend: 'local',
       loginTotpRequired: false,

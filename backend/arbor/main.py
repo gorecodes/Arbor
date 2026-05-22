@@ -274,6 +274,16 @@ async def auth_logout(request: Request):
     return response
 
 
+@app.post("/api/auth/step-up/ensure")
+async def auth_step_up_ensure(auth: Auth):
+    """Preflight: returns 200 if step-up is fresh (or not required at all
+    in cli mode), 401 step_up_required otherwise. Used by the frontend
+    before opening a mutating WebSocket so the password prompt can be
+    handled with the same modal as REST."""
+    require_recent_step_up_unless_cli_mode()
+    return {"ok": True}
+
+
 @app.post("/api/auth/step-up")
 async def auth_step_up(auth: Auth, request: Request):
     """Re-verify the session owner's password and refresh step_up_at.
