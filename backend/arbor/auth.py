@@ -35,6 +35,8 @@ def _local_principal(session: Mapping[str, object]) -> dict:
         "role": str(session.get("role", "owner")),
         "subject": str(session.get("user_id", "")),
         "username": str(session.get("username", "")),
+        "session_id": str(session.get("session_id", "")),
+        "step_up_at": session.get("step_up_at"),
     }
 
 

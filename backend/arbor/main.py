@@ -17,13 +17,20 @@ from fastapi.staticfiles import StaticFiles
 
 from .approval_mode import LOGIN_AUTH_MODE_ENV, TOTP_SECRET_ENV, TOTP_SECRET_FILE_ENV, ApprovalMode, login_totp_required, verify_totp_code
 from .auth import auth_backend, require_auth, resolve_ws_principal
-from .authorization import AuthorizationError, current_principal, require_min_role, set_current_principal
+from .authorization import (
+    AuthorizationError,
+    StepUpRequiredError,
+    current_principal,
+    require_min_role,
+    require_recent_step_up,
+    set_current_principal,
+)
 from .config_env import env_enabled, env_file_value, env_list
 from .daemon_client import query, query_all, query_one
 from .emerge_log import compile_time_by_category
 from .local_auth import dummy_password_hash, find_user_by_username, has_local_users, mark_login_success, record_login_failure, verify_password
 from .login_throttle import login_retry_after, register_login_failure, register_login_success
-from .session import clear_session_cookie, create_session, revoke_all_sessions, revoke_session, set_session_cookie, session_cookie_name
+from .session import clear_session_cookie, create_session, record_step_up, revoke_all_sessions, revoke_session, set_session_cookie, session_cookie_name
 from .totp_admin import sync_runtime_env
 
 logging.basicConfig(
@@ -37,6 +44,11 @@ app = FastAPI(title="Arbor", version="0.1.0", docs_url=None, redoc_url=None)
 @app.exception_handler(AuthorizationError)
 async def authorization_error_handler(_request: Request, exc: AuthorizationError):
     return JSONResponse(status_code=403, content={"error": str(exc)})
+
+
+@app.exception_handler(StepUpRequiredError)
+async def step_up_required_handler(_request: Request, exc: StepUpRequiredError):
+    return JSONResponse(status_code=401, content={"error": str(exc) or "step_up_required"})
 
 # The frontend uses Alpine's CSP-friendly build, so script-src can omit
 # unsafe-eval. Inline styles are still used by the current UI.
@@ -226,6 +238,30 @@ async def auth_logout(request: Request):
     response = JSONResponse(status_code=200, content={"ok": True})
     clear_session_cookie(response)
     return response
+
+
+@app.post("/api/auth/step-up")
+async def auth_step_up(auth: Auth, request: Request):
+    """Re-verify the session owner's password and refresh step_up_at.
+
+    Used by privileged endpoints that require a recent re-auth (see
+    require_recent_step_up). Returns 200 on success, 401 on bad password.
+    """
+    body = await _json_object_body(request, allow_empty=False)
+    if isinstance(body, JSONResponse):
+        return body
+    password = str(body.get("password", ""))
+    if not password:
+        return JSONResponse(status_code=400, content={"error": "password is required"})
+    principal = current_principal()
+    username = str(principal.get("username", "")).strip()
+    user = find_user_by_username(username)
+    password_hash = str(user["password_hash"]) if user is not None else dummy_password_hash()
+    if user is None or not verify_password(password, password_hash):
+        return JSONResponse(status_code=401, content={"error": "invalid password"})
+    session_id = request.cookies.get(session_cookie_name(), "")
+    record_step_up(session_id, method="password")
+    return {"ok": True}
 
 
 @app.get("/api/auth/totp")
@@ -910,6 +946,7 @@ async def overlay_add(auth: Auth, request: Request):
     require_min_role("owner")
     if not _overlay_add_enabled():
         return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
+    require_recent_step_up()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
