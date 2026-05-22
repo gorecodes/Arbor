@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import hmac
+import os
 import secrets
 import socket
 import struct
@@ -16,11 +17,13 @@ from .config_env import env_value, env_value_file_first
 
 LOGIN_AUTH_MODE_ENV = "ARBOR_AUTH_MODE"
 APPROVAL_MODE_ENV = "ARBOR_APPROVAL_MODE"
+APPROVAL_AUTO_OK_ENV = "ARBOR_ALLOW_AUTO_APPROVAL"
 TOTP_SECRET_ENV = "ARBOR_TOTP_SECRET"
 TOTP_SECRET_FILE_ENV = "ARBOR_TOTP_SECRET_FILE"
 TOTP_ISSUER_ENV = "ARBOR_TOTP_ISSUER"
 TOTP_ACCOUNT_NAME_ENV = "ARBOR_TOTP_ACCOUNT_NAME"
 DEFAULT_TOTP_SECRET_FILE = "/etc/arbor/totp.secret"
+_ACK_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 class ApprovalModeError(RuntimeError):
@@ -82,23 +85,61 @@ def totp_secret_path() -> Path:
 
 
 def get_totp_secret() -> str:
-    secret = env_value_file_first(TOTP_SECRET_ENV, "").strip()
-    if not secret:
-        secret = _load_totp_secret_from_file(totp_secret_path())
+    # F-19: inline TOTP secrets in the process environment are refused —
+    # /proc/<pid>/environ exposes them to any local UID that can read the
+    # proc tree. Use the secret file (ARBOR_TOTP_SECRET_FILE, default
+    # /etc/arbor/totp.secret, mode 0600).
+    env_inline = os.environ.get(TOTP_SECRET_ENV, "").strip()
+    if env_inline:
+        raise ApprovalModeError(
+            f"{TOTP_SECRET_ENV} is no longer accepted from the process environment; "
+            f"place the secret in {TOTP_SECRET_FILE_ENV} (default "
+            f"{DEFAULT_TOTP_SECRET_FILE}) with mode 0600"
+        )
+    # arbor.env (file-only) is still tolerated for back-compat with
+    # totp_admin.sync_runtime_env writers, but takes second priority to
+    # the dedicated secret file.
+    file_inline = env_value_file_first(TOTP_SECRET_ENV, "").strip()
+    secret = file_inline or _load_totp_secret_from_file(totp_secret_path())
     if not secret:
         raise ApprovalModeError(
-            f"TOTP mode requires {TOTP_SECRET_ENV} or {TOTP_SECRET_FILE_ENV}"
+            f"TOTP mode requires the secret file {totp_secret_path()}"
         )
     try:
         base64.b32decode(secret.upper(), casefold=True)
     except (binascii.Error, ValueError) as exc:
-        raise ApprovalModeError("ARBOR_TOTP_SECRET must be valid base32") from exc
+        raise ApprovalModeError("TOTP secret must be valid base32") from exc
     return secret
+
+
+def _auto_approval_acknowledged() -> bool:
+    return env_value_file_first(APPROVAL_AUTO_OK_ENV, "").strip().lower() in _ACK_TRUE_VALUES
 
 
 def validate_approval_mode_config() -> ApprovalMode:
     login_mode = get_login_auth_mode()
     mode = get_approval_mode()
+
+    # Legacy ARBOR_APPROVAL_MODE=totp used to silently degrade to NONE,
+    # bypassing per-action approval without any explicit acknowledgement.
+    # That mode is removed: surface the misconfiguration loudly.
+    if mode is ApprovalMode.TOTP:
+        raise ApprovalModeError(
+            f"{APPROVAL_MODE_ENV}=totp is no longer supported. Use 'cli' for "
+            f"per-action approval, or set 'none' together with "
+            f"{APPROVAL_AUTO_OK_ENV}=1 to accept the security trade-off."
+        )
+
+    # ARBOR_APPROVAL_MODE=none disables per-action approval; refuse to boot
+    # unless the operator explicitly acknowledges the trade-off.
+    if mode is ApprovalMode.NONE and not _auto_approval_acknowledged():
+        raise ApprovalModeError(
+            f"{APPROVAL_MODE_ENV}=none disables per-action approval and is "
+            f"refused by default. Set {APPROVAL_AUTO_OK_ENV}=1 to acknowledge "
+            f"that any authenticated session can launch privileged operations "
+            f"without further confirmation."
+        )
+
     if login_mode is ApprovalMode.TOTP or mode is ApprovalMode.TOTP:
         get_totp_secret()
     return mode

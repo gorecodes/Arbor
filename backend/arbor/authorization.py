@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import time
 from contextvars import ContextVar
 from typing import Any, Mapping
 
 from .action_security import APPROVAL_REQUIRED, DESTRUCTIVE, PRETEND, READONLY, TRUST_HEAVY, classify_action
 
+DEFAULT_STEP_UP_MAX_AGE_SECONDS = 120.0
+
 
 class AuthorizationError(PermissionError):
+    pass
+
+
+class StepUpRequiredError(PermissionError):
+    """Raised when an endpoint needs a recent re-auth (password or TOTP)."""
     pass
 
 
@@ -103,6 +111,23 @@ def require_min_role(required_role: str, principal: Mapping[str, Any] | None = N
     current_rank = _ROLE_ORDER.get(current, _ROLE_ORDER["viewer"])
     if current_rank < required_rank:
         raise AuthorizationError(f"role '{current}' is not allowed for this endpoint")
+
+
+def require_recent_step_up(
+    max_age_seconds: float = DEFAULT_STEP_UP_MAX_AGE_SECONDS,
+    *,
+    principal: Mapping[str, Any] | None = None,
+) -> None:
+    effective = dict(principal) if principal is not None else current_principal()
+    step_up_at = effective.get("step_up_at")
+    if step_up_at is None:
+        raise StepUpRequiredError("step_up_required")
+    try:
+        age = time.time() - float(step_up_at)
+    except (TypeError, ValueError):
+        raise StepUpRequiredError("step_up_required")
+    if age > max_age_seconds:
+        raise StepUpRequiredError("step_up_required")
 
 
 def authorize_daemon_command(

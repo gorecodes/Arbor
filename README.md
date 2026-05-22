@@ -28,9 +28,11 @@ ARBOR_APPROVAL_MODE=cli
 # ARBOR_CERT=/etc/arbor/cert.pem
 # ARBOR_KEY=/etc/arbor/key.pem
 #
-# password + TOTP at login, no extra approval prompt per operation
+# password + TOTP at login, no per-action approval prompt — auto-approve
+# must be acknowledged explicitly because it removes the second gate
 ARBOR_AUTH_MODE=totp
 ARBOR_APPROVAL_MODE=none
+ARBOR_ALLOW_AUTO_APPROVAL=1
 ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
 
 # password + TOTP at login, plus CLI approval for privileged operations
@@ -42,8 +44,9 @@ ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
 # ARBOR_TOTP_ISSUER=Arbor
 # ARBOR_TOTP_ACCOUNT_NAME=arbor@my-host
 
-# no extra approval after login
+# no per-action approval (refused at boot without the explicit ack)
 ARBOR_APPROVAL_MODE=none
+ARBOR_ALLOW_AUTO_APPROVAL=1
 ```
 
 ### Login-time TOTP (2FA)
@@ -70,9 +73,9 @@ To disable TOTP, the owner must enter the **current password** and a fresh **TOT
 
 After login, privileged operations follow `ARBOR_APPROVAL_MODE`:
 
-- `ARBOR_APPROVAL_MODE=none`: the authenticated session can start privileged actions immediately
-- `ARBOR_APPROVAL_MODE=cli`: the authenticated session still needs root-shell confirmation via `arbor-approve`
-- `ARBOR_APPROVAL_MODE=totp`: accepted for compatibility, but treated like `none` for per-action approval behavior
+- `ARBOR_APPROVAL_MODE=cli` (default): the authenticated session still needs root-shell confirmation via `arbor-approve`.
+- `ARBOR_APPROVAL_MODE=none`: the authenticated session can start privileged actions immediately. **Refused at startup** unless `ARBOR_ALLOW_AUTO_APPROVAL=1` is also set, so the operator must explicitly acknowledge that the second gate is being removed.
+- `ARBOR_APPROVAL_MODE=totp`: **no longer supported**. Existing deployments that used the legacy value are refused at startup with a migration message; choose `cli`, or `none` with the ack flag above.
 
 #### `cli` (default)
 
@@ -166,18 +169,59 @@ That directory is the canonical UI source and the one served in development and 
 
 ## Security hardening
 
-- Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over plain HTTP on port `8443`, and it is **not intended for internet exposure**.
+Arbor is still an early-release, local-first admin tool. The default install binds the web UI to `127.0.0.1` over plain HTTP on port `8443`, and it is **not intended for direct internet exposure**. The recommended remote-access pattern is reverse-proxy with TLS termination (see [LAN access](#lan-access)) on a private network or VPN.
+
+### Trust model
+
 - Treat an authenticated Arbor session as **root-equivalent intent**: once logged in, the UI can request root-backed package actions (subject to approval mode and role checks).
 - In `cli` mode, root-backed actions are intentionally split into **request in browser / approve in root shell**. The browser cannot complete these actions on its own; approval must go through `arbor-approve`.
-- `totp` mode is a convenience tradeoff for trusted local/LAN use. It adds a second factor in the browser, but it does **not** make Arbor safe to expose on the internet; a valid session plus the shared TOTP secret is still not the same as a hardened internet-facing auth design.
-- `none` mode removes the secondary approval gate entirely and should be treated as equivalent to trusting any authenticated session with direct root-backed action approval.
-- Safer defaults are enabled out of the box: localhost bind, tighter key handling, response security headers, and overlay add disabled by default.
-- Overlay add remains a dangerous admin action. If you enable `ARBOR_ENABLE_OVERLAY_ADD=1`, Arbor requires an explicit approval flow, but adding an untrusted overlay still means trusting it with root-level package build execution.
-- The etc-update resolve path now refuses unsafe symlinked overwrite targets, and job handling is more honest after restarts: active jobs are snapshotted to disk and may come back as `orphaned` or `unknown` rather than being treated as live.
+- `none` mode removes the secondary approval gate entirely. It is refused at startup unless `ARBOR_ALLOW_AUTO_APPROVAL=1` is set, so the trade-off is always explicit.
+- TOTP at login is a convenience tradeoff for trusted local/LAN use. It adds a second factor in the browser, but it does **not** make Arbor safe to expose on the open internet — a valid session plus the shared TOTP secret is not the same as a per-user, phishing-resistant auth design.
+
+### Web edge
+
+- **CSRF**: every state-changing request (`POST`, `PUT`, `DELETE`, `PATCH`) requires a matching `X-CSRF-Token` header that echoes the `arbor_csrf` cookie. The cookie is set at login, rotated on logout/TOTP changes, and verified by middleware before the handler runs. The first WebSocket auth frame must include the same token. The login endpoint itself is the only exemption.
+- **Cookies**: both `arbor_session` (HttpOnly) and `arbor_csrf` are `Secure` and `SameSite=Strict`. Cross-site navigations no longer carry the session, which closes most CSRF vectors at the browser level.
+- **HSTS**: emitted as `Strict-Transport-Security: max-age=63072000; includeSubDomains` when the request is served over HTTPS (including via a reverse proxy that sets `X-Forwarded-Proto: https`).
+- **TLS bind enforcement**: a non-loopback bind (`ARBOR_HOST` other than `127.0.0.1`/`::1`/`localhost`) requires TLS to be active. Arbor refuses to start in plain HTTP on a public interface. `ARBOR_ALLOW_PLAINTEXT=1` is honored only on loopback.
+- **WebSocket origin**: a missing `Origin` header is accepted only when bound to loopback. On any public bind, the connecting `Origin` must be in `ARBOR_CORS_ORIGINS`.
+- **Security response headers**: a strict CSP (`script-src 'self'`, `object-src 'none'`, `frame-ancestors 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. `/docs`, `/redoc`, and `/openapi.json` are disabled.
+
+### IPC and daemon
+
+- **Authenticated channel**: web → daemon over `/run/arbor/daemon.sock`, signed with an HMAC-SHA256 key in `/etc/arbor/ipc.key`.
+- **Protocol v2**: every signed payload now includes a 16-byte nonce and a unix timestamp. The daemon enforces freshness (`|now − ts| ≤ 30s`) and rejects replays via a bounded LRU nonce cache (4096 entries, 5-minute TTL). Captured frames cannot be re-injected, even by a local attacker with read access to the socket.
+- **Peer credential check** (`SO_PEERCRED`): the daemon refuses any connection whose peer uid is not in the allowlist. Default: `uid("arbor")`. Override with `ARBOR_IPC_ALLOWED_UIDS` (comma-separated uids) for atypical setups.
+- **Boot guards**: the daemon (and web) refuse to start with `ARBOR_APPROVAL_MODE=totp` (legacy, removed) and with `ARBOR_APPROVAL_MODE=none` unless the explicit ack flag is set. `ARBOR_TOTP_SECRET` in the process environment is also refused because it leaks via `/proc/<pid>/environ`; use `ARBOR_TOTP_SECRET_FILE` (default `/etc/arbor/totp.secret`, mode `0600`).
+
+### Step-up re-auth
+
+- Privileged endpoints can require a fresh password re-prompt via `POST /api/auth/step-up`. The current consumer is `POST /api/overlays` (overlay add): a stolen session cookie is no longer enough to add a new root-trusted ebuild source — the password must be re-entered within 120 seconds. The framework is in place for additional endpoints as the hardening track progresses.
+
+### Other defaults
+
+- Local auth uses scrypt with strong parameters; password comparison and TOTP code comparison are timing-safe (`hmac.compare_digest`).
+- Login throttle works on three scopes (IP, username, pair) with exponential backoff; failures are persisted in `auth.db` so a restart does not reset the counter.
+- Overlay add remains opt-in behind `ARBOR_ENABLE_OVERLAY_ADD=1`. Even when enabled, adding an untrusted overlay still means trusting it with root-level code execution during package builds.
+- The etc-update resolve path refuses unsafe symlinked overwrite targets, and job handling is more honest after restarts: active jobs are snapshotted to disk and may come back as `orphaned` or `unknown` rather than being treated as live.
 - Live job buffers and stored history logs are intentionally bounded. Very large jobs may show truncated live output or truncated saved logs.
-- Local auth DB ownership is auto-healed on system path (`/var/lib/arbor/auth.db`) when initialized by root. This behavior is enabled by default and can be disabled with `ARBOR_AUTH_AUTOHEAL_PERMS=0` if you prefer setup/package-hook-only permission management.
+- Local auth DB ownership is auto-healed on system paths when initialized by root. This behavior is enabled by default and can be disabled with `ARBOR_AUTH_AUTOHEAL_PERMS=0` if you prefer setup/package-hook-only permission management.
 
 ## Recent fixes
+
+### Hardening track (PR 1 + PR 2)
+
+- **CSRF middleware** with double-submit cookies (`arbor_csrf` + `X-CSRF-Token` header) on every mutating request, including the first WebSocket auth frame.
+- **`SameSite=Strict`** on session and CSRF cookies. **HSTS** emitted on HTTPS responses (or behind a TLS-terminating reverse proxy via `X-Forwarded-Proto`).
+- **TLS enforcement at bind time**: a public bind without TLS is refused at startup.
+- **WebSocket origin** check tightened: a missing `Origin` is accepted only on loopback binds.
+- **IPC protocol v2**: each web→daemon request carries a nonce and timestamp inside the HMAC payload; the daemon rejects stale or replayed frames.
+- **`SO_PEERCRED`** enforcement on `/run/arbor/daemon.sock`: only the `arbor` uid (or an explicit allowlist) can connect.
+- **Boot guards** for unsafe configurations: `ARBOR_APPROVAL_MODE=totp` is now a startup error (legacy mode removed), and `ARBOR_APPROVAL_MODE=none` requires `ARBOR_ALLOW_AUTO_APPROVAL=1`.
+- **TOTP secret** refused from the process environment (only the secret file is accepted).
+- **Step-up re-auth** scaffolding: `POST /api/auth/step-up` re-verifies the password, and `POST /api/overlays` (overlay add) requires a step-up within the last 120 seconds.
+
+### Earlier
 
 - Install and uninstall runs now keep the browser-boundary checks aligned with the actual default loopback deployment: WebSocket/CORS allow `localhost`, `127.0.0.1`, and `[::1]` on port `8443` by default.
 - The Alpine frontend was migrated to the CSP-safe build and the template surface was refactored away from unsupported inline syntax such as template literals, optional chaining, and nullish coalescing in `x-*` expressions.
@@ -441,15 +485,17 @@ rm -rf /etc/arbor /var/log/arbor /run/arbor /var/lib/arbor
 | `ARBOR_CERT` | `/etc/arbor/cert.pem` | TLS certificate path when `ARBOR_TLS=1` |
 | `ARBOR_KEY` | `/etc/arbor/key.pem` | TLS key path when `ARBOR_TLS=1` |
 | `ARBOR_AUTH_MODE` | `cli` | Login auth mode; set to `totp` to require a TOTP code during login |
-| `ARBOR_APPROVAL_MODE` | derived from `ARBOR_AUTH_MODE` | Privileged operation approval mode; use `cli` for root-shell confirmation or `none` for no extra prompt |
-| `ARBOR_TOTP_SECRET` | unset | Inline base32 TOTP secret; supported, but prefer the file-based option below |
-| `ARBOR_TOTP_SECRET_FILE` | `/etc/arbor/totp.secret` when configured | File containing the base32 TOTP secret for `totp` mode |
+| `ARBOR_APPROVAL_MODE` | derived from `ARBOR_AUTH_MODE` | Privileged operation approval mode; use `cli` for root-shell confirmation or `none` (plus the ack flag below) for no extra prompt. The legacy `totp` value is refused at startup. |
+| `ARBOR_ALLOW_AUTO_APPROVAL` | unset | Required acknowledgement to start with `ARBOR_APPROVAL_MODE=none`. Set to `1` only after understanding that any authenticated session can immediately launch privileged operations. |
+| `ARBOR_TOTP_SECRET` | unset | **No longer accepted from the process environment** (it would leak via `/proc/<pid>/environ`). Use `ARBOR_TOTP_SECRET_FILE`. |
+| `ARBOR_TOTP_SECRET_FILE` | `/etc/arbor/totp.secret` when configured | File containing the base32 TOTP secret for `totp` mode (mode `0600`). |
 | `ARBOR_TOTP_ISSUER` | `Arbor` | Issuer label embedded in the `otpauth://` TOTP URI |
 | `ARBOR_TOTP_ACCOUNT_NAME` | host-derived | Account label embedded in the `otpauth://` TOTP URI |
 | `ARBOR_ENABLE_OVERLAY_ADD` | `0` | Enable the dangerous overlay-add flow; overlays are disabled by default because new ebuilds run as root |
 | `ARBOR_IPC_KEY` | unset | Optional env override for the shared HMAC key used to authenticate web-to-daemon IPC requests |
 | `ARBOR_IPC_KEY_FILE` | `/etc/arbor/ipc.key` | Shared HMAC key file, generated by setup by default |
-| `ARBOR_ALLOW_PLAINTEXT` | unset | Legacy fallback: allow plain HTTP when `ARBOR_TLS` is unset and cert/key are missing |
+| `ARBOR_IPC_ALLOWED_UIDS` | unset (defaults to uid of user `arbor`) | Comma-separated peer uid allowlist for `/run/arbor/daemon.sock`. Anything outside this set is rejected via `SO_PEERCRED`. |
+| `ARBOR_ALLOW_PLAINTEXT` | unset | Legacy fallback: allow plain HTTP on **loopback only** when `ARBOR_TLS` is unset and cert/key are missing. Refused on public binds. |
 | `ARBOR_CORS_ORIGINS` | loopback `http(s)` on `localhost`, `127.0.0.1`, `[::1]` (port `8443`) | Comma-separated allowed origins |
 | `ARBOR_STATIC_DIR` | auto-detected | Override the frontend static directory |
 
@@ -461,28 +507,62 @@ For TOTP login, prefer storing the secret in `ARBOR_TOTP_SECRET_FILE` instead of
 
 ## LAN access
 
-LAN access exists, but it is still not the recommended deployment mode. Arbor now ships with several hardening changes for safer local use, but it still binds only to loopback by default and should not be treated as an internet-facing service.
+LAN access exists, but it is still not the recommended deployment mode. Arbor binds to loopback by default and should not be treated as an internet-facing service. Even with `ARBOR_AUTH_MODE=totp`, the TOTP secret is shared across the whole instance — useful as a login-time second factor for a trusted operator, **not** a substitute for a hardened multi-user internet auth model.
 
-Even with `ARBOR_AUTH_MODE=totp`, Arbor is **not** designed to become safe for public internet exposure. TOTP here is a usability-oriented login-time second factor for a trusted operator, not a substitute for a hardened multi-user internet auth model.
+There are two supported patterns. The reverse-proxy pattern is the recommended one and the only one that works once Arbor refuses a public bind without TLS.
 
-For LAN access you must configure both:
+### Pattern A — reverse proxy with TLS termination (recommended)
 
-1. `ARBOR_HOST` so the web server listens on a LAN-reachable address.
-2. `ARBOR_CORS_ORIGINS` so browser requests and WebSocket origins from that LAN address are accepted.
+Arbor stays bound to `127.0.0.1` and a TLS-terminating front-end (Apache, Nginx, Caddy) faces the LAN. The front-end is responsible for the certificate, HSTS, and `X-Forwarded-Proto: https` so HSTS propagates through Arbor's response headers.
 
-Example `/etc/arbor/arbor.env`:
+Apache example for `https://casa.lan/` proxying to `127.0.0.1:8444`:
+
+```apache
+<VirtualHost *:443>
+    ServerName casa.lan
+
+    SSLEngine on
+    SSLCertificateFile /etc/apache2/ssl/casa.lan-fullchain.pem
+    SSLCertificateKeyFile /etc/apache2/ssl/casa.lan-privkey.pem
+
+    ProxyPreserveHost On
+    RequestHeader set X-Forwarded-Proto "https"
+
+    ProxyPass /ws/ ws://127.0.0.1:8444/ws/
+    ProxyPassReverse /ws/ ws://127.0.0.1:8444/ws/
+
+    ProxyPass / http://127.0.0.1:8444/
+    ProxyPassReverse / http://127.0.0.1:8444/
+</VirtualHost>
+```
+
+Required Apache modules: `mod_proxy`, `mod_proxy_http`, `mod_proxy_wstunnel`, `mod_headers`, `mod_ssl`. `ProxyPreserveHost On` is essential — without it the `Origin` the browser sends will not match `ARBOR_CORS_ORIGINS` and WebSocket handshakes will be refused with `4403 origin not allowed`.
+
+In `/etc/arbor/arbor.env`:
+
+```bash
+ARBOR_HOST=127.0.0.1
+ARBOR_PORT=8444
+ARBOR_TLS=0
+ARBOR_CORS_ORIGINS=https://casa.lan
+```
+
+### Pattern B — direct TLS on Arbor
+
+Arbor terminates TLS itself. Required because a non-loopback bind without TLS is refused at startup.
 
 ```bash
 ARBOR_HOST=0.0.0.0
+ARBOR_TLS=1
+ARBOR_CERT=/etc/arbor/cert.pem
+ARBOR_KEY=/etc/arbor/key.pem
 ARBOR_CORS_ORIGINS=https://arbor.lan:8443,https://192.168.1.10:8443
 ```
 
-Then restart the services and open:
+Then restart the services and open `https://<hostname>:8443`. You will need to accept the certificate warning unless you import the certificate into your browser trust store.
 
-```bash
-https://<hostname>:8443
-```
+### After any LAN config change
 
-You will need to accept the certificate warning unless you import the certificate into your browser trust store.
-
-Create and use a local owner account instead of token sharing for remote/LAN access patterns.
+- Sessions made before the change carry the old cookie attributes — log out + log in again to pick up `SameSite=Strict` and the CSRF cookie.
+- Hard-refresh the browser to bypass cached `app.js`. Otherwise mutating requests will fail with `403 csrf token missing or invalid` until the new JS is loaded.
+- Create and use a local owner account; do not share tokens or shells.
