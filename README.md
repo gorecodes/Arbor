@@ -8,45 +8,32 @@ Designed for Gentoo systems in a local environment. Not intended to be exposed t
 
 ## Authentication and approval
 
-Arbor uses local username/password authentication, with optional TOTP at login via `ARBOR_AUTH_MODE=totp`.
+**Out of the box after a clean install:** password-only login, and privileged actions (install, uninstall, sync, etc.) require a password re-prompt in the browser (step-up re-auth) before they start. No root shell needed.
 
-Privileged operations use a separate control, `ARBOR_APPROVAL_MODE`, so login requirements and root-action approval can be configured independently.
+Two independent knobs let you change this:
 
-The mode applies to install, uninstall, world update, sync, preserved-rebuild, depclean, overlay changes, and other root-backed admin operations.
+- **`ARBOR_AUTH_MODE`** — what is required *at login* (password only, or password + TOTP)
+- **`ARBOR_APPROVAL_MODE`** — what is required *per privileged action* after login
 
-Minimal `/etc/arbor/arbor.env` examples:
+They are independent: you can have TOTP at login with CLI approval, or no TOTP with step-up re-auth, or any combination.
+
+**Important:** `ARBOR_AUTH_MODE=totp` requires that TOTP has already been enabled from the **Security page** in the web UI, which generates `/etc/arbor/totp.secret` automatically. Do not add `ARBOR_AUTH_MODE=totp` to the config before doing this or Arbor will refuse to start.
+
+Common `/etc/arbor/arbor.env` setups:
 
 ```bash
-# local-first HTTP on loopback (bootstrap default)
+# Default: password login, browser step-up re-auth for privileged actions
 ARBOR_TLS=0
-
-# password login + CLI approval for privileged operations (default)
-ARBOR_APPROVAL_MODE=cli
-
-# direct HTTPS on Arbor itself (optional)
-# ARBOR_TLS=1
-# ARBOR_CERT=/etc/arbor/cert.pem
-# ARBOR_KEY=/etc/arbor/key.pem
-#
-# password + TOTP at login, no per-action approval prompt — auto-approve
-# must be acknowledged explicitly because it removes the second gate
-ARBOR_AUTH_MODE=totp
 ARBOR_APPROVAL_MODE=none
 ARBOR_ALLOW_AUTO_APPROVAL=1
-ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
 
-# password + TOTP at login, plus CLI approval for privileged operations
-ARBOR_AUTH_MODE=totp
-ARBOR_APPROVAL_MODE=cli
-ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
+# Alternative: root-shell arbor-approve instead of browser re-prompt
+# ARBOR_APPROVAL_MODE=cli
+# (remove the two lines above)
 
-# Optional
-# ARBOR_TOTP_ISSUER=Arbor
-# ARBOR_TOTP_ACCOUNT_NAME=arbor@my-host
-
-# no per-action approval (refused at boot without the explicit ack)
-ARBOR_APPROVAL_MODE=none
-ARBOR_ALLOW_AUTO_APPROVAL=1
+# Add TOTP at login on top of either of the above:
+# ARBOR_AUTH_MODE=totp
+# ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret  # created by the Security page
 ```
 
 ### Login-time TOTP (2FA)
@@ -73,13 +60,17 @@ To disable TOTP, the owner must enter the **current password** and a fresh **TOT
 
 After login, privileged operations follow `ARBOR_APPROVAL_MODE`:
 
-- `ARBOR_APPROVAL_MODE=cli` (default): the authenticated session still needs root-shell confirmation via `arbor-approve`.
-- `ARBOR_APPROVAL_MODE=none`: the authenticated session can start privileged actions immediately. **Refused at startup** unless `ARBOR_ALLOW_AUTO_APPROVAL=1` is also set, so the operator must explicitly acknowledge that the second gate is being removed.
-- `ARBOR_APPROVAL_MODE=totp`: **no longer supported**. Existing deployments that used the legacy value are refused at startup with a migration message; choose `cli`, or `none` with the ack flag above.
+- `ARBOR_APPROVAL_MODE=none` (default): the authenticated session requires a password re-prompt in the browser (step-up, valid 120 s) before each privileged action. `ARBOR_ALLOW_AUTO_APPROVAL=1` must be set alongside this.
+- `ARBOR_APPROVAL_MODE=cli`: the authenticated session needs root-shell confirmation via `arbor-approve` instead of the browser re-prompt.
+- `ARBOR_APPROVAL_MODE=totp`: **no longer supported**. Refused at startup with a migration message; choose `none` or `cli`.
 
-#### `cli` (default)
+#### `none` (default)
 
-This is the original shell-first model and remains the safest mode for Arbor's intended local-first deployment.
+The browser prompts for the password before each privileged action. On success the action starts immediately — no root shell required.
+
+#### `cli`
+
+This is the original shell-first model.
 
 1. Start the action in the browser as usual.
 2. Arbor creates a pending approval request and locks the UI.

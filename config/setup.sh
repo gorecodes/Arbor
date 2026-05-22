@@ -41,12 +41,17 @@ ARBOR_PORT=8443
 ARBOR_TLS=0
 ARBOR_ENABLE_OVERLAY_ADD=0
 ARBOR_AUTH_BACKEND=local
-# ARBOR_AUTH_MODE=cli
-# ARBOR_APPROVAL_MODE=cli
+# Approval/step-up mode (default: browser password re-prompt before each
+# privileged action). To require arbor-approve from a root shell instead,
+# set ARBOR_APPROVAL_MODE=cli and remove the two lines below.
+ARBOR_APPROVAL_MODE=none
+ARBOR_ALLOW_AUTO_APPROVAL=1
+# Login mode: unset = password only; totp = password + TOTP code.
+# Enable TOTP from the Security page in the web UI first — it creates
+# /etc/arbor/totp.secret automatically. Only then uncomment these two lines.
+# ARBOR_AUTH_MODE=totp
 # ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret
-# ARBOR_TOTP_ISSUER=Arbor
-# ARBOR_TOTP_ACCOUNT_NAME=arbor@my-host
-# Direct TLS on Arbor itself (optional)
+# Direct TLS on Arbor itself (leave unset when behind a reverse proxy)
 # ARBOR_TLS=1
 # ARBOR_CERT=/etc/arbor/cert.pem
 # ARBOR_KEY=/etc/arbor/key.pem
