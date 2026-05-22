@@ -66,11 +66,16 @@ _SECURITY_HEADERS = {
 }
 
 
+_HSTS_VALUE = "max-age=63072000; includeSubDomains"
+
+
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     for header, value in _SECURITY_HEADERS.items():
         response.headers.setdefault(header, value)
+    if request.url.scheme == "https":
+        response.headers.setdefault("Strict-Transport-Security", _HSTS_VALUE)
     return response
 
 
