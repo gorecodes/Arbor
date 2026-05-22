@@ -23,6 +23,7 @@ from .authorization import (
     current_principal,
     require_min_role,
     require_recent_step_up,
+    require_recent_step_up_unless_cli_mode,
     set_current_principal,
 )
 from .config_env import env_enabled, env_file_value, env_list
@@ -822,6 +823,7 @@ async def job_status(auth: Auth, job_id: str):
 @app.post("/api/jobs/{job_id}/cancel")
 async def job_cancel(auth: Auth, job_id: str, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -885,6 +887,7 @@ async def history_log(auth: Auth, job_id: str):
 @app.delete("/api/history/{job_id}")
 async def history_delete(auth: Auth, job_id: str, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -905,6 +908,7 @@ async def history_delete(auth: Auth, job_id: str, request: Request):
 @app.post("/api/history/purge")
 async def history_purge(auth: Auth, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -949,6 +953,7 @@ async def analytics_compile_time(auth: Auth):
 @app.post("/api/emerge/etc-update/resolve")
 async def etc_update_resolve(auth: Auth, request: Request):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -987,7 +992,7 @@ async def overlay_add(auth: Auth, request: Request):
     require_min_role("owner")
     if not _overlay_add_enabled():
         return JSONResponse(status_code=403, content={"error": "overlay add is disabled; set ARBOR_ENABLE_OVERLAY_ADD=1 to enable it"})
-    require_recent_step_up()
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
@@ -1012,6 +1017,7 @@ async def overlay_add(auth: Auth, request: Request):
 @app.delete("/api/overlays/{name}")
 async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Query(default=0)):
     require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
     body = await _json_object_body(request)
     if isinstance(body, JSONResponse):
         return body
