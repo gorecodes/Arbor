@@ -22,18 +22,18 @@ They are independent: you can have TOTP at login with CLI approval, or no TOTP w
 Common `/etc/arbor/arbor.env` setups:
 
 ```bash
-# Default: password login, root-shell approval for privileged actions
+# Default: password login, browser step-up re-auth for privileged actions
 ARBOR_TLS=0
-# (ARBOR_APPROVAL_MODE defaults to cli — no extra lines needed)
-
-# Step-up re-auth in the browser instead of root-shell arbor-approve.
-# The browser prompts for the password before every mutating action.
 ARBOR_APPROVAL_MODE=none
 ARBOR_ALLOW_AUTO_APPROVAL=1
 
+# Alternative: root-shell arbor-approve instead of browser re-prompt
+# ARBOR_APPROVAL_MODE=cli
+# (remove the two lines above)
+
 # Add TOTP at login on top of either of the above:
-ARBOR_AUTH_MODE=totp
-ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret  # created by the Security page
+# ARBOR_AUTH_MODE=totp
+# ARBOR_TOTP_SECRET_FILE=/etc/arbor/totp.secret  # created by the Security page
 ```
 
 ### Login-time TOTP (2FA)
@@ -60,13 +60,17 @@ To disable TOTP, the owner must enter the **current password** and a fresh **TOT
 
 After login, privileged operations follow `ARBOR_APPROVAL_MODE`:
 
-- `ARBOR_APPROVAL_MODE=cli` (default): the authenticated session still needs root-shell confirmation via `arbor-approve`.
-- `ARBOR_APPROVAL_MODE=none`: the authenticated session can start privileged actions immediately. **Refused at startup** unless `ARBOR_ALLOW_AUTO_APPROVAL=1` is also set, so the operator must explicitly acknowledge that the second gate is being removed.
-- `ARBOR_APPROVAL_MODE=totp`: **no longer supported**. Existing deployments that used the legacy value are refused at startup with a migration message; choose `cli`, or `none` with the ack flag above.
+- `ARBOR_APPROVAL_MODE=none` (default): the authenticated session requires a password re-prompt in the browser (step-up, valid 120 s) before each privileged action. `ARBOR_ALLOW_AUTO_APPROVAL=1` must be set alongside this.
+- `ARBOR_APPROVAL_MODE=cli`: the authenticated session needs root-shell confirmation via `arbor-approve` instead of the browser re-prompt.
+- `ARBOR_APPROVAL_MODE=totp`: **no longer supported**. Refused at startup with a migration message; choose `none` or `cli`.
 
-#### `cli` (default)
+#### `none` (default)
 
-This is the original shell-first model and remains the safest mode for Arbor's intended local-first deployment.
+The browser prompts for the password before each privileged action. On success the action starts immediately — no root shell required.
+
+#### `cli`
+
+This is the original shell-first model.
 
 1. Start the action in the browser as usual.
 2. Arbor creates a pending approval request and locks the UI.
