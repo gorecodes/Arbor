@@ -1264,7 +1264,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     try:
         raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
         request = json.loads(raw.decode())
-        cmd, args = verify_request(request)
+        cmd, args, _nonce, _ts = verify_request(request)
 
         if cmd not in ALLOWED_COMMANDS:
             await send(writer, {"error": f"command '{cmd}' not allowed"})
