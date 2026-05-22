@@ -24,6 +24,19 @@ def _is_loopback_host(host: str) -> bool:
     return host.strip().lower() in _LOOPBACK_HOSTS
 
 
+def _enforce_loopback_or_tls(host: str, tls: bool) -> None:
+    if tls or _is_loopback_host(host):
+        return
+    print(
+        f"[arbor] ERROR: refusing to bind {host!r} without TLS. Plain HTTP is only\n"
+        f"[arbor] permitted on loopback (127.0.0.1, ::1, localhost). Provide a\n"
+        f"[arbor] TLS certificate (ARBOR_CERT, ARBOR_KEY) or place this instance\n"
+        f"[arbor] behind a TLS-terminating reverse proxy and bind to 127.0.0.1.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 class _StripQueryStringFilter(logging.Filter):
     def filter(self, record):
         args = getattr(record, "args", None)
@@ -110,15 +123,7 @@ def run():
                 sys.exit(2)
             print("[arbor] WARNING: ARBOR_ALLOW_PLAINTEXT=1 — running plain HTTP", flush=True)
 
-    if not tls and not _is_loopback_host(host):
-        print(
-            f"[arbor] ERROR: refusing to bind {host!r} without TLS. Plain HTTP is only\n"
-            f"[arbor] permitted on loopback (127.0.0.1, ::1, localhost). Provide a\n"
-            f"[arbor] TLS certificate (ARBOR_CERT, ARBOR_KEY) or place this instance\n"
-            f"[arbor] behind a TLS-terminating reverse proxy and bind to 127.0.0.1.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    _enforce_loopback_or_tls(host, tls)
 
     try:
         load_ipc_key()
