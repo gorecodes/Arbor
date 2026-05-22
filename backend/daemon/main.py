@@ -8,9 +8,12 @@ import errno
 import hashlib
 import json
 import os
+import pwd
 import re
+import socket as socket_mod
 import sqlite3
 import stat
+import struct
 import sys
 import threading
 import time
@@ -1305,7 +1308,69 @@ class _ReplayGuard:
 _replay_guard = _ReplayGuard()
 
 
+# SO_PEERCRED is the Linux-specific socket option that returns the connecting
+# peer's pid/uid/gid. The constant is not exported by Python's socket module on
+# all releases; 17 is the stable value for Linux.
+_SO_PEERCRED = getattr(socket_mod, "SO_PEERCRED", 17)
+_ALLOWED_PEER_UIDS: set[int] = set()
+
+
+def _init_peer_uid_allowlist() -> None:
+    global _ALLOWED_PEER_UIDS
+    override = os.environ.get("ARBOR_IPC_ALLOWED_UIDS", "").strip()
+    if override:
+        ids: set[int] = set()
+        for token in override.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                ids.add(int(token))
+            except ValueError:
+                log.warning(
+                    "ignoring invalid ARBOR_IPC_ALLOWED_UIDS=%r (must be comma-separated integers)",
+                    override,
+                )
+                return
+        _ALLOWED_PEER_UIDS = ids
+        log.info("ipc peer uid allowlist (from env): %s", sorted(_ALLOWED_PEER_UIDS))
+        return
+    try:
+        _ALLOWED_PEER_UIDS = {pwd.getpwnam("arbor").pw_uid}
+        log.info("ipc peer uid allowlist: %s (user 'arbor')", sorted(_ALLOWED_PEER_UIDS))
+    except KeyError:
+        log.warning(
+            "ipc peercred enforcement disabled: user 'arbor' not found and "
+            "ARBOR_IPC_ALLOWED_UIDS is unset — set it explicitly in non-prod setups"
+        )
+
+
+def _peer_uid(writer: asyncio.StreamWriter) -> int | None:
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return None
+    try:
+        creds = sock.getsockopt(socket_mod.SOL_SOCKET, _SO_PEERCRED, struct.calcsize("3i"))
+    except OSError:
+        return None
+    try:
+        _pid, uid, _gid = struct.unpack("3i", creds)
+    except struct.error:
+        return None
+    return uid
+
+
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    if _ALLOWED_PEER_UIDS:
+        uid = _peer_uid(writer)
+        if uid is None or uid not in _ALLOWED_PEER_UIDS:
+            log.warning("ipc rejected: peer uid=%r not in allowlist", uid)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return
     try:
         raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
         request = json.loads(raw.decode())
@@ -3183,6 +3248,8 @@ async def main():
     except KeyError:
         log.error("group 'arbor' not found — create it before running the daemon")
         sys.exit(1)
+
+    _init_peer_uid_allowlist()
 
     socket_dir = Path(SOCKET_PATH).parent
     socket_dir.mkdir(parents=True, exist_ok=True)
