@@ -248,7 +248,9 @@ class _Job:
         self.status_updated_at = time.time() if when is None else when
 
     def _push(self, chunk: dict):
-        stored = dict(chunk)
+        stored = _scrub_chunk(chunk)
+        if stored is chunk:
+            stored = dict(chunk)
         size = _chunk_bytes(stored)
         self.logs.append((stored, size))
         self._log_bytes += size
@@ -371,10 +373,34 @@ def _db_conn(*, begin_immediate: bool = False):
         conn.close()
 
 
+_SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_ident(name: str) -> str:
+    """Validate a SQL identifier (table or column name).
+
+    SQLite does not accept placeholders in DDL or PRAGMA statements, so we
+    fall back to string interpolation. _quote_ident guards that path: only
+    [A-Za-z_][A-Za-z0-9_]* is allowed. Any other input raises ValueError
+    so a regression cannot quietly introduce a DDL injection vector.
+
+    Call sites in this module currently pass string literals, so the
+    helper is defence in depth — but it makes future drift loud.
+    """
+    if not isinstance(name, str) or not _SQL_IDENT_RE.match(name):
+        raise ValueError(f"invalid SQL identifier: {name!r}")
+    return name
+
+
 def _db_ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str):
-    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    safe_table = _quote_ident(table)
+    safe_column = _quote_ident(column)
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({safe_table})")}
+    if safe_column not in columns:
+        # `definition` is intentionally not validated: call sites pass
+        # trusted literal SQL fragments (e.g. "TEXT NOT NULL DEFAULT ''").
+        # Identifier injection is the realistic vector and is closed above.
+        conn.execute(f"ALTER TABLE {safe_table} ADD COLUMN {safe_column} {definition}")
 
 
 def _db_init():
@@ -1415,8 +1441,43 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.wait_closed()
 
 
+_SCRUB_URL_AUTH_RE = re.compile(
+    r"(?P<scheme>https?|ftp|git|rsync|svn)://[^:/\s@]+:[^@/\s]+@",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Mask inline basic-auth credentials in URLs.
+
+    Emerge can echo SRC_URI fetched values; if an ebuild used a URL like
+    https://user:token@host/foo.tar.gz the credential would otherwise land
+    in /var/log/arbor/daemon.log, /var/lib/arbor/history.db, and the WS
+    stream. Replace user:pwd with ***:***.
+    """
+    if not text or "@" not in text:
+        return text
+    return _SCRUB_URL_AUTH_RE.sub(lambda m: f"{m.group('scheme')}://***:***@", text)
+
+
+def _scrub_chunk(chunk: dict) -> dict:
+    """Return a chunk with 'line'/'error' text fields scrubbed of secrets."""
+    line = chunk.get("line") if isinstance(chunk, dict) else None
+    error = chunk.get("error") if isinstance(chunk, dict) else None
+    needs_line = isinstance(line, str) and "@" in line
+    needs_error = isinstance(error, str) and "@" in error
+    if not needs_line and not needs_error:
+        return chunk
+    out = dict(chunk)
+    if needs_line:
+        out["line"] = _scrub_secrets(line)
+    if needs_error:
+        out["error"] = _scrub_secrets(error)
+    return out
+
+
 async def send(writer: asyncio.StreamWriter, data: dict):
-    writer.write(json.dumps(data).encode() + b"\n")
+    writer.write(json.dumps(_scrub_chunk(data)).encode() + b"\n")
     await writer.drain()
 
 

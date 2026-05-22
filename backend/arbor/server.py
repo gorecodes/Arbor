@@ -12,8 +12,10 @@ import uvicorn
 from uvicorn.config import LOGGING_CONFIG
 
 from .approval_mode import ApprovalMode, ApprovalModeError, validate_approval_mode_config
-from .config_env import env_int, env_value
+from .config_env import env_int, env_list, env_value
 from .ipc_auth import IPCAuthError, load_ipc_key
+
+ARBOR_TRUSTED_PROXIES_ENV = "ARBOR_TRUSTED_PROXIES"
 
 _TLS_ENABLED_VALUES = {"1", "true", "yes", "on"}
 _TLS_DISABLED_VALUES = {"0", "false", "no", "off"}
@@ -58,6 +60,29 @@ def _log_config():
     if access is not None:
         access.setdefault("filters", []).append("strip_query_string")
     return config
+
+
+def _resolve_trusted_proxies() -> str:
+    """Return the forwarded_allow_ips value for uvicorn.
+
+    Behavior:
+      - ARBOR_TRUSTED_PROXIES unset: uvicorn default ('127.0.0.1' only).
+      - ARBOR_TRUSTED_PROXIES=<csv list>: that exact list is trusted.
+      - ARBOR_TRUSTED_PROXIES='*': trust any peer (use only when the bind
+        is otherwise unreachable, e.g. a Unix socket); logs a WARNING.
+    """
+    raw = env_list(ARBOR_TRUSTED_PROXIES_ENV, [])
+    if not raw:
+        return "127.0.0.1"
+    if raw == ["*"]:
+        print(
+            "[arbor] WARNING: ARBOR_TRUSTED_PROXIES=* — accepting X-Forwarded-* "
+            "from any peer; only safe if the bind is not directly reachable",
+            flush=True,
+        )
+        return "*"
+    print(f"[arbor] INFO: trusting X-Forwarded-* from {raw}", flush=True)
+    return ",".join(raw)
 
 
 def _report_approval_mode(mode: ApprovalMode) -> None:
@@ -145,6 +170,8 @@ def run():
         ssl_keyfile=key if tls and key else None,
         log_level="info",
         log_config=_log_config(),
+        proxy_headers=True,
+        forwarded_allow_ips=_resolve_trusted_proxies(),
     )
 
 

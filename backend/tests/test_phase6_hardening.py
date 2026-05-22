@@ -88,6 +88,8 @@ class ArborEnvLoadingTests(unittest.TestCase):
             ssl_keyfile=str(key),
             log_level="info",
             log_config=server_mod._log_config(),
+            proxy_headers=True,
+            forwarded_allow_ips="127.0.0.1",
         )
 
     def test_server_run_skips_cert_lookup_when_tls_disabled(self):
@@ -115,6 +117,8 @@ class ArborEnvLoadingTests(unittest.TestCase):
             ssl_keyfile=None,
             log_level="info",
             log_config=server_mod._log_config(),
+            proxy_headers=True,
+            forwarded_allow_ips="127.0.0.1",
         )
 
     def test_server_run_requires_cert_when_tls_explicitly_enabled(self):
