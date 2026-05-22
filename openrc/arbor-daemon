@@ -1,7 +1,32 @@
 #!/sbin/openrc-run
 
 description="Arbor privilege daemon"
-command="/usr/bin/arbor-daemon"
+
+# setpriv (util-linux, USE=setpriv) drops the capability bounding set and
+# sets no_new_privs so that child processes cannot regain privileges via
+# setuid binaries. If setpriv is absent we exec the daemon directly — it
+# still runs as root with the full bounding set, which is less hardened but
+# functional. Install with: USE=setpriv emerge sys-apps/util-linux
+_SETPRIV=/usr/bin/setpriv
+if [ -x "$_SETPRIV" ]; then
+    command="$_SETPRIV"
+    # Kept (needed by Portage during emerge): CHOWN, DAC_OVERRIDE,
+    # DAC_READ_SEARCH, FOWNER, FSETID, SETGID, SETUID, SYS_CHROOT,
+    # MKNOD, KILL, SYS_ADMIN (sandbox mount ns), SYS_PTRACE (sandbox),
+    # SETPCAP (drop privs on forks), SYS_RESOURCE.
+    command_args="--no-new-privs \
+--bounding-set=-audit_control,-audit_read,-audit_write,\
+-block_suspend,-bpf,-lease,-linux_immutable,\
+-mac_admin,-mac_override,-net_admin,-net_bind_service,\
+-net_broadcast,-net_raw,-perfmon,-setfcap,\
+-sys_boot,-sys_module,-sys_rawio,-sys_time,\
+-syslog,-wake_alarm \
+-- /usr/bin/arbor-daemon"
+else
+    command="/usr/bin/arbor-daemon"
+    command_args=""
+fi
+
 command_background=true
 supervisor="supervise-daemon"
 respawn_delay=5
@@ -24,4 +49,8 @@ start_pre() {
     touch /var/log/arbor/daemon.log
     chown root:arbor /var/log/arbor/daemon.log
     chmod 0640 /var/log/arbor/daemon.log
+    if [ ! -x /usr/bin/setpriv ]; then
+        ewarn "setpriv not found — capability bounding set not applied."
+        ewarn "For full hardening: USE=setpriv emerge sys-apps/util-linux"
+    fi
 }

@@ -16,5 +16,11 @@ StandardOutput=append:/var/log/arbor/web.log
 StandardError=append:/var/log/arbor/web.log
 Restart=on-failure
 
+# Hardening: the web process is already unprivileged (User=arbor), so
+# capability bounding does not apply. NoNewPrivileges blocks exec'ing
+# a setuid binary to regain privileges, defence in depth against a
+# possible RCE in FastAPI / uvicorn / a transitive dependency.
+NoNewPrivileges=yes
+
 [Install]
 WantedBy=multi-user.target

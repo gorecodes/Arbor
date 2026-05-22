@@ -1,8 +1,21 @@
 #!/sbin/openrc-run
 
 description="Arbor web UI"
-command="/usr/bin/arbor"
-command_user="arbor"
+
+# supervise-daemon's command_user handles the privilege drop to the arbor
+# system user in all cases. If setpriv is also present (USE=setpriv in
+# sys-apps/util-linux) we layer --no-new-privs on top so the process
+# cannot regain capabilities via setuid binaries.
+command_user="arbor:arbor"
+_SETPRIV=/usr/bin/setpriv
+if [ -x "$_SETPRIV" ]; then
+    command="$_SETPRIV"
+    command_args="--no-new-privs -- /usr/bin/arbor"
+else
+    command="/usr/bin/arbor"
+    command_args=""
+fi
+
 command_background=true
 supervisor="supervise-daemon"
 respawn_delay=5
@@ -26,4 +39,8 @@ start_pre() {
     touch /var/log/arbor/web.log
     chown arbor:arbor /var/log/arbor/web.log
     chmod 0640 /var/log/arbor/web.log
+    if [ ! -x /usr/bin/setpriv ]; then
+        ewarn "setpriv not found — no_new_privs not applied."
+        ewarn "For full hardening: USE=setpriv emerge sys-apps/util-linux"
+    fi
 }

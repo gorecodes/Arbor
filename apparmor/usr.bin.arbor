@@ -1,0 +1,87 @@
+# AppArmor profile for /usr/bin/arbor (web service, runs as user 'arbor')
+#
+# *** UNTESTED ***
+#
+# Companion to apparmor/usr.bin.arbor-daemon. See that file's header for
+# activation steps. This profile assumes the web binary is launched via
+# setpriv from /usr/bin/setpriv (as the OpenRC / systemd units in this
+# repo do); the profile applies once setpriv exec's the real arbor
+# binary.
+
+#include <tunables/global>
+
+profile arbor-web /usr/bin/arbor {
+  #include <abstractions/base>
+  #include <abstractions/python>
+  #include <abstractions/openssl>
+  #include <abstractions/nameservice>
+  #include <abstractions/ssl_certs>
+
+  # ---- capabilities ----
+  # The web process is already unprivileged. The only capability it
+  # legitimately needs is binding the listen port if < 1024 (default
+  # 8443, so usually none). Drop the lot.
+  audit deny capability net_admin,
+  audit deny capability net_raw,
+  audit deny capability sys_admin,
+  audit deny capability sys_module,
+  audit deny capability sys_boot,
+  audit deny capability sys_ptrace,
+
+  # ---- network ----
+  # FastAPI listens on inet/inet6 (default 127.0.0.1:8443) and talks to
+  # arbor-daemon over a Unix socket.
+  network inet stream,
+  network inet6 stream,
+  network unix,
+  audit deny network netlink,
+  audit deny network raw,
+
+  # ---- own state ----
+  /usr/bin/arbor mr,
+  /usr/bin/setpriv ix,
+  /usr/lib/arbor/** mr,
+  /etc/arbor/ r,
+  /etc/arbor/arbor.env r,
+  /etc/arbor/ipc.key r,
+  /etc/arbor/cert.pem r,
+  /etc/arbor/key.pem r,
+  /var/lib/arbor/ rw,
+  /var/lib/arbor/auth.db rwk,
+  /var/lib/arbor/auth.db-journal rwk,
+  /var/log/arbor/ rw,
+  /var/log/arbor/web.log rw,
+  /run/arbor/ r,
+  /run/arbor/daemon.sock rw,
+
+  # ---- TOTP secret read (when login TOTP is enabled) ----
+  # Required if ARBOR_TOTP_SECRET_FILE points here. Mode 0600 root:arbor
+  # in production; the file ACL is the primary gate, this just lets the
+  # arbor user open it via the profile.
+  /etc/arbor/totp.secret r,
+
+  # ---- read static frontend ----
+  /usr/lib/arbor/frontend/** r,
+  /usr/lib/arbor/.venv/** r,
+
+  # ---- system bits ----
+  /proc/ r,
+  /proc/sys/kernel/random/uuid r,
+  /dev/null rw,
+  /dev/urandom r,
+  /tmp/ r,
+
+  # ---- explicit deny ----
+  # The web process must never touch Portage state — that's the daemon's
+  # job. Closing this path means a RCE in FastAPI cannot bypass the IPC
+  # and write directly to /etc/portage.
+  audit deny /etc/portage/** rwklx,
+  audit deny /var/db/pkg/** rwklx,
+  audit deny /var/cache/distfiles/** rwklx,
+  audit deny /var/tmp/portage/** rwklx,
+  audit deny /var/lib/portage/** rwklx,
+
+  audit deny /home/** rwklx,
+  audit deny /root/** rwklx,
+  audit deny /etc/shadow* rwklx,
+}

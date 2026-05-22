@@ -17,5 +17,12 @@ StandardOutput=append:/var/log/arbor/daemon.log
 StandardError=append:/var/log/arbor/daemon.log
 Restart=on-failure
 
+# Hardening: the daemon runs as root because emerge needs to chown files
+# into /var/db/pkg, write under /etc/portage, chroot in pkg_postinst, and
+# use mount namespaces for FEATURES=sandbox. The capabilities listed here
+# cover those needs; everything else is dropped from the bounding set.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_SETGID CAP_SETUID CAP_SYS_CHROOT CAP_MKNOD CAP_KILL CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_SETPCAP CAP_SYS_RESOURCE
+
 [Install]
 WantedBy=multi-user.target

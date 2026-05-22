@@ -120,3 +120,12 @@ fi
 
 chmod 600 /etc/arbor/ipc.key
 chown arbor:arbor /etc/arbor/ipc.key
+
+# --- logrotate ---
+if [[ -d /etc/logrotate.d ]]; then
+  if [[ -n "$REPO" && -f "$REPO/config/logrotate.d/arbor" ]]; then
+    install -m 0644 -o root -g root \
+      "$REPO/config/logrotate.d/arbor" /etc/logrotate.d/arbor
+    echo "==> Installed /etc/logrotate.d/arbor"
+  fi
+fi
