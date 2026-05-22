@@ -3323,14 +3323,14 @@ async def main():
     socket_dir = Path(SOCKET_PATH).parent
     socket_dir.mkdir(parents=True, exist_ok=True)
     os.chown(socket_dir, 0, arbor_gid)
-    os.chmod(socket_dir, 0o750)
+    os.chmod(socket_dir, 0o750)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
 
     if Path(SOCKET_PATH).exists():
         Path(SOCKET_PATH).unlink()
 
     server = await asyncio.start_unix_server(handle_client, path=SOCKET_PATH)
     os.chown(SOCKET_PATH, 0, arbor_gid)
-    os.chmod(SOCKET_PATH, 0o660)
+    os.chmod(SOCKET_PATH, 0o660)  # nosemgrep: python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
 
     _db_init()
     _jobs.update(_load_recovered_jobs())

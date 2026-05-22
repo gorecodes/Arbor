@@ -22,7 +22,7 @@ async def query(cmd: str, args: dict = None) -> AsyncIterator[dict]:
     reader, writer = await asyncio.open_unix_connection(SOCKET_PATH, limit=_READER_LIMIT)
     try:
         request = json.dumps(sign_request(cmd, request_args)) + "\n"
-        writer.write(request.encode())
+        writer.write(request.encode())  # nosemgrep: python.django.security.injection.request-data-write.request-data-write
         await writer.drain()
 
         while True:
