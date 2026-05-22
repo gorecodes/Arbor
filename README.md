@@ -8,13 +8,9 @@ Designed for Gentoo systems in a local environment. Not intended to be exposed t
 
 ## Authentication and approval
 
-Arbor uses local username/password authentication, with optional TOTP at login via `ARBOR_AUTH_MODE=totp`.
+**Out of the box after a clean install:** password-only login, and privileged actions (install, uninstall, sync, etc.) require running `arbor-approve approve <id>` from a root shell before they start.
 
-Privileged operations use a separate control, `ARBOR_APPROVAL_MODE`, so login requirements and root-action approval can be configured independently.
-
-The mode applies to install, uninstall, world update, sync, preserved-rebuild, depclean, overlay changes, and other root-backed admin operations.
-
-Two independent knobs control security after installation:
+Two independent knobs let you change this:
 
 - **`ARBOR_AUTH_MODE`** — what is required *at login* (password only, or password + TOTP)
 - **`ARBOR_APPROVAL_MODE`** — what is required *per privileged action* after login
