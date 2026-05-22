@@ -28,10 +28,12 @@ from urllib.parse import urlparse
 from arbor.action_security import action_metadata, infer_job_action
 from arbor.approval_mode import (
     ApprovalMode,
+    ApprovalModeError,
     effective_approval_mode,
     get_approval_mode,
     get_login_auth_mode,
     totp_secret_path,
+    validate_approval_mode_config,
     verify_totp_code_for_secret,
 )
 from arbor.config_env import env_enabled
@@ -3240,6 +3242,12 @@ async def main():
     try:
         load_ipc_key()
     except IPCAuthError as exc:
+        log.error("%s", exc)
+        sys.exit(1)
+
+    try:
+        validate_approval_mode_config()
+    except ApprovalModeError as exc:
         log.error("%s", exc)
         sys.exit(1)
 
