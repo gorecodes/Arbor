@@ -243,7 +243,9 @@ class _Job:
         self.status_updated_at = time.time() if when is None else when
 
     def _push(self, chunk: dict):
-        stored = dict(chunk)
+        stored = _scrub_chunk(chunk)
+        if stored is chunk:
+            stored = dict(chunk)
         size = _chunk_bytes(stored)
         self.logs.append((stored, size))
         self._log_bytes += size
@@ -1297,8 +1299,43 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.wait_closed()
 
 
+_SCRUB_URL_AUTH_RE = re.compile(
+    r"(?P<scheme>https?|ftp|git|rsync|svn)://[^:/\s@]+:[^@/\s]+@",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secrets(text: str) -> str:
+    """Mask inline basic-auth credentials in URLs.
+
+    Emerge can echo SRC_URI fetched values; if an ebuild used a URL like
+    https://user:token@host/foo.tar.gz the credential would otherwise land
+    in /var/log/arbor/daemon.log, /var/lib/arbor/history.db, and the WS
+    stream. Replace user:pwd with ***:***.
+    """
+    if not text or "@" not in text:
+        return text
+    return _SCRUB_URL_AUTH_RE.sub(lambda m: f"{m.group('scheme')}://***:***@", text)
+
+
+def _scrub_chunk(chunk: dict) -> dict:
+    """Return a chunk with 'line'/'error' text fields scrubbed of secrets."""
+    line = chunk.get("line") if isinstance(chunk, dict) else None
+    error = chunk.get("error") if isinstance(chunk, dict) else None
+    needs_line = isinstance(line, str) and "@" in line
+    needs_error = isinstance(error, str) and "@" in error
+    if not needs_line and not needs_error:
+        return chunk
+    out = dict(chunk)
+    if needs_line:
+        out["line"] = _scrub_secrets(line)
+    if needs_error:
+        out["error"] = _scrub_secrets(error)
+    return out
+
+
 async def send(writer: asyncio.StreamWriter, data: dict):
-    writer.write(json.dumps(data).encode() + b"\n")
+    writer.write(json.dumps(_scrub_chunk(data)).encode() + b"\n")
     await writer.drain()
 
 
