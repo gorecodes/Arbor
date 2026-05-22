@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .action_security import PRETEND, READONLY, classify_action
 from .approval_mode import LOGIN_AUTH_MODE_ENV, TOTP_SECRET_ENV, TOTP_SECRET_FILE_ENV, ApprovalMode, login_totp_required, verify_totp_code
 from .auth import auth_backend, require_auth, resolve_ws_principal
 from .authorization import (
@@ -585,8 +586,27 @@ async def _ws_require_auth(websocket: WebSocket) -> bool:
     return True
 
 
+async def _ws_step_up_if_mutating(websocket: WebSocket, daemon_cmd: str, args: dict | None = None) -> bool:
+    """Run mode-aware step-up if the daemon command would mutate state.
+
+    Returns True if the connection may proceed, False if it was failed
+    (the caller must return immediately).
+    """
+    action_class = classify_action(daemon_cmd, args)
+    if action_class in (READONLY, PRETEND):
+        return True
+    try:
+        require_recent_step_up_unless_cli_mode()
+    except StepUpRequiredError:
+        await _ws_fail(websocket, 4401, "step_up_required")
+        return False
+    return True
+
+
 async def _ws_emerge(websocket: WebSocket, cmd: str, atom: str, extra_args: dict | None = None):
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, cmd, {"atom": atom, **(extra_args or {})}):
         return
     if not atom:
         await _ws_fail(websocket, 4400, "missing atom")
@@ -613,6 +633,8 @@ async def _ws_emerge(websocket: WebSocket, cmd: str, atom: str, extra_args: dict
 async def _ws_job_cmd(websocket: WebSocket, daemon_cmd: str, args: dict):
     """Start (or resume) a background job and stream its output."""
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, daemon_cmd, args):
         return
     try:
         job_id = None
@@ -1042,6 +1064,8 @@ async def ws_overlay_sync(
     approval_token: str = Query(default=""),
 ):
     if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, "overlay_sync", {"name": name}):
         return
     try:
         job_id = None
