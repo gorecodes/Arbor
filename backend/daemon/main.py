@@ -368,10 +368,34 @@ def _db_conn(*, begin_immediate: bool = False):
         conn.close()
 
 
+_SQL_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _quote_ident(name: str) -> str:
+    """Validate a SQL identifier (table or column name).
+
+    SQLite does not accept placeholders in DDL or PRAGMA statements, so we
+    fall back to string interpolation. _quote_ident guards that path: only
+    [A-Za-z_][A-Za-z0-9_]* is allowed. Any other input raises ValueError
+    so a regression cannot quietly introduce a DDL injection vector.
+
+    Call sites in this module currently pass string literals, so the
+    helper is defence in depth — but it makes future drift loud.
+    """
+    if not isinstance(name, str) or not _SQL_IDENT_RE.match(name):
+        raise ValueError(f"invalid SQL identifier: {name!r}")
+    return name
+
+
 def _db_ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str):
-    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-    if column not in columns:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    safe_table = _quote_ident(table)
+    safe_column = _quote_ident(column)
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({safe_table})")}
+    if safe_column not in columns:
+        # `definition` is intentionally not validated: call sites pass
+        # trusted literal SQL fragments (e.g. "TEXT NOT NULL DEFAULT ''").
+        # Identifier injection is the realistic vector and is closed above.
+        conn.execute(f"ALTER TABLE {safe_table} ADD COLUMN {safe_column} {definition}")
 
 
 def _db_init():
