@@ -500,9 +500,16 @@ async def _ws_fail(websocket: WebSocket, code: int, error: str):
         pass
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "ip6-localhost"}
+_BIND_IS_LOOPBACK = os.environ.get("ARBOR_HOST", "127.0.0.1").strip().lower() in _LOOPBACK_HOSTS
+
+
 def _ws_origin_allowed(origin: str | None) -> bool:
     if not origin:
-        return True
+        # Non-browser clients (curl, native tooling) omit Origin. Allow that
+        # only when bound to loopback; on any LAN/Internet bind, require an
+        # explicit Origin in the CORS allowlist.
+        return _BIND_IS_LOOPBACK
     return origin in _cors_origins
 
 
