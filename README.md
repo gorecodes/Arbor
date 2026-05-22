@@ -8,7 +8,7 @@ Designed for Gentoo systems in a local environment. Not intended to be exposed t
 
 ## Authentication and approval
 
-**Out of the box after a clean install:** password-only login, and privileged actions (install, uninstall, sync, etc.) require running `arbor-approve approve <id>` from a root shell before they start.
+**Out of the box after a clean install:** password-only login, and privileged actions (install, uninstall, sync, etc.) require a password re-prompt in the browser (step-up re-auth) before they start. No root shell needed.
 
 Two independent knobs let you change this:
 
