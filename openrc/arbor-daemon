@@ -2,23 +2,30 @@
 
 description="Arbor privilege daemon"
 
-# Hardening: launch arbor-daemon under setpriv with:
-#   --no-new-privs   prevent any exec from regaining privileges
-#   --bounding-set   drop kernel capabilities the daemon does not need.
-#
-# Kept (used by Portage during emerge): CHOWN, DAC_OVERRIDE, DAC_READ_SEARCH,
-# FOWNER, FSETID, SETGID, SETUID, SYS_CHROOT, MKNOD, KILL, SYS_ADMIN
-# (FEATURES=sandbox uses mount namespaces), SYS_PTRACE (sandbox ptrace),
-# SETPCAP (drop privs on forked children), SYS_RESOURCE.
-command="/usr/bin/setpriv"
-command_args="--no-new-privs \
---bounding-set=-cap_audit_control,-cap_audit_read,-cap_audit_write,\
--cap_block_suspend,-cap_bpf,-cap_lease,-cap_linux_immutable,\
--cap_mac_admin,-cap_mac_override,-cap_net_admin,-cap_net_bind_service,\
--cap_net_broadcast,-cap_net_raw,-cap_perfmon,-cap_setfcap,\
--cap_sys_boot,-cap_sys_module,-cap_sys_rawio,-cap_sys_time,\
--cap_syslog,-cap_wake_alarm \
+# setpriv (util-linux, USE=setpriv) drops the capability bounding set and
+# sets no_new_privs so that child processes cannot regain privileges via
+# setuid binaries. If setpriv is absent we exec the daemon directly — it
+# still runs as root with the full bounding set, which is less hardened but
+# functional. Install with: USE=setpriv emerge sys-apps/util-linux
+_SETPRIV=/usr/bin/setpriv
+if [ -x "$_SETPRIV" ]; then
+    command="$_SETPRIV"
+    # Kept (needed by Portage during emerge): CHOWN, DAC_OVERRIDE,
+    # DAC_READ_SEARCH, FOWNER, FSETID, SETGID, SETUID, SYS_CHROOT,
+    # MKNOD, KILL, SYS_ADMIN (sandbox mount ns), SYS_PTRACE (sandbox),
+    # SETPCAP (drop privs on forks), SYS_RESOURCE.
+    command_args="--no-new-privs \
+--bounding-set=-audit_control,-audit_read,-audit_write,\
+-block_suspend,-bpf,-lease,-linux_immutable,\
+-mac_admin,-mac_override,-net_admin,-net_bind_service,\
+-net_broadcast,-net_raw,-perfmon,-setfcap,\
+-sys_boot,-sys_module,-sys_rawio,-sys_time,\
+-syslog,-wake_alarm \
 -- /usr/bin/arbor-daemon"
+else
+    command="/usr/bin/arbor-daemon"
+    command_args=""
+fi
 
 command_background=true
 supervisor="supervise-daemon"
@@ -43,7 +50,7 @@ start_pre() {
     chown root:arbor /var/log/arbor/daemon.log
     chmod 0640 /var/log/arbor/daemon.log
     if [ ! -x /usr/bin/setpriv ]; then
-        eerror "setpriv not found (sys-apps/util-linux). Cannot apply daemon hardening."
-        return 1
+        ewarn "setpriv not found — capability bounding set not applied."
+        ewarn "For full hardening: USE=setpriv emerge sys-apps/util-linux"
     fi
 }
