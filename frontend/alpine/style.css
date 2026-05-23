@@ -4640,7 +4640,7 @@ input:focus,
 }
 
 /* ── News panel ────────────────────────────────────────────────────────── */
-.nw-view { padding: 1rem 1.5rem; max-width: 860px; }
+.nw-view { max-width: 860px; }
 .nw-toolbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.75rem; }
 .nw-unread-label { font-size: 0.82rem; color: #6e7681; }
 .nw-mark-all-btn { font-size: 0.78rem; padding: 0.2rem 0.7rem; border-radius: 5px; border: 1px solid #30363d; background: transparent; color: #8b949e; cursor: pointer; }
@@ -4659,7 +4659,7 @@ input:focus,
 .nw-body-pre { white-space: pre-wrap; font-family: inherit; font-size: 0.82rem; color: #8b949e; margin: 0; line-height: 1.55; }
 
 /* ── GLSA Advisories panel ──────────────────────────────────────────────── */
-.gl-view { padding: 1rem 1.5rem; max-width: 860px; }
+.gl-view { max-width: 860px; }
 .gl-clean { display: flex; align-items: center; gap: 0.75rem; padding: 2rem; color: #6e7681; }
 .gl-clean-icon { font-size: 1.5rem; color: #88a784; }
 .gl-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 2px; }
