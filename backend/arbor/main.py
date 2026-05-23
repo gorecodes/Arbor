@@ -10,9 +10,9 @@ import os
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect, Query
+from fastapi import Depends, FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .action_security import PRETEND, READONLY, classify_action
@@ -766,6 +766,29 @@ async def ws_emerge_depclean(
     )
 
 
+@app.websocket("/ws/emerge/eclean-pretend")
+async def ws_eclean_pretend(websocket: WebSocket, target: str = Query(default="dist")):
+    await _ws_job_cmd(websocket, "eclean_pretend", {"target": target})
+
+
+@app.websocket("/ws/emerge/eclean")
+async def ws_eclean(
+    websocket: WebSocket,
+    target: str = Query(default="dist"),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "eclean_run",
+        {
+            "target": target,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
 @app.websocket("/ws/emerge/preserved-rebuild")
 async def ws_emerge_preserved_rebuild(
     websocket: WebSocket,
@@ -1194,6 +1217,66 @@ async def ws_world_updates(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Config snapshot
+# ---------------------------------------------------------------------------
+
+@app.get("/api/snapshot/export")
+async def snapshot_export(auth: Auth):
+    import os as _os
+    result = await query_one("snapshot_export")
+    if "error" in result:
+        return JSONResponse(status_code=500, content={"error": result["error"]})
+    path = result.get("path", "")
+    filename = result.get("filename", "arbor-snapshot.zip")
+    if not path or not _os.path.isfile(path):
+        return JSONResponse(status_code=500, content={"error": "snapshot file not found"})
+
+    def _iter():
+        try:
+            with open(path, "rb") as f:
+                while chunk := f.read(65536):
+                    yield chunk
+        finally:
+            try:
+                _os.unlink(path)
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        _iter(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/api/snapshot/import")
+async def snapshot_import(auth: Auth, request: Request, file: UploadFile = File(...)):
+    import os as _os, tempfile
+    fd, tmp_path = tempfile.mkstemp(suffix=".zip", prefix="arbor_import_")
+    try:
+        content = await file.read(50 * 1024 * 1024)  # 50 MB cap
+        with _os.fdopen(fd, "wb") as f:
+            f.write(content)
+        fd = -1
+        result = await query_one("snapshot_import", {"path": tmp_path})
+        return result
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    finally:
+        if fd >= 0:
+            try:
+                _os.close(fd)
+            except Exception:
+                pass
+        # daemon deletes tmp_path; clean up here only if daemon never ran
+        if _os.path.exists(tmp_path):
+            try:
+                _os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
