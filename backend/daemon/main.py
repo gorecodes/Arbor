@@ -3611,7 +3611,7 @@ _SNAPSHOT_ALLOWED_PREFIXES = (
 
 
 def _snapshot_import(zip_path: str) -> dict:
-    import zipfile, shutil
+    import json, zipfile, shutil
     from datetime import datetime
 
     try:
@@ -3622,8 +3622,19 @@ def _snapshot_import(zip_path: str) -> dict:
                 if not any(name == p or name.startswith(p) for p in _SNAPSHOT_ALLOWED_PREFIXES):
                     return {"error": f"disallowed path in archive: {name}"}
             backup_path = f"/etc/portage.backup.{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-            shutil.copytree("/etc/portage", backup_path)
+            shutil.copytree("/etc/portage", backup_path, symlinks=True)
             zf.extractall("/")
+            # Restore make.profile symlink from manifest (not stored as zip entry)
+            try:
+                manifest = json.loads(zf.read("manifest.json"))
+                profile = manifest.get("profile", "").strip()
+                if profile:
+                    link = "/etc/portage/make.profile"
+                    if os.path.lexists(link):
+                        os.unlink(link)
+                    os.symlink(profile, link)
+            except Exception:
+                pass
         return {"ok": True, "backup": backup_path}
     except zipfile.BadZipFile:
         return {"error": "not a valid zip file"}
