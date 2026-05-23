@@ -276,12 +276,12 @@ def session_from_cookie_header(cookie_header: str | None) -> str:
     return morsel.value if morsel is not None else ""
 
 
-def set_session_cookie(response: Response, session_id: str) -> None:
+def set_session_cookie(response: Response, session_id: str, *, secure: bool = True) -> None:
     response.set_cookie(
         key=session_cookie_name(),
         value=session_id,
         httponly=True,
-        secure=True,
+        secure=secure,
         samesite="strict",
         max_age=session_ttl_seconds(),
         path="/",
