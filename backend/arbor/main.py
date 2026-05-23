@@ -12,7 +12,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .action_security import PRETEND, READONLY, classify_action
@@ -1226,27 +1226,24 @@ async def ws_world_updates(websocket: WebSocket):
 @app.get("/api/snapshot/export")
 async def snapshot_export(auth: Auth):
     import os as _os
+    from fastapi.responses import Response
     result = await query_one("snapshot_export")
     if "error" in result:
         return JSONResponse(status_code=500, content={"error": result["error"]})
     path = result.get("path", "")
     filename = result.get("filename", "arbor-snapshot.zip")
-    if not path or not _os.path.isfile(path):
-        return JSONResponse(status_code=500, content={"error": "snapshot file not found"})
-
-    def _iter():
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    finally:
         try:
-            with open(path, "rb") as f:
-                while chunk := f.read(65536):
-                    yield chunk
-        finally:
-            try:
-                _os.unlink(path)
-            except Exception:
-                pass
-
-    return StreamingResponse(
-        _iter(),
+            _os.unlink(path)
+        except Exception:
+            pass
+    return Response(
+        content=data,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
