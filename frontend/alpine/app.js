@@ -4439,6 +4439,7 @@ ${labels}
       },
       unreadCount() { return this.items.filter(i => i.unread).length },
       toggle(id) { this.expanded = this.expanded === id ? null : id },
+      toggleAndRead(id) { this.toggle(id); this.markRead(id) },
       async markRead(id) {
         try {
           await api.newsRead(id)

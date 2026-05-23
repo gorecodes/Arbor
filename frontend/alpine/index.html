@@ -1516,7 +1516,7 @@
         <ul class="nw-list" x-show="!loading && items.length > 0">
           <template x-for="item in items" :key="item.id">
             <li class="nw-item" :class="{ 'is-unread': item.unread }">
-              <button class="nw-item-header" @click="toggle(item.id); markRead(item.id)">
+              <button class="nw-item-header" @click="toggleAndRead(item.id)">
                 <span class="nw-dot" x-show="item.unread">&#9679;</span>
                 <span class="nw-item-title" x-text="item.title"></span>
                 <span class="nw-item-meta" x-text="item.posted"></span>
