@@ -127,6 +127,10 @@
     stats:       ()          => _get('/stats'),
     pkgStats:    ()          => _get('/pkg-stats'),
     compileCats: ()          => _get('/analytics/compile-time-by-category'),
+    news:        ()          => _get('/news'),
+    newsRead:    (id)        => _post('/news/read', { id }),
+    newsReadAll: ()          => _post('/news/read-all', {}),
+    glsa:        ()          => _get('/glsa'),
   }
 
   const emerge = {
@@ -752,6 +756,8 @@
     { id: 'use-flags', label: 'USE Flags'   },
     { id: 'updates',   label: 'Maintenance' },
     { id: 'overlays',  label: 'Overlays'    },
+    { id: 'news',      label: 'News'        },
+    { id: 'glsa',      label: 'Advisories'  },
     { id: 'jobs',      label: 'Jobs'        },
   ]
 
@@ -995,6 +1001,20 @@
             detail: 'Inspect configured overlays and sync additional repositories.',
           }
         }
+        if (r.view === 'news') {
+          return {
+            section: 'Portage',
+            title: 'News',
+            detail: 'GLEP-42 news items from the Portage tree',
+          }
+        }
+        if (r.view === 'glsa') {
+          return {
+            section: 'Security',
+            title: 'Advisories',
+            detail: 'Gentoo Linux Security Advisories affecting this system',
+          }
+        }
         if (r.view === 'security') {
           return {
             section: 'Administration',
@@ -1182,6 +1202,8 @@
       compileCats: null,
       runningJobs: [],
       recentHistory: [],
+      newsData: null,
+      glsaData: null,
       error: null,
       _timer: null,
       init() {
@@ -1200,13 +1222,15 @@
       async _load() {
         try {
           this.error = null
-          const [statusRes, statsRes, pkgStatsRes, compileCatsRes, jobsRes, historyRes] = await Promise.allSettled([
+          const [statusRes, statsRes, pkgStatsRes, compileCatsRes, jobsRes, historyRes, newsRes, glsaRes] = await Promise.allSettled([
             api.status(),
             api.stats(),
             api.pkgStats(),
             api.compileCats(),
             jobs.list(),
             jobHistory.list(12, 0, ''),
+            api.news(),
+            api.glsa(),
           ])
           if (statusRes.status !== 'fulfilled') throw statusRes.reason
           this.status = statusRes.value
@@ -1215,6 +1239,8 @@
           this.compileCats = compileCatsRes.status === 'fulfilled' ? compileCatsRes.value : null
           this.runningJobs = jobsRes.status === 'fulfilled' && Array.isArray(jobsRes.value) ? jobsRes.value : []
           this.recentHistory = historyRes.status === 'fulfilled' && Array.isArray(historyRes.value?.items) ? historyRes.value.items : []
+          this.newsData = newsRes.status === 'fulfilled' ? newsRes.value : null
+          this.glsaData = glsaRes.status === 'fulfilled' ? glsaRes.value : null
         } catch(e) { this.error = e.message }
         finally { this.$nextTick(() => this._renderCompileCats()) }
       },
@@ -1441,7 +1467,7 @@
       topSummaryCards() {
         const recentFailures = this.recentFailureCount()
         const recentCount = this.recentWindow().length
-        return [
+        const items = [
           {
             key: 'jobs',
             label: 'job state',
@@ -1471,6 +1497,31 @@
             tone: 'muted',
           },
         ]
+        // Unread news
+        const unreadNews = Array.isArray(this.newsData) ? this.newsData.filter(n => n.unread).length : null
+        if (unreadNews !== null) {
+          items.push({
+            key: 'news',
+            label: 'Portage news',
+            value: unreadNews > 0 ? String(unreadNews) + ' unread' : 'Up to date',
+            detail: '',
+            tone: unreadNews > 0 ? 'warn' : 'ok',
+            action: () => Alpine.store('router').nav('news'),
+          })
+        }
+        // Affected GLSAs
+        const affectedGlsa = Array.isArray(this.glsaData) ? this.glsaData.filter(g => !g.error).length : null
+        if (affectedGlsa !== null) {
+          items.push({
+            key: 'glsa',
+            label: 'Security advisories',
+            value: affectedGlsa > 0 ? String(affectedGlsa) + ' affected' : 'Clean',
+            detail: '',
+            tone: affectedGlsa > 0 ? 'error' : 'ok',
+            action: () => Alpine.store('router').nav('glsa'),
+          })
+        }
+        return items
       },
       activitySummaryCards() {
         const counts = this.stats?.status_counts || {}
@@ -4132,6 +4183,8 @@ ${labels}
     Alpine.data('installComponent', installComponent)
     Alpine.data('updatesComponent', updatesComponent)
     Alpine.data('overlayViewComponent', overlayViewComponent)
+    Alpine.data('newsComponent', newsComponent)
+    Alpine.data('glsaComponent', glsaComponent)
   })
 
   // ---------------------------------------------------------------------------
@@ -4358,6 +4411,81 @@ ${labels}
       fmtLastSync(ts) {
         if (!ts) return '—'
         try { return new Date(ts).toLocaleDateString() } catch(_) { return ts }
+      },
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // News view
+  // ---------------------------------------------------------------------------
+  function newsComponent() {
+    return {
+      items: [],
+      loading: true,
+      error: null,
+      expanded: null,
+      async init() {
+        await this.load()
+      },
+      async load() {
+        this.loading = true
+        try {
+          this.items = await api.news()
+        } catch(e) {
+          this.error = e.message
+        } finally {
+          this.loading = false
+        }
+      },
+      unreadCount() { return this.items.filter(i => i.unread).length },
+      toggle(id) { this.expanded = this.expanded === id ? null : id },
+      toggleAndRead(id) { this.toggle(id); this.markRead(id) },
+      async markRead(id) {
+        try {
+          await api.newsRead(id)
+          const item = this.items.find(i => i.id === id)
+          if (item) item.unread = false
+        } catch(e) {}
+      },
+      async markAllRead() {
+        try {
+          await api.newsReadAll()
+          this.items.forEach(i => i.unread = false)
+        } catch(e) {}
+      },
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // GLSA advisories view
+  // ---------------------------------------------------------------------------
+  function glsaComponent() {
+    return {
+      items: [],
+      loading: true,
+      error: null,
+      expanded: null,
+      async init() {
+        await this.load()
+      },
+      async load() {
+        this.loading = true
+        try {
+          const data = await api.glsa()
+          this.items = data.filter(i => !i.error)
+          if (data.some(i => i.error)) this.error = data.find(i => i.error).error
+        } catch(e) {
+          this.error = e.message
+        } finally {
+          this.loading = false
+        }
+      },
+      toggle(id) { this.expanded = this.expanded === id ? null : id },
+      severityTone(s) { return s === 'high' ? 'error' : s === 'normal' ? 'warn' : 'ok' },
+      fixAtom(item) { return item.packages[0] || '' },
+      goFix(item) {
+        if (!item.packages[0]) return
+        Alpine.store('router').nav('install', item.packages[0])
       },
     }
   }

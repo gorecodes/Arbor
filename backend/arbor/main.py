@@ -1083,6 +1083,47 @@ async def overlay_remove(auth: Auth, name: str, request: Request, purge: int = Q
     return data
 
 
+# ---------------------------------------------------------------------------
+# News (GLEP 42) endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/news")
+async def news_list(auth: Auth):
+    results = await query_all("news_list")
+    return [r for r in results if "id" in r]
+
+
+@app.post("/api/news/read")
+async def news_mark_read(auth: Auth, request: Request):
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    item_id = str(body.get("id", "")).strip()
+    if not item_id:
+        return JSONResponse(status_code=400, content={"error": "missing id"})
+    result = await query_one("news_mark_read", {"id": item_id})
+    return result
+
+
+@app.post("/api/news/read-all")
+async def news_mark_all_read(auth: Auth, request: Request):
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    result = await query_one("news_mark_all_read", {})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GLSA advisories endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/api/glsa")
+async def glsa_list(auth: Auth):
+    results = await query_all("glsa_list")
+    return [r for r in results if "id" in r or "error" in r]
+
+
 @app.websocket("/ws/overlays/sync/{name}")
 async def ws_overlay_sync(
     websocket: WebSocket,

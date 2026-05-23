@@ -33,6 +33,10 @@ _READONLY_COMMANDS = {
     "history_stats",
     "overlay_list",
     "totp_status",
+    "news_list",
+    "news_mark_read",
+    "news_mark_all_read",
+    "glsa_list",
 }
 
 _PRETEND_COMMANDS = {

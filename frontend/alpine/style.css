@@ -4638,3 +4638,47 @@ input:focus,
     font-size: 0.74rem;
   }
 }
+
+/* ── News panel ────────────────────────────────────────────────────────── */
+.nw-view { max-width: 860px; }
+.nw-toolbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 0.75rem; }
+.nw-unread-label { font-size: 0.82rem; color: #6e7681; }
+.nw-mark-all-btn { font-size: 0.78rem; padding: 0.2rem 0.7rem; border-radius: 5px; border: 1px solid #30363d; background: transparent; color: #8b949e; cursor: pointer; }
+.nw-mark-all-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+.nw-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 2px; }
+.nw-item { border: 1px solid #21262d; border-radius: 6px; overflow: hidden; }
+.nw-item.is-unread { border-color: #30363d; }
+.nw-item-header { width: 100%; display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.9rem; background: transparent; border: none; cursor: pointer; text-align: left; color: #e6edf3; }
+.nw-item-header:hover { background: #161b22; }
+.nw-dot { color: #58a6ff; font-size: 0.6rem; flex-shrink: 0; }
+.nw-item-title { flex: 1; font-size: 0.88rem; }
+.nw-item.is-unread .nw-item-title { font-weight: 600; }
+.nw-item-meta { font-size: 0.75rem; color: #6e7681; flex-shrink: 0; }
+.nw-item-chevron { font-size: 0.65rem; color: #6e7681; flex-shrink: 0; }
+.nw-item-body { padding: 0.75rem 1rem 0.75rem 2rem; border-top: 1px solid #21262d; background: #0d1117; }
+.nw-body-pre { white-space: pre-wrap; font-family: inherit; font-size: 0.82rem; color: #8b949e; margin: 0; line-height: 1.55; }
+
+/* ── GLSA Advisories panel ──────────────────────────────────────────────── */
+.gl-view { max-width: 860px; }
+.gl-clean { display: flex; align-items: center; gap: 0.75rem; padding: 2rem; color: #6e7681; }
+.gl-clean-icon { font-size: 1.5rem; color: #88a784; }
+.gl-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 2px; }
+.gl-item { border: 1px solid #21262d; border-radius: 6px; overflow: hidden; }
+.gl-item-header { width: 100%; display: flex; align-items: center; gap: 0.6rem; padding: 0.6rem 0.9rem; background: transparent; border: none; cursor: pointer; text-align: left; color: #e6edf3; }
+.gl-item-header:hover { background: #161b22; }
+.gl-severity { font-size: 0.72rem; font-weight: 600; border-radius: 5px; padding: 0.1rem 0.45rem; border: 1px solid; flex-shrink: 0; text-transform: uppercase; letter-spacing: 0.03em; }
+.gl-severity.is-error { background: rgb(218 54 51 / 0.15); color: #f85149; border-color: rgb(218 54 51 / 0.3); }
+.gl-severity.is-warn  { background: rgb(210 153 34 / 0.15); color: #d99428; border-color: rgb(210 153 34 / 0.3); }
+.gl-severity.is-ok    { background: rgb(136 167 132 / 0.15); color: #88a784; border-color: rgb(136 167 132 / 0.25); }
+.gl-item-id   { font-size: 0.78rem; color: #6e7681; flex-shrink: 0; font-family: monospace; }
+.gl-item-title { flex: 1; font-size: 0.88rem; }
+.gl-item-date { font-size: 0.75rem; color: #6e7681; flex-shrink: 0; }
+.gl-chevron   { font-size: 0.65rem; color: #6e7681; flex-shrink: 0; }
+.gl-item-body { padding: 0.75rem 1rem; border-top: 1px solid #21262d; background: #0d1117; display: flex; flex-direction: column; gap: 0.5rem; }
+.gl-synopsis  { font-size: 0.83rem; color: #8b949e; margin: 0; }
+.gl-packages  { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+.gl-pkg-label { font-size: 0.75rem; color: #6e7681; }
+.gl-pkg-chip  { font-size: 0.75rem; font-family: monospace; background: #161b22; border: 1px solid #30363d; border-radius: 4px; padding: 0.1rem 0.4rem; color: #8b949e; }
+.gl-actions   { margin-top: 0.25rem; }
+.gl-fix-btn   { font-size: 0.8rem; padding: 0.25rem 0.8rem; border-radius: 5px; border: 1px solid rgb(88 166 255 / 0.4); background: rgb(88 166 255 / 0.1); color: #58a6ff; cursor: pointer; }
+.gl-fix-btn:hover { background: rgb(88 166 255 / 0.2); }
