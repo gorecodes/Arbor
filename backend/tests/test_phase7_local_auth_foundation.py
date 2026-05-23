@@ -17,11 +17,12 @@ import arbor.totp_admin as totp_admin
 
 
 class FakeRequest:
-    def __init__(self, body=None, *, cookies=None, headers=None, client_host="127.0.0.1"):
+    def __init__(self, body=None, *, cookies=None, headers=None, client_host="127.0.0.1", scheme="http"):
         self._body = body
         self.cookies = cookies or {}
         self.headers = headers or {}
         self.client = SimpleNamespace(host=client_host)
+        self.url = SimpleNamespace(scheme=scheme)
 
     async def body(self):
         if self._body is None:
