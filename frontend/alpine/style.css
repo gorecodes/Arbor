@@ -1562,6 +1562,20 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
 .ev-eta-legend-item.is-partial { color: #b59a67; }
 .ev-eta-legend-item.is-none   { color: #6e7681; }
 
+.ev-ops {
+  display: flex; align-items: center; gap: 0.4rem;
+  padding: 0.3rem 1rem; flex-shrink: 0;
+  border-top: 1px solid #30363d;
+}
+.ev-op-badge {
+  font-size: 0.78rem; font-weight: 600;
+  border-radius: 5px; padding: 0.15rem 0.55rem;
+}
+.ev-op-badge.is-new       { background: rgb(136 167 132 / 0.15); color: #88a784; border: 1px solid rgb(136 167 132 / 0.25); }
+.ev-op-badge.is-update     { background: rgb(88 166 255 / 0.1);  color: #58a6ff; border: 1px solid rgb(88 166 255 / 0.2);  }
+.ev-op-badge.is-downgrade  { background: rgb(210 153 34 / 0.15); color: #d99428; border: 1px solid rgb(210 153 34 / 0.3);  }
+.ev-op-badge.is-reinstall  { background: rgb(152 164 175 / 0.1); color: #6e7681; border: 1px solid rgb(152 164 175 / 0.2); }
+
 /* ── EmergeOptions (inline in Install + Updates) ─────────────────────────── */
 
 .eo-opts {
