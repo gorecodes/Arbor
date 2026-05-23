@@ -37,7 +37,7 @@ from .csrf import (
     verify_csrf_tokens,
 )
 from .daemon_client import query, query_all, query_one
-from .emerge_log import compile_time_by_category
+from .emerge_log import compile_time_by_category, compile_time_estimate
 from .local_auth import dummy_password_hash, find_user_by_username, has_local_users, mark_login_success, record_login_failure, verify_password
 from .login_throttle import login_retry_after, register_login_failure, register_login_success
 from .session import clear_session_cookie, create_session, record_step_up, revoke_all_sessions, revoke_session, set_session_cookie, session_cookie_name
@@ -981,6 +981,22 @@ async def analytics_compile_time(auth: Auth):
     invalidated automatically when the log file changes.
     """
     return await compile_time_by_category()
+
+
+@app.post("/api/analytics/eta-estimate")
+async def analytics_eta_estimate(auth: Auth, request: Request):
+    """
+    Given a list of CPV atoms from a pretend output, return a build-time estimate.
+    Read-only: no privilege required beyond authentication.
+    """
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    atoms = body.get("atoms", [])
+    if not isinstance(atoms, list):
+        return JSONResponse(status_code=400, content={"error": "atoms must be a list"})
+    atoms = [str(a) for a in atoms if isinstance(a, str)][:100]
+    return await compile_time_estimate(atoms)
 
 
 @app.post("/api/emerge/etc-update/resolve")

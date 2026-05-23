@@ -2239,7 +2239,7 @@ async def cmd_emerge_pretend(args):
             yield {"line": line}
         await proc.wait()
         full = "\n".join(lines)
-        # Only flag needs_unmask when emerge actually failed due to masking
+        # Only flag needs_unmask when emerge actually failed due to masking or USE changes
         needs_unmask = proc.returncode != 0 and any(s in full for s in [
             "autounmask-write",
             "package.accept_keywords",
@@ -2247,6 +2247,7 @@ async def cmd_emerge_pretend(args):
             "package.unmask",
             "missing keyword",
             "masked by: ~",
+            "USE changes are necessary",
         ])
         yield {"done": True, "returncode": proc.returncode, "needs_unmask": needs_unmask}
     finally:
@@ -2256,6 +2257,68 @@ async def cmd_emerge_pretend(args):
 _MASKED_RE = re.compile(
     r"-\s+([\w.+@/-]+(?:-[\d][\w.+@-]*)?)::\S+\s+\(masked by:\s+(~[\w-]+|missing)\s+keyword"
 )
+
+# Matches a USE-change line emitted by emerge --autounmask=y, e.g.:
+#   >=media-libs/libvpx-1.16.0 postproc
+#   =dev-libs/openssl-3.4.0:0/3 -bindist tls-heartbeat
+_USE_FLAG_TOKEN_RE = re.compile(r'^-?[a-zA-Z0-9_][a-zA-Z0-9_-]*$')
+_USE_CHANGE_LINE_RE = re.compile(
+    r'^([<>=~!]?=?[a-z][a-z0-9+._-]*/[a-zA-Z0-9+._-][a-zA-Z0-9+._/-]*'
+    r'(?:-\d[\w.+@-]*)?(?::[\w.+/-]+)?)\s+(-?[a-zA-Z0-9_][a-zA-Z0-9_\s+=-]*)$'
+)
+
+
+def _parse_use_changes(text: str) -> list[tuple[str, str]]:
+    """Extract (atom, flags_str) pairs from the USE-change block in autounmask output."""
+    entries: list[tuple[str, str]] = []
+    in_block = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "USE changes are necessary" in stripped:
+            in_block = True
+            continue
+        if not in_block:
+            continue
+        if not stripped or stripped.startswith("#") or stripped.startswith("(see"):
+            continue
+        # A non-comment non-empty line outside a USE block signals a new section.
+        if stripped.startswith("The following") or stripped.startswith("!"):
+            in_block = False
+            continue
+        m = _USE_CHANGE_LINE_RE.match(stripped)
+        if not m:
+            continue
+        atom_raw, flags_raw = m.group(1).strip(), m.group(2).strip()
+        # Validate each flag token.
+        flags = [f for f in flags_raw.split() if _USE_FLAG_TOKEN_RE.match(f)]
+        if not flags:
+            continue
+        entries.append((atom_raw, " ".join(flags)))
+    return entries
+
+
+def _write_use_flags(entries: list[tuple[str, str]]) -> tuple[str, list[str], list[str]]:
+    """Write [(atom, flags_str), ...] to package.use/arbor-accepted.
+
+    Returns (path, list_of_written_lines, list_of_rejected).
+    """
+    use_path = Path("/etc/portage/package.use")
+    target = use_path / "arbor-accepted" if use_path.is_dir() else use_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existing = target.read_text() if target.exists() else ""
+    written: list[str] = []
+    rejected: list[str] = []
+    with open(target, "a") as f:
+        for atom, flags in entries:
+            if not _valid_atom(atom):
+                rejected.append(f"{atom!r} {flags!r}")
+                continue
+            line = f"{atom} {flags}\n"
+            if line not in existing:
+                f.write(f"# Added by arbor\n{line}")
+                existing += line
+                written.append(f"{atom} {flags}")
+    return str(target), written, rejected
 
 
 async def cmd_emerge_autounmask(args):
@@ -2299,29 +2362,40 @@ async def cmd_emerge_autounmask(args):
             stderr=asyncio.subprocess.STDOUT,
             env=_EMERGE_ENV,
         )
+        unmask_lines = []
         async for raw in proc2.stdout:
-            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+            line = _ANSI.sub("", raw.decode(errors="replace").rstrip())
+            unmask_lines.append(line)
+            yield {"line": line}
         await proc2.wait()
+        unmask_full = "\n".join(unmask_lines)
 
-        # Step 3 — parse the plain-pretend output for "masked by" lines and write
-        # keyword entries to our own file under /etc/portage/package.accept_keywords.
-        # We never touch any other portage config file: USE/license/mask changes
-        # the user must apply manually.
-        entries = []
+        # Step 3 — write keyword entries for masked-by-keyword packages.
+        kw_entries = []
         for m in _MASKED_RE.finditer(scan_full):
             cpv_raw, kw_raw = m.group(1), m.group(2)
             kw = "**" if kw_raw == "missing" else kw_raw
-            entries.append((_normalize_atom(cpv_raw), kw))
-        entries.append((atom, "**"))  # always accept the main atom
+            kw_entries.append((_normalize_atom(cpv_raw), kw))
+        kw_entries.append((atom, "**"))  # always accept the main atom
 
-        kw_file, written, rejected = await in_thread(_write_keywords, entries)
-        if written:
-            for w in written:
+        kw_file, kw_written, kw_rejected = await in_thread(_write_keywords, kw_entries)
+        if kw_written:
+            for w in kw_written:
                 yield {"line": f"-- wrote '{w}' → {kw_file}"}
         else:
             yield {"line": f"-- no new keyword entries needed in {kw_file}"}
-        for r in rejected:
-            yield {"line": f"-- rejected invalid entry: {r}"}
+        for r in kw_rejected:
+            yield {"line": f"-- rejected invalid keyword entry: {r}"}
+
+        # Step 4 — write USE flag changes required by the autounmask output.
+        use_entries = _parse_use_changes(unmask_full)
+        if use_entries:
+            use_file, use_written, use_rejected = await in_thread(_write_use_flags, use_entries)
+            if use_written:
+                for w in use_written:
+                    yield {"line": f"-- wrote USE '{w}' → {use_file}"}
+            for r in use_rejected:
+                yield {"line": f"-- rejected invalid USE entry: {r}"}
 
         yield {"done": True, "returncode": 0}
     finally:
