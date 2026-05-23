@@ -3248,7 +3248,7 @@ ${labels}
       _parsePretendOps(lines) {
         const counts = { new: 0, update: 0, downgrade: 0, reinstall: 0 }
         for (const line of lines) {
-          const m = line.match(/^\[(?:ebuild|binary)\s+([A-Z\s]*)\]/)
+          const m = line.match(/^\[(?:ebuild|binary)\s+([^\]]*)\]/)
           if (!m) continue
           const f = m[1]
           if (f.includes('N'))      { counts.new++;       continue }
