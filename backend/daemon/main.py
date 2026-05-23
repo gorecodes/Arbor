@@ -308,12 +308,13 @@ _job_state_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 _REPOS_CONF_PATHS = [Path("/etc/portage/repos.conf"), Path("/etc/portage/repos.conf.d")]
+_REPOS_DB_ROOT = Path("/var/db/repos")
 _repos_conf_mtime: float = 0.0
 _portage_reload_lock = threading.Lock()
 
 
 def _repos_conf_mtime_now() -> float:
-    """Return the latest mtime across all repos.conf files/dirs."""
+    """Return the latest mtime across repos.conf and repo metadata timestamps."""
     t = 0.0
     for p in _REPOS_CONF_PATHS:
         try:
@@ -323,6 +324,19 @@ def _repos_conf_mtime_now() -> float:
                 t = max(t, p.stat().st_mtime)
         except OSError:
             pass
+    # Watch each repo's metadata/timestamp.chk (updated by sync) and the
+    # repo root mtime (updated by manifest regen, new ebuilds, etc.).
+    try:
+        for repo_dir in _REPOS_DB_ROOT.iterdir():
+            try:
+                t = max(t, repo_dir.stat().st_mtime)
+                ts_file = repo_dir / "metadata" / "timestamp.chk"
+                if ts_file.exists():
+                    t = max(t, ts_file.stat().st_mtime)
+            except OSError:
+                pass
+    except OSError:
+        pass
     return t
 
 
