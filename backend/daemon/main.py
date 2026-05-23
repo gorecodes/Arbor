@@ -3587,6 +3587,7 @@ def _snapshot_export() -> dict:
                     "profile": profile,
                 }
                 zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+        os.chmod(path, 0o644)
         filename = f"arbor-snapshot-{datetime.utcnow().strftime('%Y%m%d')}.zip"
         return {"path": path, "filename": filename}
     except Exception as exc:
