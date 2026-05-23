@@ -1621,7 +1621,7 @@
           </label>
           <div class="sn-import-result" x-show="importResult">
             <span class="sn-result-ok">&#10003; Applied.</span>
-            <span class="sn-result-backup" x-text="'Backup saved to ' + (importResult?.backup || '')"></span>
+            <span class="sn-result-backup" x-text="'Backup saved to ' + (importResult && importResult.backup || '')"></span>
           </div>
         </section>
       </div>
