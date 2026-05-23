@@ -3158,7 +3158,7 @@ ${labels}
       ...makeEmergeOptions('arbor_opts_install', INSTALL_OPTS_SCHEMA, 'emerge', ['--verbose', '--color=n']),
       step: 'pretend', lines: [], running: false, returncode: null, ws: null,
       approvalRequest: null, approvalCommand: '', approvalError: null,
-      needsUnmask: false, etcFiles: [],
+      needsUnmask: false, etcFiles: [], eta: null,
       _pending: [], _flushTimer: null, _attachRetries: 0, _approvalPollTimer: null,
       init() {
         this.eoLoad()
@@ -3232,7 +3232,62 @@ ${labels}
       },
       _resetLines() {
         if (this._flushTimer !== null) { clearTimeout(this._flushTimer); this._flushTimer = null }
-        this._pending = []; this.lines = []
+        this._pending = []; this.lines = []; this.eta = null
+      },
+      _parsePretendAtoms(lines) {
+        const seen = new Set()
+        const atoms = []
+        for (const line of lines) {
+          const m = line.match(/^\[(?:ebuild|binary)[^\]]*\]\s+(\S+)/)
+          if (!m) continue
+          const atom = m[1].split('::')[0]
+          if (!seen.has(atom)) { seen.add(atom); atoms.push(atom) }
+        }
+        return atoms
+      },
+      async _fetchEta(lines) {
+        const atoms = this._parsePretendAtoms(lines)
+        if (atoms.length === 0) return
+        try {
+          this.eta = await _post('/analytics/eta-estimate', { atoms })
+        } catch (_) {}
+      },
+      etaLabel() {
+        const secs = this.eta?.total_seconds ?? 0
+        if (secs <= 0) return '< 1 min'
+        if (secs < 60) return '< 1 min'
+        const h = Math.floor(secs / 3600)
+        const m = Math.floor((secs % 3600) / 60)
+        if (h === 0) return m + ' min'
+        return m > 0 ? h + ' h ' + m + ' min' : h + ' h'
+      },
+      etaExactCount() {
+        const items = this.eta?.items ?? []
+        return items.filter(i => i.confidence === 'exact').length
+      },
+      etaTotal() {
+        return (this.eta?.items ?? []).length
+      },
+      etaConfidenceNote() {
+        const exact = this.etaExactCount()
+        const total = this.etaTotal()
+        if (total === 0) return ''
+        if (exact === total) return ''
+        if (exact === 0) return 'no build history — rough estimate'
+        return `${exact} of ${total} packages from build history`
+      },
+      etaConfidenceTone() {
+        const exact = this.etaExactCount()
+        const total = this.etaTotal()
+        if (total === 0 || exact === total) return 'exact'
+        if (exact === 0) return 'none'
+        return 'partial'
+      },
+      etaTooltip() {
+        const tone = this.etaConfidenceTone()
+        if (tone === 'exact') return 'All packages have build history on this machine — estimate is reliable'
+        if (tone === 'none')  return 'No build history found — estimate uses category averages and may be very inaccurate'
+        return 'Some packages have no build history — estimate uses category averages for those'
       },
       runPretend(clean) {
         const atom = Alpine.store('router').installAtom
@@ -3247,6 +3302,7 @@ ${labels}
             this._flushLines(); this.running = false
             this.returncode = msg.returncode ?? null; this.ws = null
             this.needsUnmask = !!msg.needs_unmask
+            if ((msg.returncode ?? 1) === 0) this._fetchEta(this.lines)
           }
         }, extra)
       },

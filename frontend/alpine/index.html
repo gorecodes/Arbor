@@ -280,6 +280,17 @@
               <span x-text="($store.router.installAtom || '') + ' installed successfully.'"></span>
             </div>
 
+            <!-- ETA badge (shown after a successful pretend) -->
+            <div class="ev-eta" x-show="eta && step === 'pretend' && returncode === 0 && !running">
+              <span class="ev-eta-badge" :class="'is-' + etaConfidenceTone()" x-text="'≈ ' + etaLabel()"></span>
+              <span class="ev-eta-note" x-show="etaConfidenceNote()" x-text="etaConfidenceNote()"></span>
+              <span class="ev-eta-legend">
+                <span class="ev-eta-legend-item is-exact">● from history</span>
+                <span class="ev-eta-legend-item is-partial">● partial</span>
+                <span class="ev-eta-legend-item is-none">● estimated</span>
+              </span>
+            </div>
+
             <!-- Actions -->
             <div class="ev-actions">
               <button class="ev-btn-primary"
