@@ -436,8 +436,11 @@ Overlay add is disabled by default. To enable it, set `ARBOR_ENABLE_OVERLAY_ADD=
 - **Install / Uninstall** — pretend first, stream live output, resume running jobs, and require approval before the real root action starts. After a successful pretend, a **build-time ETA badge** is shown using local `emerge.log` history. The badge colour indicates confidence: green means all packages have been built on this machine before (reliable), yellow means some packages fall back to category averages (partial), grey means no local history exists and the figure is a rough estimate only. A legend is always visible alongside the badge.
 - **Autounmask flow** — for masked or USE-constrained install targets, Arbor detects both keyword masks and required USE flag changes from the pretend output, then writes the necessary entries to `/etc/portage/package.accept_keywords/arbor-accepted` and `/etc/portage/package.use/arbor-accepted` respectively, before re-running the pretend automatically
 - **etc-update review** — after successful installs, pending `._cfg*` files can be reviewed and resolved in the UI
-- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with approval on privileged steps
+- **Maintenance** — sync, check `@world`, update `@world`, run preserved-rebuild, and depclean with approval on privileged steps; **cache cleaner** runs `eclean-dist` / `eclean-pkg` in pretend mode first, then deletes with approval
 - **Overlays** — list configured overlays, sync them, remove them, and optionally add new ones with explicit danger acknowledgement plus approval
+- **Portage News** — reads GLEP 42 news items from the local tree, tracks read state per-item, shows an unread count badge on the dashboard
+- **GLSA advisories** — lists security advisories that affect the installed system via `glsa-check`, with severity badges, affected packages, and a quick-fix button
+- **Config snapshot** — export `/etc/portage/` (including the `make.profile` symlink) and world files as a zip; import with an automatic timestamped backup of the current config before applying
 - **Jobs** — view active jobs, reopen live output, browse persisted history with log viewing, delete, and purge actions (stored in SQLite at `/var/lib/arbor/history.db`), and surface recovered orphaned/unknown jobs after daemon restart
 
 ## Screenshots
