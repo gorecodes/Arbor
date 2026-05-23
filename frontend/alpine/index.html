@@ -386,7 +386,9 @@
           <div x-show="status && !error">
             <section class="dash-summary-strip">
               <template x-for="signal in topSummaryCards()" :key="signal.key">
-                <div class="dash-summary-cell" :data-tone="signal.tone">
+                <div class="dash-summary-cell" :data-tone="signal.tone"
+                     @click="signal.action && signal.action()"
+                     :style="signal.action ? 'cursor:pointer' : ''">
                   <span class="dash-summary-label" x-text="signal.label"></span>
                   <span class="dash-summary-value" x-text="signal.value"></span>
                   <span class="dash-summary-detail" x-text="signal.detail"></span>
@@ -1501,6 +1503,70 @@
       </section>
 
       </div>
+
+      <!-- News view -->
+      <div x-show="$store.router.view === 'news'" x-data="newsComponent" class="nw-view">
+        <div class="nw-toolbar" x-show="!loading && unreadCount() > 0">
+          <span class="nw-unread-label" x-text="unreadCount() + ' unread'"></span>
+          <button class="nw-mark-all-btn" @click="markAllRead()">Mark all read</button>
+        </div>
+        <p class="muted" x-show="loading">Loading…</p>
+        <p class="error" x-show="error && !loading" x-text="error"></p>
+        <p class="muted" x-show="!loading && !error && items.length === 0">No news items found.</p>
+        <ul class="nw-list" x-show="!loading && items.length > 0">
+          <template x-for="item in items" :key="item.id">
+            <li class="nw-item" :class="{ 'is-unread': item.unread }">
+              <button class="nw-item-header" @click="toggle(item.id); markRead(item.id)">
+                <span class="nw-dot" x-show="item.unread">&#9679;</span>
+                <span class="nw-item-title" x-text="item.title"></span>
+                <span class="nw-item-meta" x-text="item.posted"></span>
+                <span class="nw-item-chevron" x-text="expanded === item.id ? '▲' : '▼'"></span>
+              </button>
+              <div class="nw-item-body" x-show="expanded === item.id">
+                <pre class="nw-body-pre" x-text="item.body"></pre>
+              </div>
+            </li>
+          </template>
+        </ul>
+      </div>
+
+      <!-- GLSA Advisories view -->
+      <div x-show="$store.router.view === 'glsa'" x-data="glsaComponent" class="gl-view">
+        <p class="muted" x-show="loading">Loading… (this may take a moment)</p>
+        <p class="error" x-show="error && !loading" x-text="error"></p>
+        <div class="gl-clean" x-show="!loading && !error && items.length === 0">
+          <span class="gl-clean-icon">&#10003;</span>
+          <p>This system is not affected by any known GLSAs.</p>
+        </div>
+        <ul class="gl-list" x-show="!loading && items.length > 0">
+          <template x-for="item in items" :key="item.id">
+            <li class="gl-item">
+              <button class="gl-item-header" @click="toggle(item.id)">
+                <span class="gl-severity" :class="'is-' + severityTone(item.severity)" x-text="item.severity"></span>
+                <span class="gl-item-id" x-text="'GLSA ' + item.id"></span>
+                <span class="gl-item-title" x-text="item.title"></span>
+                <span class="gl-item-date" x-text="item.announced"></span>
+                <span class="gl-chevron" x-text="expanded === item.id ? '▲' : '▼'"></span>
+              </button>
+              <div class="gl-item-body" x-show="expanded === item.id">
+                <p class="gl-synopsis" x-text="item.synopsis"></p>
+                <div class="gl-packages">
+                  <span class="gl-pkg-label">Affected packages:</span>
+                  <template x-for="pkg in item.packages" :key="pkg">
+                    <span class="gl-pkg-chip" x-text="pkg"></span>
+                  </template>
+                </div>
+                <div class="gl-actions" x-show="item.packages.length > 0 && $store.auth.canOperate">
+                  <button class="gl-fix-btn" @click="goFix(item)">
+                    Fix: update <span x-text="item.packages[0]"></span>
+                  </button>
+                </div>
+              </div>
+            </li>
+          </template>
+        </ul>
+      </div>
+
     </main>
   </div>
 

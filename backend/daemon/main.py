@@ -3320,6 +3320,181 @@ async def cmd_approval_request_show(args):
     yield result
 
 
+# ---------------------------------------------------------------------------
+# News (GLEP 42)
+# ---------------------------------------------------------------------------
+
+_NEWS_READ_FILE = "/var/lib/arbor/news_read.json"
+
+
+def _news_read_ids() -> set:
+    try:
+        with open(_NEWS_READ_FILE) as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _news_save_read_ids(ids: set) -> None:
+    os.makedirs(os.path.dirname(_NEWS_READ_FILE), exist_ok=True)
+    with open(_NEWS_READ_FILE, "w") as f:
+        json.dump(sorted(ids), f)
+
+
+def _parse_news_headers(text: str) -> tuple:
+    """Parse GLEP-42 news item: returns (headers_dict, body_text)."""
+    headers = {}
+    lines = text.splitlines()
+    i = 0
+    current_key = None
+    while i < len(lines):
+        line = lines[i]
+        if line == "":
+            body = "\n".join(lines[i + 1:]).strip()
+            return headers, body
+        if line[0:1] in (" ", "\t") and current_key:
+            headers[current_key] = headers[current_key] + " " + line.strip()
+        elif ": " in line:
+            current_key, _, val = line.partition(": ")
+            headers[current_key.strip()] = val.strip()
+        i += 1
+    return headers, ""
+
+
+def _safe_match(vdb, atom: str) -> bool:
+    try:
+        return bool(vdb.match(atom))
+    except Exception:
+        return False
+
+
+def _news_list():
+    import portage
+    _maybe_reload_portage()
+    vdb = portage.db[portage.root]["vartree"].dbapi
+    read_ids = _news_read_ids()
+    results = []
+    repos_base = "/var/db/repos"
+    if not os.path.isdir(repos_base):
+        return results
+    for repo_name in sorted(os.listdir(repos_base)):
+        news_dir = os.path.join(repos_base, repo_name, "metadata", "news")
+        if not os.path.isdir(news_dir):
+            continue
+        for item_id in sorted(os.listdir(news_dir)):
+            item_path = os.path.join(news_dir, item_id)
+            if not os.path.isdir(item_path):
+                continue
+            en_file = os.path.join(item_path, f"{item_id}.en.txt")
+            if not os.path.isfile(en_file):
+                continue
+            try:
+                text = open(en_file, encoding="utf-8", errors="replace").read()
+            except Exception:
+                continue
+            headers, body = _parse_news_headers(text)
+            # Display-If-Installed filter: skip if not installed
+            dii = headers.get("Display-If-Installed", "").strip()
+            if dii:
+                atoms = [a.strip() for a in dii.split() if a.strip()]
+                if atoms and not any(_safe_match(vdb, a) for a in atoms):
+                    continue
+            results.append({
+                "id": item_id,
+                "repo": repo_name,
+                "title": headers.get("Title", item_id),
+                "posted": headers.get("Posted", ""),
+                "author": headers.get("Author", ""),
+                "unread": item_id not in read_ids,
+                "body": body,
+            })
+    results.sort(key=lambda x: x.get("posted", ""), reverse=True)
+    return results
+
+
+async def cmd_news_list(_args):
+    for item in await in_thread(_news_list):
+        yield item
+
+
+async def cmd_news_mark_read(args):
+    item_id = str(args.get("id", "")).strip()
+    if not item_id:
+        yield {"error": "missing id"}
+        return
+    read_ids = _news_read_ids()
+    read_ids.add(item_id)
+    _news_save_read_ids(read_ids)
+    yield {"ok": True, "id": item_id}
+
+
+async def cmd_news_mark_all_read(_args):
+    items = _news_list()
+    ids = _news_read_ids()
+    for item in items:
+        ids.add(item["id"])
+    _news_save_read_ids(ids)
+    yield {"ok": True, "count": len(ids)}
+
+
+# ---------------------------------------------------------------------------
+# GLSA advisories
+# ---------------------------------------------------------------------------
+
+def _parse_glsa_xml(glsa_id: str):
+    import xml.etree.ElementTree as ET
+    path = f"/var/db/repos/gentoo/metadata/glsa/glsa-{glsa_id}.xml"
+    try:
+        tree = ET.parse(path)
+        root = tree.getroot()
+        title = (root.findtext("title") or "").strip()
+        synopsis = (root.findtext("synopsis") or "").strip()
+        announced = (root.findtext("announced") or "").strip()
+        impact_el = root.find("impact")
+        severity = impact_el.get("type", "normal") if impact_el is not None else "normal"
+        packages = [p.get("name", "") for p in root.findall(".//affected/package") if p.get("name")]
+        bugs = [b.text.strip() for b in root.findall("bug") if b.text]
+        return {
+            "id": glsa_id,
+            "title": title,
+            "synopsis": synopsis,
+            "announced": announced,
+            "severity": severity,
+            "packages": packages,
+            "bugs": bugs,
+        }
+    except Exception:
+        return None
+
+
+def _glsa_list():
+    import subprocess
+    try:
+        proc = subprocess.run(
+            ["glsa-check", "-n", "-t", "all"],
+            capture_output=True, text=True, timeout=120
+        )
+        output = (proc.stdout or "") + (proc.stderr or "")
+    except FileNotFoundError:
+        return [{"error": "glsa-check not found"}]
+    except Exception as e:
+        return [{"error": str(e)}]
+    if "not affected" in output.lower():
+        return []
+    ids = list(dict.fromkeys(re.findall(r'\b(\d{6}-\d{2,3})\b', output)))
+    results = []
+    for glsa_id in ids:
+        details = _parse_glsa_xml(glsa_id)
+        if details:
+            results.append(details)
+    return results
+
+
+async def cmd_glsa_list(_args):
+    for item in await in_thread(_glsa_list):
+        yield item
+
+
 HANDLERS = {
     "totp_status":        cmd_totp_status,
     "totp_enroll_begin":  cmd_totp_enroll_begin,
@@ -3366,6 +3541,10 @@ HANDLERS = {
     "overlay_add":        cmd_overlay_add,
     "overlay_remove":     cmd_overlay_remove,
     "overlay_sync":       cmd_overlay_sync,
+    "news_list":          cmd_news_list,
+    "news_mark_read":     cmd_news_mark_read,
+    "news_mark_all_read": cmd_news_mark_all_read,
+    "glsa_list":          cmd_glsa_list,
 }
 
 
