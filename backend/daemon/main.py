@@ -1694,8 +1694,10 @@ def _package_search(query: str):
 
     results = []
     for cp in matches:
-        versions = porttree.cp_list(cp)
-        best = versions[-1] if versions else None
+        best = porttree.xmatch("bestmatch-visible", cp) or None
+        if not best:
+            versions = porttree.cp_list(cp)
+            best = versions[-1] if versions else None
         desc = ""
         if best:
             try:
