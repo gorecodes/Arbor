@@ -57,13 +57,13 @@ I tool storici (Porthole, Kuroo, Portato, Himerge) sono morti da ~15 anni. Arbor
 
 ---
 
-## Raccomandazione concreta
+## Raccomandazione concreta (aggiornata 2026-05-23)
 
-Se dovessi sceglierne **3 da fare prima**, in ordine:
+Le prime 3 della lista originale sono tutte completate. Prossimi candidati in ordine:
 
-1. **News + GLSA dashboard** — effort minimo, dati locali, allinea Arbor al modello "daemon-root utile per cose sicurezza-critiche".
-2. **Compile-time history + ETA pre-install** — il parser `emerge_log.py` esiste già, estensione naturale; è la *killer feature osservabilità* per Gentoo ("dovrei andare a dormire?").
-3. **Config snapshot export/import** — unico tool sul mercato a farlo in modo strutturato; differenziatore forte.
+1. **`revdep-rebuild`** — effort minimo, flusso identico a `preserved-rebuild` già esistente. Valore immediato dopo upgrade di librerie.
+2. **Binhost-aware install preview** — mostrare binpkg vs sorgente + ETA prima di ogni install; Gentoo binhost ufficiale è ora stabile e largamente usato.
+3. **Disk-space forecast** — tile dashboard con distfiles + binpkg + `/var/tmp/portage`; dati tutti locali, effort basso.
 
 ## Note importanti
 
