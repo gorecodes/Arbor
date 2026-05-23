@@ -3446,7 +3446,7 @@ async def cmd_news_mark_all_read(_args):
 # ---------------------------------------------------------------------------
 
 def _parse_glsa_xml(glsa_id: str):
-    import xml.etree.ElementTree as ET
+    import defusedxml.ElementTree as ET
     path = f"/var/db/repos/gentoo/metadata/glsa/glsa-{glsa_id}.xml"
     try:
         tree = ET.parse(path)
