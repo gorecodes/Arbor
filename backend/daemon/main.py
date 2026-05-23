@@ -2599,6 +2599,7 @@ async def _start_background_job(
     *,
     action_cmd: str = "",
     action_args: dict | None = None,
+    stderr=asyncio.subprocess.STDOUT,
 ):
     meta = action_metadata(action_cmd, action_args or {}) if action_cmd else {}
     async with _get_jobs_lock():
@@ -2610,7 +2611,7 @@ async def _start_background_job(
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=stderr,
             env=_EMERGE_ENV,
         )
         job_id = str(uuid.uuid4())
@@ -3520,6 +3521,7 @@ async def cmd_eclean_pretend(args):
         kind=f"eclean-{target}-pretend",
         action_cmd="eclean_pretend",
         action_args={"target": target},
+        stderr=asyncio.subprocess.DEVNULL,
     ):
         yield item
 
@@ -3540,6 +3542,7 @@ async def cmd_eclean_run(args):
         kind=f"eclean-{target}",
         action_cmd="eclean_run",
         action_args={"target": target},
+        stderr=asyncio.subprocess.DEVNULL,
     ):
         yield item
 
