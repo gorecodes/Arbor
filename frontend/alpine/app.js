@@ -133,7 +133,7 @@
     glsa:        ()          => _get('/glsa'),
     snapshotImport: (file) => {
       const fd = new FormData(); fd.append('file', file)
-      return fetch('/api/snapshot/import', { method: 'POST', credentials: 'same-origin', body: fd })
+      return fetch('/api/snapshot/import', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': _csrfToken() }, body: fd })
         .then(r => r.json())
     },
   }
