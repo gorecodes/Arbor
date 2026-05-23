@@ -280,6 +280,13 @@
               <span x-text="($store.router.installAtom || '') + ' installed successfully.'"></span>
             </div>
 
+            <!-- Operation-type badges (shown after a successful pretend) -->
+            <div class="ev-ops" x-show="pretendOps && pretendOpBadges().length > 0 && step === 'pretend' && returncode === 0 && !running">
+              <template x-for="b in pretendOpBadges()" :key="b.tone">
+                <span class="ev-op-badge" :class="'is-' + b.tone" x-text="b.label"></span>
+              </template>
+            </div>
+
             <!-- ETA badge (shown after a successful pretend) -->
             <div class="ev-eta" x-show="eta && step === 'pretend' && returncode === 0 && !running">
               <span class="ev-eta-badge" :class="'is-' + etaConfidenceTone()" x-text="'≈ ' + etaLabel()"></span>

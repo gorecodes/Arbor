@@ -3158,7 +3158,7 @@ ${labels}
       ...makeEmergeOptions('arbor_opts_install', INSTALL_OPTS_SCHEMA, 'emerge', ['--verbose', '--color=n']),
       step: 'pretend', lines: [], running: false, returncode: null, ws: null,
       approvalRequest: null, approvalCommand: '', approvalError: null,
-      needsUnmask: false, etcFiles: [], eta: null,
+      needsUnmask: false, etcFiles: [], eta: null, pretendOps: null,
       _pending: [], _flushTimer: null, _attachRetries: 0, _approvalPollTimer: null,
       init() {
         this.eoLoad()
@@ -3232,7 +3232,7 @@ ${labels}
       },
       _resetLines() {
         if (this._flushTimer !== null) { clearTimeout(this._flushTimer); this._flushTimer = null }
-        this._pending = []; this.lines = []; this.eta = null
+        this._pending = []; this.lines = []; this.eta = null; this.pretendOps = null
       },
       _parsePretendAtoms(lines) {
         const seen = new Set()
@@ -3244,6 +3244,29 @@ ${labels}
           if (!seen.has(atom)) { seen.add(atom); atoms.push(atom) }
         }
         return atoms
+      },
+      _parsePretendOps(lines) {
+        const counts = { new: 0, update: 0, downgrade: 0, reinstall: 0 }
+        for (const line of lines) {
+          const m = line.match(/^\[(?:ebuild|binary)\s+([A-Z\s]*)\]/)
+          if (!m) continue
+          const f = m[1]
+          if (f.includes('N'))      { counts.new++;       continue }
+          if (f.includes('D'))      { counts.downgrade++;  continue }
+          if (f.includes('U'))      { counts.update++;     continue }
+          if (f.includes('R'))      { counts.reinstall++;  continue }
+        }
+        return counts
+      },
+      pretendOpBadges() {
+        const ops = this.pretendOps
+        if (!ops) return []
+        const badges = []
+        if (ops.new > 0)       badges.push({ label: ops.new + (ops.new === 1 ? ' new' : ' new'),                     tone: 'new' })
+        if (ops.update > 0)    badges.push({ label: ops.update + (ops.update === 1 ? ' update' : ' updates'),         tone: 'update' })
+        if (ops.downgrade > 0) badges.push({ label: ops.downgrade + (ops.downgrade === 1 ? ' downgrade' : ' downgrades'), tone: 'downgrade' })
+        if (ops.reinstall > 0) badges.push({ label: ops.reinstall + (ops.reinstall === 1 ? ' reinstall' : ' reinstalls'), tone: 'reinstall' })
+        return badges
       },
       async _fetchEta(lines) {
         const atoms = this._parsePretendAtoms(lines)
@@ -3302,7 +3325,10 @@ ${labels}
             this._flushLines(); this.running = false
             this.returncode = msg.returncode ?? null; this.ws = null
             this.needsUnmask = !!msg.needs_unmask
-            if ((msg.returncode ?? 1) === 0) this._fetchEta(this.lines)
+            if ((msg.returncode ?? 1) === 0) {
+              this.pretendOps = this._parsePretendOps(this.lines)
+              this._fetchEta(this.lines)
+            }
           }
         }, extra)
       },
