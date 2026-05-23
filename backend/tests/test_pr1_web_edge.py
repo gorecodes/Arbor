@@ -1,6 +1,8 @@
 """Tests for PR 1 (hardening/web-edge): CSRF, HSTS, TLS bind, WS origin."""
 
+import os
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -145,6 +147,12 @@ class TLSBindEnforcementTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             web_server._enforce_loopback_or_tls("192.168.1.10", tls=False)
         self.assertEqual(cm.exception.code, 2)
+
+    def test_public_without_tls_allowed_by_plaintext_override(self):
+        with unittest.mock.patch.dict(os.environ, {"ARBOR_ALLOW_PLAINTEXT": "1"}):
+            # No SystemExit expected — user explicitly opted in (e.g. behind VPN).
+            web_server._enforce_loopback_or_tls("0.0.0.0", tls=False)
+            web_server._enforce_loopback_or_tls("10.0.0.1", tls=False)
 
 
 if __name__ == "__main__":
