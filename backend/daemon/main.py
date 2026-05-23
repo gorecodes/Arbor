@@ -107,6 +107,10 @@ ALLOWED_COMMANDS = {
     "news_mark_read",
     "news_mark_all_read",
     "glsa_list",
+    "eclean_pretend",
+    "eclean_run",
+    "snapshot_export",
+    "snapshot_import",
 }
 
 # ---------------------------------------------------------------------------
@@ -2595,6 +2599,7 @@ async def _start_background_job(
     *,
     action_cmd: str = "",
     action_args: dict | None = None,
+    stderr=asyncio.subprocess.STDOUT,
 ):
     meta = action_metadata(action_cmd, action_args or {}) if action_cmd else {}
     async with _get_jobs_lock():
@@ -2606,7 +2611,7 @@ async def _start_background_job(
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
+            stderr=stderr,
             env=_EMERGE_ENV,
         )
         job_id = str(uuid.uuid4())
@@ -3499,6 +3504,165 @@ async def cmd_glsa_list(_args):
         yield item
 
 
+# ---------------------------------------------------------------------------
+# Cache cleaner (eclean)
+# ---------------------------------------------------------------------------
+
+_ECLEAN_TARGETS = {"dist", "pkg"}
+
+async def cmd_eclean_pretend(args):
+    target = str(args.get("target", "dist"))
+    if target not in _ECLEAN_TARGETS:
+        yield {"error": "invalid target"}; return
+    cmd_name = "eclean-dist" if target == "dist" else "eclean-pkg"
+    async for item in _start_background_job(
+        f"@eclean-{target}-pretend",
+        [cmd_name, "--pretend", "--nocolor"],
+        kind=f"eclean-{target}-pretend",
+        action_cmd="eclean_pretend",
+        action_args={"target": target},
+        stderr=asyncio.subprocess.DEVNULL,
+    ):
+        yield item
+
+async def cmd_eclean_run(args):
+    approval_error = await in_thread(
+        _require_approval, "eclean_run",
+        _approval_payload("eclean_run", args, {"target": args.get("target", "dist")}),
+    )
+    if approval_error:
+        yield approval_error; return
+    target = str(args.get("target", "dist"))
+    if target not in _ECLEAN_TARGETS:
+        yield {"error": "invalid target"}; return
+    cmd_name = "eclean-dist" if target == "dist" else "eclean-pkg"
+    async for item in _start_background_job(
+        f"@eclean-{target}",
+        [cmd_name, "--nocolor"],
+        kind=f"eclean-{target}",
+        action_cmd="eclean_run",
+        action_args={"target": target},
+        stderr=asyncio.subprocess.DEVNULL,
+    ):
+        yield item
+
+
+# ---------------------------------------------------------------------------
+# Config snapshot (export / import)
+# ---------------------------------------------------------------------------
+
+def _snapshot_export() -> dict:
+    import zipfile, tempfile, socket
+    from datetime import datetime
+
+    fd, path = tempfile.mkstemp(suffix=".zip", prefix="arbor_snapshot_")
+    try:
+        portage_dirs = ["/etc/portage"]
+        world_files = ["/var/lib/portage/world", "/var/lib/portage/world_sets"]
+        with os.fdopen(fd, "wb") as fout:
+            with zipfile.ZipFile(fout, "w", zipfile.ZIP_DEFLATED) as zf:
+                for base in portage_dirs:
+                    if not os.path.isdir(base):
+                        continue
+                    for root, _dirs, files in os.walk(base):
+                        for fname in files:
+                            fpath = os.path.join(root, fname)
+                            arcname = os.path.relpath(fpath, "/")
+                            try:
+                                zf.write(fpath, arcname)
+                            except Exception:
+                                pass
+                for wf in world_files:
+                    if os.path.isfile(wf):
+                        zf.write(wf, os.path.relpath(wf, "/"))
+                profile = ""
+                try:
+                    profile = os.readlink("/etc/portage/make.profile")
+                except Exception:
+                    pass
+                import json
+                manifest = {
+                    "created": datetime.utcnow().isoformat() + "Z",
+                    "hostname": socket.gethostname(),
+                    "profile": profile,
+                }
+                zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+        os.chmod(path, 0o644)
+        filename = f"arbor-snapshot-{datetime.utcnow().strftime('%Y%m%d')}.zip"
+        return {"path": path, "filename": filename}
+    except Exception as exc:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+        return {"error": str(exc)}
+
+
+async def cmd_snapshot_export(_args):
+    result = await in_thread(_snapshot_export)
+    yield result
+
+
+_SNAPSHOT_ALLOWED_PREFIXES = (
+    "etc/portage/",
+    "var/lib/portage/world",
+    "manifest.json",
+)
+
+
+def _snapshot_import(zip_path: str) -> dict:
+    import json, zipfile, shutil
+    from datetime import datetime
+
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            for name in zf.namelist():
+                if name.startswith("/") or ".." in name:
+                    return {"error": f"unsafe path in archive: {name}"}
+                if not any(name == p or name.startswith(p) for p in _SNAPSHOT_ALLOWED_PREFIXES):
+                    return {"error": f"disallowed path in archive: {name}"}
+            backup_path = f"/etc/portage.backup.{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+            shutil.copytree("/etc/portage", backup_path, symlinks=True)
+            zf.extractall("/")
+            # Restore make.profile symlink from manifest (not stored as zip entry)
+            try:
+                manifest = json.loads(zf.read("manifest.json"))
+                profile = manifest.get("profile", "").strip()
+                if profile:
+                    link = "/etc/portage/make.profile"
+                    if os.path.lexists(link):
+                        os.unlink(link)
+                    os.symlink(profile, link)
+            except Exception:
+                pass
+        return {"ok": True, "backup": backup_path}
+    except zipfile.BadZipFile:
+        return {"error": "not a valid zip file"}
+    except Exception as exc:
+        return {"error": str(exc)}
+    finally:
+        try:
+            os.unlink(zip_path)
+        except Exception:
+            pass
+
+
+async def cmd_snapshot_import(args):
+    approval_error = await in_thread(
+        _require_approval, "snapshot_import",
+        _approval_payload("snapshot_import", args),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    zip_path = str(args.get("path", "")).strip()
+    if not zip_path or not os.path.isfile(zip_path):
+        yield {"error": "invalid path"}
+        return
+    result = await in_thread(_snapshot_import, zip_path)
+    yield result
+
+
 HANDLERS = {
     "totp_status":        cmd_totp_status,
     "totp_enroll_begin":  cmd_totp_enroll_begin,
@@ -3549,6 +3713,10 @@ HANDLERS = {
     "news_mark_read":     cmd_news_mark_read,
     "news_mark_all_read": cmd_news_mark_all_read,
     "glsa_list":          cmd_glsa_list,
+    "eclean_pretend":     cmd_eclean_pretend,
+    "eclean_run":         cmd_eclean_run,
+    "snapshot_export":    cmd_snapshot_export,
+    "snapshot_import":    cmd_snapshot_import,
 }
 
 

@@ -37,6 +37,8 @@ _READONLY_COMMANDS = {
     "news_mark_read",
     "news_mark_all_read",
     "glsa_list",
+    "eclean_pretend",
+    "snapshot_export",
 }
 
 _PRETEND_COMMANDS = {
@@ -56,6 +58,8 @@ _APPROVAL_REQUIRED_COMMANDS = {
     "job_cancel",
     "history_delete",
     "history_purge",
+    "eclean_run",
+    "snapshot_import",
 }
 
 _TARGET_KEYS = ("atom", "name", "cfg_file", "job_id")

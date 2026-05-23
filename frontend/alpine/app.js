@@ -131,6 +131,11 @@
     newsRead:    (id)        => _post('/news/read', { id }),
     newsReadAll: ()          => _post('/news/read-all', {}),
     glsa:        ()          => _get('/glsa'),
+    snapshotImport: (file) => {
+      const fd = new FormData(); fd.append('file', file)
+      return fetch('/api/snapshot/import', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': _csrfToken() }, body: fd })
+        .then(r => r.json())
+    },
   }
 
   const emerge = {
@@ -244,7 +249,7 @@
   // and read-only attaches do not.
   const _MUTATING_EMERGE_CMDS = new Set([
     'install', 'uninstall', 'autounmask',
-    'world-update', 'depclean', 'preserved-rebuild', 'sync',
+    'world-update', 'depclean', 'preserved-rebuild', 'sync', 'eclean',
   ])
 
   function wsEmerge(cmd, atom, onMsg, extra = {}) {
@@ -756,6 +761,7 @@
     { id: 'use-flags', label: 'USE Flags'   },
     { id: 'updates',   label: 'Maintenance' },
     { id: 'overlays',  label: 'Overlays'    },
+    { id: 'snapshot',  label: 'Snapshot'   },
     { id: 'news',      label: 'News'        },
     { id: 'glsa',      label: 'Advisories'  },
     { id: 'jobs',      label: 'Jobs'        },
@@ -1022,6 +1028,7 @@
             detail: 'Manage login-time TOTP for the Arbor instance.',
           }
         }
+        if (r.view === 'snapshot') return { section: 'Config', title: 'Snapshot', detail: 'Export or import /etc/portage configuration' }
         if (r.view === 'install') {
           return {
             section: 'Packages',
@@ -1048,6 +1055,7 @@
             { id: 'updates-world', label: '@world' },
             { id: 'updates-preserved', label: 'Preserved' },
             { id: 'updates-depclean', label: 'Depclean' },
+            { id: 'updates-clean', label: 'Clean' },
           ]
         }
         return []
@@ -3600,6 +3608,16 @@ ${labels}
         'Use the pretend phase to confirm nothing important will be removed unexpectedly.',
       ],
     },
+    clean: {
+      id: 'clean',
+      title: 'Cache clean',
+      summary: 'Remove obsolete distfiles and binary packages to free disk space.',
+      risk: 'Moderate. Only removes files not needed by any current package version.',
+      notes: [
+        'Run pretend first to see what will be removed and how much space is freed.',
+        'eclean-dist cleans source archives; eclean-pkg cleans binary packages.',
+      ],
+    },
   }
 
   function updatesComponent() {
@@ -3612,6 +3630,7 @@ ${labels}
       worldUpdate:  mkOp(false),
       depclean:     { ...mkOp(false), dcStep: 'idle' },
       preserved:    mkOp(false),
+      clean: { ...mkOp(false), cleanStep: 'idle', cleanTarget: 'dist' },
       pkgStats: null,
       selectedAction: 'worldPretend',
       init() {
@@ -3686,6 +3705,7 @@ ${labels}
         if (id === 'sync') return 'emaint sync -a'
         if (id === 'preserved') return 'emerge @preserved-rebuild'
         if (id === 'depclean') return 'emerge --depclean'
+        if (id === 'clean') return this.clean.cleanTarget === 'dist' ? 'eclean-dist' : 'eclean-pkg'
         return ''
       },
       optionSummary() {
@@ -3969,6 +3989,36 @@ ${labels}
           if (msg.done) { this.depclean.running = false; this.depclean.rc = msg.returncode ?? null; this.depclean.ws = null; _scopedStorageRemove(_JOB_META.depclean.storage) }
         })
       },
+      startCleanPretend() {
+        this.selectAction('clean')
+        this.clean.lines = []; this.clean.rc = null; this.clean.running = true; this.clean.expanded = true; this.clean.cleanStep = 'pretend'
+        this.clean.ws = wsGlobalEmerge('eclean-pretend', (msg) => {
+          if (msg.job_id) return
+          if (msg.line !== undefined) this._appendLine(this.clean, 'cleanTerm', msg.line)
+          if (msg.done) {
+            this.clean.running = false; this.clean.rc = msg.returncode ?? null; this.clean.ws = null
+            if (this.clean.rc === 0) this.clean.cleanStep = 'confirm'
+          }
+        }, { target: this.clean.cleanTarget })
+      },
+      async startClean() {
+        this.selectAction('clean')
+        this.clean.lines = []; this.clean.rc = null; this.clean.running = true; this.clean.expanded = true; this.clean.cleanStep = 'running'
+        let approval
+        try {
+          approval = await this._requestOpApproval(this.clean, 'eclean_run', { target: this.clean.cleanTarget })
+        } catch(e) {
+          this.clean.lines = ['Error: ' + e.message]; this.clean.running = false; this.clean.cleanStep = 'confirm'; return
+        }
+        if (!approval) { this.clean.cleanStep = 'confirm'; return }
+        clearApprovalState(this.clean)
+        this.clean.running = true
+        this.clean.ws = wsGlobalEmerge('eclean', (msg) => {
+          if (msg.job_id) return
+          if (msg.line !== undefined) this._appendLine(this.clean, 'cleanTerm', msg.line)
+          if (msg.done) { this.clean.running = false; this.clean.rc = msg.returncode ?? null; this.clean.ws = null }
+        }, { target: this.clean.cleanTarget, approval_request_id: approval.request_id })
+      },
       startPreserved() {
         this.selectAction('preserved')
         this._startPreserved()
@@ -4185,6 +4235,7 @@ ${labels}
     Alpine.data('overlayViewComponent', overlayViewComponent)
     Alpine.data('newsComponent', newsComponent)
     Alpine.data('glsaComponent', glsaComponent)
+    Alpine.data('snapshotComponent', snapshotComponent)
   })
 
   // ---------------------------------------------------------------------------
@@ -4486,6 +4537,41 @@ ${labels}
       goFix(item) {
         if (!item.packages[0]) return
         Alpine.store('router').nav('install', item.packages[0])
+      },
+    }
+  }
+
+  function snapshotComponent() {
+    return {
+      exportLoading: false,
+      importLoading: false,
+      importResult: null,
+      error: null,
+      async doExport() {
+        this.exportLoading = true; this.error = null
+        try {
+          const resp = await fetch('/api/snapshot/export', { credentials: 'same-origin' })
+          if (!resp.ok) { const j = await resp.json().catch(() => ({})); throw new Error(j.error || 'Export failed') }
+          const blob = await resp.blob()
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = `arbor-snapshot-${new Date().toISOString().slice(0,10)}.zip`
+          document.body.appendChild(a); a.click(); document.body.removeChild(a)
+          URL.revokeObjectURL(url)
+        } catch(e) { this.error = e.message }
+        finally { this.exportLoading = false }
+      },
+      async doImport(event) {
+        const file = event.target.files[0]
+        if (!file) return
+        this.importLoading = true; this.importResult = null; this.error = null
+        try {
+          const result = await api.snapshotImport(file)
+          if (result.error) throw new Error(result.error)
+          this.importResult = result
+        } catch(e) { this.error = e.message }
+        finally { this.importLoading = false }
       },
     }
   }

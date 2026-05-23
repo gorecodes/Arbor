@@ -30,6 +30,8 @@ pydantic-core==2.46.4
     # via pydantic
 python-dotenv==1.2.2
     # via uvicorn
+python-multipart==0.0.27
+    # via arbor (pyproject.toml)
 pyyaml==6.0.3
     # via uvicorn
 qrcode==8.2

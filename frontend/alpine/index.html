@@ -1140,6 +1140,42 @@
                   </div>
                 </div>
               </div>
+
+              <div class="mv-card" id="updates-clean" :class="{ active: selectedAction === 'clean' }" @click="selectAction('clean')" @focusin="selectAction('clean')">
+                <div class="mv-card-header">
+                  <div class="mv-card-title">
+                    <div class="mv-card-title-row">
+                      <span class="mv-title">Cache clean</span>
+                      <span class="mv-state-chip" :class="'is-' + cardState('clean').tone" x-text="cardState('clean').text"></span>
+                    </div>
+                    <span class="mv-cmd" x-text="commandText('clean')"></span>
+                    <p class="mv-card-summary" x-text="actionSummary('clean')"></p>
+                  </div>
+                  <div class="mv-card-actions">
+                    <button class="mv-btn-toggle" @click.stop="clean.expanded = !clean.expanded"
+                            x-text="clean.expanded ? '▲' : '▼'"></button>
+                    <button class="mv-btn-run" @click.stop="startCleanPretend()" :disabled="clean.running"
+                            x-text="clean.running ? 'Running…' : clean.cleanStep === 'idle' ? 'Check' : 'Re-check'"></button>
+                  </div>
+                </div>
+                <div class="terminal" x-ref="cleanTerm" x-show="clean.expanded">
+                  <div class="mv-clean-target-row" x-show="!clean.running && clean.cleanStep !== 'running'">
+                    <span class="mv-clean-label">Target:</span>
+                    <label class="mv-clean-radio"><input type="radio" x-model="clean.cleanTarget" value="dist"> Distfiles</label>
+                    <label class="mv-clean-radio"><input type="radio" x-model="clean.cleanTarget" value="pkg"> Binary pkgs</label>
+                  </div>
+                  <template x-for="(line, i) in clean.lines" :key="i">
+                    <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                  </template>
+                  <div class="line cursor" x-show="clean.running">▊</div>
+                  <div class="line muted-line" x-show="clean.lines.length === 0 && !clean.running">Remove obsolete distfiles or binary packages.</div>
+                  <div class="mv-confirm-row" x-show="clean.cleanStep === 'confirm' && !clean.running">
+                    <span class="mv-confirm-msg">⚠ Files listed above will be deleted.</span>
+                    <button class="mv-btn-confirm-run" x-show="$store.auth.canOperate" @click.stop="startClean()">Delete</button>
+                    <button class="mv-btn-confirm-cancel" @click.stop="clean.cleanStep = 'idle'; clean.lines = []">Cancel</button>
+                  </div>
+                </div>
+              </div>
             </section>
 
             <aside class="mv-context-panel">
@@ -1563,6 +1599,32 @@
             </li>
           </template>
         </ul>
+      </div>
+
+      <!-- Snapshot view -->
+      <div x-show="$store.router.view === 'snapshot'" x-data="snapshotComponent" class="sn-view">
+        <p class="error" x-show="error" x-text="error"></p>
+
+        <section class="sn-section">
+          <h2>Export</h2>
+          <p class="sn-desc">Download a zip of <code>/etc/portage/</code>, world file, and profile info. Use it as a backup or to replicate this configuration on another machine.</p>
+          <button class="sn-btn-export" @click="doExport()" :disabled="exportLoading"
+                  x-text="exportLoading ? 'Creating archive…' : 'Download snapshot'"></button>
+        </section>
+
+        <section class="sn-section" x-show="$store.auth.canOperate">
+          <h2>Import</h2>
+          <p class="sn-desc">Upload a previously exported snapshot. A backup of the current <code>/etc/portage/</code> will be created before applying. Requires shell approval.</p>
+          <label class="sn-upload-label" :class="{ loading: importLoading }">
+            <span x-text="importLoading ? 'Applying…' : 'Choose snapshot zip'"></span>
+            <input type="file" accept=".zip" class="sn-file-input" :disabled="importLoading" @change="doImport($event)">
+          </label>
+          <div class="sn-import-result" x-show="importResult">
+            <span class="sn-result-ok">&#10003; Applied.</span>
+            <span class="sn-result-backup" x-text="'Backup saved to ' + (importResult && importResult.backup || '')"></span>
+          </div>
+        </section>
+      </div>
       </div><!-- /app-content -->
 
     </main>
