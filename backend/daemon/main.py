@@ -103,6 +103,10 @@ ALLOWED_COMMANDS = {
     "overlay_add",
     "overlay_remove",
     "overlay_sync",
+    "news_list",
+    "news_mark_read",
+    "news_mark_all_read",
+    "glsa_list",
 }
 
 # ---------------------------------------------------------------------------
