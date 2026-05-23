@@ -30,12 +30,12 @@ def generate_csrf_token() -> str:
     return secrets.token_urlsafe(_TOKEN_BYTES)
 
 
-def set_csrf_cookie(response: Response, token: str) -> None:
+def set_csrf_cookie(response: Response, token: str, *, secure: bool = True) -> None:
     response.set_cookie(
         key=CSRF_COOKIE_NAME,
         value=token,
         httponly=False,
-        secure=True,
+        secure=secure,
         samesite="strict",
         max_age=session_ttl_seconds(),
         path="/",

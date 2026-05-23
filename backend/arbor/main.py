@@ -259,8 +259,9 @@ async def auth_login(request: Request):
             "step_up_method": session.get("step_up_method", ""),
         },
     )
-    set_session_cookie(response, session["session_id"])
-    set_csrf_cookie(response, generate_csrf_token())
+    _secure = getattr(getattr(request, "url", None), "scheme", "http") == "https"
+    set_session_cookie(response, session["session_id"], secure=_secure)
+    set_csrf_cookie(response, generate_csrf_token(), secure=_secure)
     return response
 
 
