@@ -2789,6 +2789,7 @@ async def cmd_revdep_rebuild(_args):
 
 
 def _disk_usage() -> dict:
+    import subprocess
     paths = {
         "distfiles": "/var/cache/distfiles",
         "binpkgs": "/var/cache/binpkgs",
@@ -2796,17 +2797,13 @@ def _disk_usage() -> dict:
     }
     result = {}
     for key, path in paths.items():
-        total = 0
         try:
-            for dirpath, _dirs, files in os.walk(path):
-                for f in files:
-                    try:
-                        total += os.path.getsize(os.path.join(dirpath, f))
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-        result[key] = total
+            out = subprocess.check_output(
+                ["du", "-sb", path], stderr=subprocess.DEVNULL, timeout=10
+            ).decode()
+            result[key] = int(out.split()[0])
+        except Exception:
+            result[key] = 0
     return result
 
 
