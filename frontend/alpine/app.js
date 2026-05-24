@@ -140,7 +140,10 @@
     newsRead:    (id)        => _post('/news/read', { id }),
     newsReadAll: ()          => _post('/news/read-all', {}),
     glsa:        ()          => _get('/glsa'),
-    diskUsage:   ()          => _get('/storage-stats'),
+    diskUsage:        ()   => _get('/storage-stats'),
+    kernelStatus:     ()   => _get('/kernel/status'),
+    kernelAvailable:  ()   => _get('/kernel/available'),
+    kernelOrgReleases:()   => _get('/kernel/org-releases'),
     snapshotImport: (file) => {
       const fd = new FormData(); fd.append('file', file)
       return fetch('/api/snapshot/import', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': _csrfToken() }, body: fd })
@@ -275,6 +278,14 @@
       _withQuery('/ws/emerge/' + cmd, extra),
       onMsg,
       { requiresStepUp: _MUTATING_EMERGE_CMDS.has(cmd) },
+    )
+  }
+
+  function wsKernel(cmd, onMsg, extra = {}) {
+    return _openAuthedWebSocket(
+      _withQuery('/ws/kernel/' + cmd, extra),
+      onMsg,
+      { requiresStepUp: cmd !== 'install-pretend' },
     )
   }
 
@@ -772,6 +783,7 @@
     { id: 'updates',   label: 'Maintenance' },
     { id: 'overlays',  label: 'Overlays'    },
     { id: 'snapshot',  label: 'Snapshot'   },
+    { id: 'kernel',    label: 'Kernel (beta)' },
     { id: 'news',      label: 'News'        },
     { id: 'glsa',      label: 'Advisories'  },
     { id: 'jobs',      label: 'Jobs'        },
@@ -1039,6 +1051,7 @@
           }
         }
         if (r.view === 'snapshot') return { section: 'Config', title: 'Snapshot', detail: 'Export or import /etc/portage configuration' }
+        if (r.view === 'kernel') return { section: 'System', title: 'Kernel', detail: 'Installed kernels, available updates, /boot inventory and bootloader info' }
         if (r.view === 'install') {
           return {
             section: 'Packages',
@@ -4312,6 +4325,7 @@ ${labels}
     Alpine.data('newsComponent', newsComponent)
     Alpine.data('glsaComponent', glsaComponent)
     Alpine.data('snapshotComponent', snapshotComponent)
+    Alpine.data('kernelComponent', kernelComponent)
   })
 
   // ---------------------------------------------------------------------------
@@ -4617,6 +4631,921 @@ ${labels}
     }
   }
 
+  const _mkKernelOp = () => ({ lines: [], running: false, rc: null, ws: null, approvalRequest: null, approvalCommand: '', _approvalPollTimer: null })
+
+  function kernelComponent() {
+    return {
+      status: null,
+      available: [],
+      orgReleases: null,
+      loading: true,
+      error: null,
+      activeTab: 'overview',
+      open: { status: false, installed: false, boot: false, bootloaders: false, srcdirs: false, portage: false, upstream: false, limine: false },
+      switchSrc: { op: _mkKernelOp(), dirname: null },
+      pretend: _mkKernelOp(),
+      install: _mkKernelOp(),
+      selectedAtom: null,
+      bootloader: { op: _mkKernelOp(), name: null },
+      cleanup: { selected: {}, op: _mkKernelOp() },
+      modulesCleanup: { selected: {}, op: _mkKernelOp() },
+      srcCleanup: { selected: {}, op: _mkKernelOp() },
+      download: { op: _mkKernelOp(), version: null, progress: 0, total: 0 },
+      manualFlow: {
+        step: 0,
+        kver: '',
+        oldconfig: _mkKernelOp(),
+        olddefconfig: _mkKernelOp(),
+        build: _mkKernelOp(),
+        modulesInstall: _mkKernelOp(),
+        makeInstall: _mkKernelOp(),
+        initramfs: Object.assign(_mkKernelOp(), { initramfs_found: null }),
+        moduleRebuild: _mkKernelOp(),
+        limineAutoUpdate: _mkKernelOp(),
+      },
+      reboot: { op: _mkKernelOp(), confirmText: '' },
+      copyConfig: { op: _mkKernelOp(), srcDirname: '' },
+      limine: {
+        loading: false,
+        error: null,
+        config: null,
+        edited: null,
+        dirty: false,
+        saveOp: _mkKernelOp(),
+        showPreview: false,
+        newEntry: null,
+      },
+      async init() { await this.load(); this._restoreWizardState(); await this._restoreKernelJobs(); if (this.limineHasLimine()) void this.limineLoad() },
+      async load() {
+        this.loading = true; this.error = null
+        const [s, a, o] = await Promise.allSettled([
+          api.kernelStatus(),
+          api.kernelAvailable(),
+          api.kernelOrgReleases(),
+        ])
+        if (s.status === 'fulfilled' && s.value && !s.value.error) {
+          this.status = s.value
+        } else {
+          this.error = (s.value && s.value.error) || 'Failed to load kernel status'
+        }
+        if (a.status === 'fulfilled') this.available = Array.isArray(a.value) ? a.value : []
+        if (o.status === 'fulfilled' && o.value && !o.value.error) this.orgReleases = o.value
+        this.loading = false
+      },
+      _saveWizardState() {
+        if (!this.manualFlow.step) return
+        try {
+          _scopedStorageSet('kw_wizard', JSON.stringify({
+            kver: this.manualFlow.kver,
+            build_rc: this.manualFlow.build.rc,
+            modules_install_rc: this.manualFlow.modulesInstall.rc,
+            make_install_rc: this.manualFlow.makeInstall.rc,
+            initramfs_rc: this.manualFlow.initramfs.rc,
+            module_rebuild_rc: this.manualFlow.moduleRebuild.rc,
+          }))
+        } catch(e) {}
+      },
+      _restoreWizardState() {
+        try {
+          var raw = _scopedStorageGet('kw_wizard')
+          if (!raw) return
+          var saved = JSON.parse(raw)
+          if (!saved || !saved.kver) return
+          this.manualFlow.step = 1
+          this.manualFlow.kver = saved.kver
+          if (saved.build_rc !== null && saved.build_rc !== undefined) this.manualFlow.build.rc = saved.build_rc
+          if (saved.modules_install_rc !== null && saved.modules_install_rc !== undefined) this.manualFlow.modulesInstall.rc = saved.modules_install_rc
+          if (saved.make_install_rc !== null && saved.make_install_rc !== undefined) this.manualFlow.makeInstall.rc = saved.make_install_rc
+          if (saved.initramfs_rc !== null && saved.initramfs_rc !== undefined) this.manualFlow.initramfs.rc = saved.initramfs_rc
+          if (saved.module_rebuild_rc !== null && saved.module_rebuild_rc !== undefined) this.manualFlow.moduleRebuild.rc = saved.module_rebuild_rc
+        } catch(e) {}
+      },
+      _clearWizardState() {
+        try { _scopedStorageRemove('kw_wizard') } catch(e) {}
+      },
+      async _restoreKernelJobs() {
+        let allJobs
+        try { allJobs = await jobs.list() } catch(e) { return }
+        if (!Array.isArray(allJobs)) return
+        const KERNEL_CMDS = {
+          kernel_build: true, kernel_modules_install: true, kernel_make_install: true,
+          kernel_module_rebuild: true, kernel_install: true,
+        }
+        const running = allJobs.filter(function(j) { return j.status === 'running' && KERNEL_CMDS[j.action_cmd] })
+        if (!running.length) return
+        const self = this
+        running.forEach(function(job) {
+          if (job.action_cmd === 'kernel_build') {
+            if (self.manualFlow.step === 0) {
+              self.manualFlow.step = 1
+              self.manualFlow.kver = self.kverFromSrcTarget(self.status && self.status.src_target)
+            }
+            const op = self.manualFlow.build
+            if (op.running) return
+            op.running = true; op.lines = []
+            op.ws = wsJobAttach(job.job_id, function(msg) {
+              if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-build', msg.line)
+              if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self._saveWizardState() }
+              if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+            })
+          } else if (job.action_cmd === 'kernel_modules_install') {
+            if (self.manualFlow.step === 0) {
+              self.manualFlow.step = 1
+              self.manualFlow.kver = self.kverFromSrcTarget(self.status && self.status.src_target)
+            }
+            const op = self.manualFlow.modulesInstall
+            if (op.running) return
+            op.running = true; op.lines = []
+            op.ws = wsJobAttach(job.job_id, function(msg) {
+              if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-modules-install', msg.line)
+              if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self._saveWizardState() }
+              if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+            })
+          } else if (job.action_cmd === 'kernel_make_install') {
+            if (self.manualFlow.step === 0) {
+              self.manualFlow.step = 1
+              self.manualFlow.kver = self.kverFromSrcTarget(self.status && self.status.src_target)
+            }
+            const op = self.manualFlow.makeInstall
+            if (op.running) return
+            op.running = true; op.lines = []
+            op.ws = wsJobAttach(job.job_id, function(msg) {
+              if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-make-install', msg.line)
+              if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self._saveWizardState() }
+              if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+            })
+          } else if (job.action_cmd === 'kernel_module_rebuild') {
+            if (self.manualFlow.step === 0) {
+              self.manualFlow.step = 1
+              self.manualFlow.kver = self.kverFromSrcTarget(self.status && self.status.src_target)
+            }
+            const op = self.manualFlow.moduleRebuild
+            if (op.running) return
+            op.running = true; op.lines = []
+            op.ws = wsJobAttach(job.job_id, function(msg) {
+              if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-modules', msg.line)
+              if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self._saveWizardState() }
+              if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+            })
+          } else if (job.action_cmd === 'kernel_install') {
+            const op = self.install
+            if (op.running) return
+            const atom = job.atom || ''
+            self.selectedAtom = atom
+            self.open.portage = true
+            op.running = true; op.lines = []
+            op.ws = wsJobAttach(job.job_id, function(msg) {
+              if (msg.line !== undefined) self._appendLine(op, msg.line)
+              if (msg.done) {
+                op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null
+                if (msg.returncode === 0 && self.isSourcesKernel(atom)) self.initManualFlow()
+              }
+              if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+            })
+          }
+        })
+      },
+      toggle(key) { this.open[key] = !this.open[key] },
+      fmtSize(bytes) { return _fmtBytes(bytes) },
+      kernelType(pf) {
+        if (!pf) return ''
+        if (pf.includes('kernel-bin')) return 'dist-bin'
+        if (pf.includes('gentoo-kernel')) return 'dist'
+        if (pf.includes('-sources')) return 'sources'
+        return 'other'
+      },
+      orgReleaseDate(r) {
+        if (!r || !r.released) return ''
+        const rel = r.released
+        if (typeof rel === 'string') return rel
+        if (rel && typeof rel === 'object') {
+          if (rel.isoformat) return rel.isoformat
+          if (rel.date) return rel.date
+          if (typeof rel.timestamp === 'number')
+            return new Date(rel.timestamp * 1000).toISOString().slice(0, 10)
+        }
+        return ''
+      },
+      _appendLineTo(op, elemId, line) {
+        op.lines.push(line)
+        if (op.lines.length > 2000) op.lines.splice(0, op.lines.length - 2000)
+        this.$nextTick(function() { const el = document.getElementById(elemId); if (el) el.scrollTop = el.scrollHeight })
+      },
+      _appendLine(op, line) {
+        this._appendLineTo(op, 'kw-term', line)
+      },
+      isSourcesKernel(cpv) {
+        return cpv && cpv.includes('-sources/')
+      },
+      kverFromSrcTarget(src_target) {
+        if (!src_target) return ''
+        return src_target.replace(/^linux-/, '')
+      },
+      showManualFlow() {
+        return this.manualFlow.step > 0 || (this.install.rc === 0 && this.selectedAtom && this.isSourcesKernel(this.selectedAtom))
+      },
+      initManualFlow() {
+        const kver = this.kverFromSrcTarget(this.status && this.status.src_target)
+        this.manualFlow.kver = kver
+        this.manualFlow.step = 1
+        this.manualFlow.oldconfig = _mkKernelOp()
+        this.manualFlow.olddefconfig = _mkKernelOp()
+        this.manualFlow.build = _mkKernelOp()
+        this.manualFlow.modulesInstall = _mkKernelOp()
+        this.manualFlow.makeInstall = _mkKernelOp()
+        this.manualFlow.initramfs = Object.assign(_mkKernelOp(), { initramfs_found: null })
+        this.manualFlow.moduleRebuild = _mkKernelOp()
+        this.manualFlow.limineAutoUpdate = _mkKernelOp()
+        this._clearWizardState()
+      },
+      srcDirs() {
+        return this.status && Array.isArray(this.status.src_dirs) ? this.status.src_dirs : []
+      },
+      configSources() {
+        return this.srcDirs().filter(function(s) { return !s.active && s.has_config })
+      },
+      startCopyConfig() {
+        const dirname = this.copyConfig.srcDirname
+        if (!dirname) return
+        const op = this.copyConfig.op
+        const self = this
+        op.lines = []; op.rc = null; op.running = true
+        if (op.ws) { try { op.ws.close() } catch(_) {} }
+        op.ws = wsKernel('copy-config', function(msg) {
+          if (msg.line !== undefined) op.lines.push(msg.line)
+          if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null }
+          if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+        }, { src_dirname: dirname })
+      },
+      selectSource(src) {
+        this.manualFlow.kver = src.real_kver || src.kver
+        this.manualFlow.step = 1
+        this.manualFlow.oldconfig = _mkKernelOp()
+        this.manualFlow.olddefconfig = _mkKernelOp()
+        this.manualFlow.build = Object.assign(_mkKernelOp(), { rc: src.built ? 0 : null })
+        this.manualFlow.modulesInstall = Object.assign(_mkKernelOp(), { rc: src.modules_installed ? 0 : null })
+        this.manualFlow.makeInstall = Object.assign(_mkKernelOp(), { rc: src.kernel_in_boot ? 0 : null })
+        this.manualFlow.initramfs = Object.assign(_mkKernelOp(), { initramfs_found: null, rc: src.initramfs_in_boot ? 0 : null })
+        this.manualFlow.moduleRebuild = _mkKernelOp()
+        this.manualFlow.limineAutoUpdate = _mkKernelOp()
+        this._clearWizardState()
+        this.activeTab = 'build'
+      },
+      resetManualFlow() {
+        this.manualFlow.step = 0
+        this.manualFlow.kver = ''
+        this.manualFlow.oldconfig = _mkKernelOp()
+        this.manualFlow.olddefconfig = _mkKernelOp()
+        this.manualFlow.build = _mkKernelOp()
+        this.manualFlow.modulesInstall = _mkKernelOp()
+        this.manualFlow.makeInstall = _mkKernelOp()
+        this.manualFlow.initramfs = Object.assign(_mkKernelOp(), { initramfs_found: null })
+        this.manualFlow.moduleRebuild = _mkKernelOp()
+        this.manualFlow.limineAutoUpdate = _mkKernelOp()
+        this._clearWizardState()
+      },
+      startSwitchSrc(dirname) {
+        const op = this.switchSrc.op
+        const self = this
+        this.switchSrc.dirname = dirname
+        op.lines = []; op.rc = null; op.running = true
+        if (op.ws) { try { op.ws.close() } catch(_) {} }
+        op.ws = wsKernel('switch-src', function(msg) {
+          if (msg.line !== undefined) op.lines.push(msg.line)
+          if (msg.done) {
+            op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null
+            self.load()
+          }
+          if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+        }, { dirname: dirname })
+      },
+      selectAtom(cpv) {
+        if (this.selectedAtom === cpv) return
+        this.selectedAtom = cpv
+        this.pretend = _mkKernelOp()
+        this.install = _mkKernelOp()
+      },
+      startKernelPretend(cpv) {
+        this.selectAtom(cpv)
+        this.open.portage = true
+        const op = this.pretend
+        op.lines = []; op.rc = null; op.running = true
+        if (op.ws) { try { op.ws.close() } catch(_) {} }
+        op.ws = wsKernel('install-pretend', (msg) => {
+          if (msg.line !== undefined) this._appendLine(op, msg.line)
+          if (msg.done) { op.running = false; op.rc = msg.returncode ?? null; op.ws = null }
+          if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+        }, { atom: cpv })
+      },
+      async startKernelInstall(cpv) {
+        this.selectAtom(cpv)
+        this.open.portage = true
+        const op = this.install
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doInstall = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('install', function(msg) {
+            if (msg.job_id) return
+            if (msg.line !== undefined) self._appendLine(op, msg.line)
+            if (msg.done) {
+              op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null
+              if (msg.returncode === 0 && self.isSourcesKernel(cpv)) self.initManualFlow()
+            }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { atom: cpv, approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_install', { atom: cpv },
+            function(lines) { op.lines = lines },
+            function() { doInstall(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false
+          return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doInstall(approval.request_id)
+      },
+      async startBootloaderUpdate(name) {
+        const op = this.bootloader.op
+        this.bootloader.name = name
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doUpdate = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('bootloader-update', function(msg) {
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-bl-term', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { bootloader_name: name, approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_bootloader_update', { bootloader_name: name },
+            function(lines) { op.lines = lines },
+            function() { doUpdate(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false
+          return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doUpdate(approval.request_id)
+      },
+      toggleCleanup(ver) {
+        this.cleanup.selected[ver] = !this.cleanup.selected[ver]
+      },
+      async startBootClean() {
+        const vers = Object.keys(this.cleanup.selected).filter(function(v) { return this.cleanup.selected[v] }, this)
+        if (!vers.length) return
+        const op = this.cleanup.op
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doClean = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('boot-clean', function(msg) {
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-clean-term', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self.load() }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { versions: vers.join(','), approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_boot_clean', { versions: vers.join(',') },
+            function(lines) { op.lines = lines },
+            function() { doClean(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false
+          return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doClean(approval.request_id)
+      },
+      toggleSrcCleanup(name) {
+        this.srcCleanup.selected[name] = !this.srcCleanup.selected[name]
+      },
+      async startSrcClean() {
+        const names = Object.keys(this.srcCleanup.selected).filter(function(n) { return this.srcCleanup.selected[n] }, this)
+        if (!names.length) return
+        const op = this.srcCleanup.op
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doClean = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('src-clean', function(msg) {
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-src-clean-term', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self.load() }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { names: names.join(','), approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_src_clean', { names: names.join(',') },
+            function(lines) { op.lines = lines },
+            function() { doClean(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false
+          return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doClean(approval.request_id)
+      },
+      toggleModulesCleanup(ver) {
+        this.modulesCleanup.selected[ver] = !this.modulesCleanup.selected[ver]
+      },
+      async startModulesClean() {
+        const vers = Object.keys(this.modulesCleanup.selected).filter(function(v) { return this.modulesCleanup.selected[v] }, this)
+        if (!vers.length) return
+        const op = this.modulesCleanup.op
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doClean = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('modules-clean', function(msg) {
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-modules-clean-term', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self.load() }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { versions: vers.join(','), approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_modules_clean', { versions: vers.join(',') },
+            function(lines) { op.lines = lines },
+            function() { doClean(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false
+          return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doClean(approval.request_id)
+      },
+      async startKernelDownload(url, version) {
+        const op = this.download.op
+        const self = this
+        this.download.version = version
+        this.download.progress = 0
+        this.download.total = 0
+        op.lines = []; op.rc = null; op.running = true
+        this.open.upstream = true
+        const doDownload = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('download-tarball', function(msg) {
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-dl-term', msg.line)
+            if (msg.progress !== undefined) self.download.progress = msg.progress
+            if (msg.total !== undefined) self.download.total = msg.total
+            if (msg.done) {
+              op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null
+              if (msg.returncode === 0) {
+                self.load()
+                self.manualFlow.kver = version
+                self.manualFlow.step = 1
+              }
+            }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { url: url, approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_download_tarball', { url: url },
+            function(lines) { op.lines = lines },
+            function() { doDownload(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doDownload(approval.request_id)
+      },
+      startOldconfig() {
+        const op = this.manualFlow.oldconfig
+        const self = this
+        op.lines = []; op.rc = null; op.running = true
+        if (op.ws) { try { op.ws.close() } catch(_) {} }
+        op.ws = wsKernel('oldconfig', function(msg) {
+          if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-oldconfig', msg.line)
+          if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null }
+          if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+        })
+      },
+      async startOlddefconfig() {
+        const op = this.manualFlow.olddefconfig
+        const self = this
+        op.lines = []; op.rc = null; op.running = true
+        const doOlddefconfig = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('olddefconfig', function(msg) {
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-olddefconfig', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_olddefconfig', {},
+            function(lines) { op.lines = lines },
+            function() { doOlddefconfig(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doOlddefconfig(approval.request_id)
+      },
+      async startBuild() {
+        const op = this.manualFlow.build
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doBuild = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('build', function(msg) {
+            if (msg.job_id) return
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-build', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self._saveWizardState() }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_build', {},
+            function(lines) { op.lines = lines },
+            function() { doBuild(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doBuild(approval.request_id)
+      },
+      async startModulesInstall() {
+        const op = this.manualFlow.modulesInstall
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doIt = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('modules-install', function(msg) {
+            if (msg.job_id) return
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-modules-install', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self._saveWizardState() }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_modules_install', {},
+            function(lines) { op.lines = lines },
+            function() { doIt(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doIt(approval.request_id)
+      },
+      async startMakeInstall() {
+        const op = this.manualFlow.makeInstall
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doIt = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('make-install', function(msg) {
+            if (msg.job_id) return
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-make-install', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self._saveWizardState() }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_make_install', {},
+            function(lines) { op.lines = lines },
+            function() { doIt(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doIt(approval.request_id)
+      },
+      async startInitramfs() {
+        const kver = this.manualFlow.kver
+        const op = this.manualFlow.initramfs
+        op.lines = []; op.rc = null; op.running = true; op.initramfs_found = null
+        const self = this
+        const doInitramfs = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('initramfs', function(msg) {
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-initramfs', msg.line)
+            if (msg.done) {
+              op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null
+              if (msg.initramfs_found !== undefined) op.initramfs_found = msg.initramfs_found
+              self._saveWizardState()
+            }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { kver: kver, approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_initramfs', { kver: kver },
+            function(lines) { op.lines = lines },
+            function() { doInitramfs(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doInitramfs(approval.request_id)
+      },
+      async startModuleRebuild() {
+        const op = this.manualFlow.moduleRebuild
+        op.lines = []; op.rc = null; op.running = true
+        const self = this
+        const doRebuild = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('module-rebuild', function(msg) {
+            if (msg.job_id) return
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-mf-modules', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null; self._saveWizardState() }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_module_rebuild', {},
+            function(lines) { op.lines = lines },
+            function() { doRebuild(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doRebuild(approval.request_id)
+      },
+      async startReboot() {
+        if (this.reboot.confirmText !== 'REBOOT') return
+        const op = this.reboot.op
+        const self = this
+        op.lines = []; op.rc = null; op.running = true
+        const doReboot = function(approvalId) {
+          op.running = true
+          if (op.ws) { try { op.ws.close() } catch(_) {} }
+          op.ws = wsKernel('reboot', function(msg) {
+            if (msg.line !== undefined) self._appendLineTo(op, 'kw-reboot-term', msg.line)
+            if (msg.done) { op.running = false; op.rc = msg.returncode != null ? msg.returncode : null; op.ws = null }
+            if (msg.error) { op.running = false; op.lines.push('Error: ' + msg.error); op.ws = null }
+          }, { approval_request_id: approvalId })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'kernel_reboot', {},
+            function(lines) { op.lines = lines },
+            function() { doReboot(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doReboot(approval.request_id)
+      },
+      limineHasLimine() {
+        if (!this.status || !Array.isArray(this.status.bootloaders)) return false
+        return this.status.bootloaders.some(function(b) { return b.name === 'limine' })
+      },
+      async limineLoad() {
+        if (!this.limineHasLimine()) return
+        this.limine.loading = true; this.limine.error = null
+        try {
+          const data = await _get('/limine/config')
+          this.limine.config = data
+          this.limine.edited = JSON.parse(JSON.stringify(data))
+          this.limine.dirty = false
+        } catch(e) {
+          this.limine.error = e.message || 'Failed to load limine.conf'
+        }
+        this.limine.loading = false
+      },
+      limineDefaultSelSync() {
+        var self = this
+        this.$nextTick(function() {
+          var sel = self.$refs.limineDefaultSel
+          if (!sel || !self.limine.edited) return
+          var idx = parseInt(self.limine.edited.default_entry, 10) - 1
+          if (!isNaN(idx) && idx >= 0 && idx < sel.options.length) sel.selectedIndex = idx
+        })
+      },
+      limineDefaultEntryChanged(selectedIndex) {
+        this.limine.edited.default_entry = String(selectedIndex + 1)
+        this.limine.dirty = true
+      },
+      limineEntries() {
+        if (!this.limine.edited) return []
+        return this.limine.edited.entries || []
+      },
+      limineLinuxEntries() {
+        return this.limineEntries().filter(function(e) { return e.type === 'linux' })
+      },
+      limineMoveUp(idx) {
+        const entries = this.limine.edited.entries
+        if (idx < 1) return
+        const tmp = entries[idx - 1]; entries[idx - 1] = entries[idx]; entries[idx] = tmp
+        this.limine.dirty = true
+        this._limineFixDefaultEntry(idx, idx - 1)
+      },
+      limineMoveDown(idx) {
+        const entries = this.limine.edited.entries
+        if (idx >= entries.length - 1) return
+        const tmp = entries[idx + 1]; entries[idx + 1] = entries[idx]; entries[idx] = tmp
+        this.limine.dirty = true
+        this._limineFixDefaultEntry(idx, idx + 1)
+      },
+      _limineFixDefaultEntry(fromIdx, toIdx) {
+        const de = parseInt(this.limine.edited.default_entry, 10)
+        if (isNaN(de)) return
+        const from1 = fromIdx + 1; const to1 = toIdx + 1
+        if (de === from1) this.limine.edited.default_entry = String(to1)
+        else if (de === to1) this.limine.edited.default_entry = String(from1)
+      },
+      limineRemoveEntry(idx) {
+        this.limine.edited.entries.splice(idx, 1)
+        this.limine.dirty = true
+      },
+      limineAddEntry() {
+        const entries = this.limine.edited.entries
+        // Insert before raw entries (EFI etc) — find last linux entry position
+        let insertAt = 0
+        for (let i = entries.length - 1; i >= 0; i--) {
+          if (entries[i].type === 'linux') { insertAt = i + 1; break }
+        }
+        const newEntry = {
+          type: 'linux',
+          group_name: 'New Entry',
+          sub_name: 'New Entry',
+          path: 'boot():/vmlinuz-',
+          module_path: 'boot():/initramfs-.img',
+          cmdline: '',
+        }
+        entries.splice(insertAt, 0, newEntry)
+        this.limine.dirty = true
+      },
+      liminePreviewText() {
+        if (!this.limine.edited) return ''
+        // Build preview manually (no access to Python serializer)
+        const d = this.limine.edited
+        let out = d.global_raw || ''
+        if (!out.endsWith('\n')) out += '\n'
+        const entries = d.entries || []
+        for (let i = 0; i < entries.length; i++) {
+          const e = entries[i]
+          if (!out.endsWith('\n\n')) out = out.replace(/\n*$/, '\n\n')
+          if (e.type === 'linux') {
+            out += '/+' + e.group_name + '\n'
+            if (e.sub_name) out += ' //' + e.sub_name + '\n'
+            out += '  protocol: linux\n'
+            out += '  path: ' + e.path + '\n'
+            if (e.module_path) out += '  module_path: ' + e.module_path + '\n'
+            if (e.cmdline) out += '  cmdline: ' + e.cmdline + '\n'
+          } else if (e.type === 'raw') {
+            out += e.raw || ''
+          }
+        }
+        if (!out.endsWith('\n')) out += '\n'
+        return out
+      },
+      async limineSave() {
+        if (!this.limine.edited) return
+        const op = this.limine.saveOp
+        const self = this
+        op.lines = []; op.rc = null; op.running = true
+        const configJson = JSON.stringify(this.limine.edited)
+        const doSave = function(approvalId) {
+          op.running = true
+          _post('/limine/config', {
+            config_json: configJson,
+            approval_request_id: approvalId || '',
+            approval_token: '',
+          }).then(function(result) {
+            op.running = false
+            op.rc = result.returncode != null ? result.returncode : (result.error ? 1 : 0)
+            if (result.error) {
+              op.lines = ['Error: ' + result.error]
+            } else {
+              op.lines = ['Saved. Backup: ' + (result.backup || '')]
+              self.limine.dirty = false
+              self.limine.showPreview = false
+              self.limineLoad()
+            }
+          }).catch(function(e) {
+            op.running = false
+            op.rc = 1
+            op.lines = ['Error: ' + e.message]
+          })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'limine_config_write', {},
+            function(lines) { op.lines = lines },
+            function() { doSave(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doSave(approval.request_id)
+      },
+
+      async startLimineAutoUpdate() {
+        const kver = this.manualFlow.kver
+        if (!kver) return
+        const op = this.manualFlow.limineAutoUpdate
+        const self = this
+        op.lines = []; op.rc = null; op.running = true
+        const doUpdate = function(approvalId) {
+          op.running = true
+          _post('/limine/auto-update', {
+            kver: kver,
+            approval_request_id: approvalId || '',
+            approval_token: '',
+          }).then(function(result) {
+            op.running = false
+            op.rc = result.returncode != null ? result.returncode : (result.error ? 1 : 0)
+            if (result.error) {
+              op.lines = ['Error: ' + result.error]
+            } else {
+              op.lines = [
+                'Entry added for ' + result.kver + ' (entry #' + result.default_entry + ').',
+                'Select it from the Limine menu on next boot.',
+                'Backup: ' + (result.backup || ''),
+              ]
+              self._saveWizardState()
+              if (self.limineHasLimine()) void self.limineLoad()
+            }
+          }).catch(function(e) {
+            op.running = false
+            op.rc = 1
+            op.lines = ['Error: ' + e.message]
+          })
+        }
+        let approval
+        try {
+          approval = await _approvalRequestReady(
+            op, 'limine_config_auto_update', { kver: kver },
+            function(lines) { op.lines = lines },
+            function() { doUpdate(op.approvalRequest && op.approvalRequest.request_id) },
+          )
+        } catch(e) {
+          op.lines = ['Error: ' + e.message]; op.running = false; return
+        }
+        if (!approval) { op.running = false; return }
+        clearApprovalState(op)
+        doUpdate(approval.request_id)
+      },
+    }
+  }
+
   function snapshotComponent() {
     return {
       exportLoading: false,
@@ -4659,7 +5588,7 @@ ${labels}
   Object.assign(window, {
     navigate, navigateTo, navigateToUse, navigateBack,
     api, emerge, jobs, jobHistory, overlays,
-    wsEmerge, wsGlobalEmerge, wsJobAttach, wsOverlaySync, detachWs,
+    wsEmerge, wsGlobalEmerge, wsKernel, wsJobAttach, wsOverlaySync, detachWs,
   })
 
 }())

@@ -1659,6 +1659,772 @@
           </div>
         </section>
       </div>
+      <!-- Kernel wizard view -->
+      <div x-show="$store.router.view === 'kernel'" x-data="kernelComponent" class="kw-view">
+        <div class="kw-beta-notice">
+          <strong>Beta feature.</strong> The kernel management wizard is functional but not yet fully stabilized — use with care and always keep a working fallback kernel in your bootloader.
+        </div>
+        <div class="kw-loading" x-show="loading">Loading kernel info…</div>
+        <p class="error" x-show="error && !loading" x-text="error"></p>
+
+        <!-- Tab bar -->
+        <div class="kw-tabs" x-show="!loading">
+          <button class="kw-tab" :class="{'kw-tab-active': activeTab === 'overview'}" @click="activeTab = 'overview'">Overview</button>
+          <button class="kw-tab" :class="{'kw-tab-active': activeTab === 'sources'}" @click="activeTab = 'sources'">Sources</button>
+          <button class="kw-tab" :class="{'kw-tab-active': activeTab === 'bootloader'}" @click="activeTab = 'bootloader'">Bootloader</button>
+          <button class="kw-tab" :class="{'kw-tab-active': activeTab === 'build'}" @click="activeTab = 'build'">
+            Build
+            <span x-show="showManualFlow()" class="kw-tab-pip"></span>
+          </button>
+        </div>
+
+        <!-- Overview tab -->
+        <div class="kw-tab-panel" x-show="!loading && status && activeTab === 'overview'">
+          <div class="kw-two-col">
+            <div class="kw-col">
+              <h3 class="kw-section-hdr">Running kernel</h3>
+              <table class="kw-table kw-info-table">
+                <tr><th>Version</th><td><code x-text="status && status.running"></code></td></tr>
+                <tr><th>/usr/src/linux</th><td><code x-text="(status && status.src_target) || '(not set)'"></code></td></tr>
+                <tr><th>installkernel</th><td x-text="status && status.installkernel ? 'detected' : 'not installed'"></td></tr>
+              </table>
+
+              <h3 class="kw-section-hdr" style="margin-top:1.5rem">Installed sys-kernel packages</h3>
+              <div class="muted" x-show="!status || !status.installed || status.installed.length === 0">No sys-kernel packages found.</div>
+              <table class="kw-table" x-show="status && status.installed && status.installed.length > 0">
+                <thead><tr><th>CPV</th><th>Type</th></tr></thead>
+                <tbody>
+                  <template x-for="pkg in (status && status.installed || [])" :key="pkg.cpv">
+                    <tr>
+                      <td><code x-text="pkg.cpv"></code></td>
+                      <td><span class="kw-type-badge" x-text="kernelType(pkg.pf)"></span></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="kw-col">
+              <h3 class="kw-section-hdr">/boot</h3>
+              <div class="muted" x-show="!status || !status.kernels || status.kernels.length === 0">No kernel files found in /boot.</div>
+              <div class="kw-table-wrap" x-show="status && status.kernels && status.kernels.length > 0">
+                <table class="kw-table">
+                  <thead><tr><th></th><th>Version</th><th>vmlinuz</th><th>initramfs</th><th>config</th><th>Size</th></tr></thead>
+                  <tbody>
+                    <template x-for="k in (status && status.kernels || [])" :key="k.version">
+                      <tr :class="k.running ? 'kw-row-running' : ''">
+                        <td>
+                          <input type="checkbox" :disabled="k.running"
+                                 :checked="cleanup.selected[k.version]"
+                                 @change="toggleCleanup(k.version)"
+                                 :title="k.running ? 'Running kernel — cannot remove' : ''">
+                        </td>
+                        <td>
+                          <code x-text="k.version"></code>
+                          <span class="kw-badge-running" x-show="k.running">running</span>
+                        </td>
+                        <td x-text="k.has_vmlinuz ? '✓' : '—'"></td>
+                        <td x-text="k.has_initramfs ? '✓' : '—'"></td>
+                        <td x-text="k.has_config ? '✓' : '—'"></td>
+                        <td x-text="fmtSize(k.size)"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div class="kw-cleanup-bar" x-show="status && status.kernels && status.kernels.length > 0">
+                <span class="muted" x-text="Object.values(cleanup.selected).filter(Boolean).length + ' selected'"></span>
+                <button class="kw-btn kw-btn-danger"
+                        @click="startBootClean()"
+                        :disabled="cleanup.op.running || Object.values(cleanup.selected).filter(Boolean).length === 0">
+                  Remove selected
+                </button>
+              </div>
+              <div x-show="cleanup.op.approvalRequest && cleanup.op.approvalRequest.request_id" class="kw-approval">
+                <p class="muted">Waiting for approval. Run this command in a terminal on the host machine:</p>
+                <pre class="approval-cmd" x-text="cleanup.op.approvalCommand"></pre>
+              </div>
+              <div class="kw-term" id="kw-clean-term" x-show="cleanup.op.lines.length > 0">
+                <template x-for="(line, i) in cleanup.op.lines" :key="i">
+                  <div class="term-line" x-text="line"></div>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- /lib/modules — full width -->
+          <div style="margin-top:1.5rem">
+            <h3 class="kw-section-hdr">/lib/modules</h3>
+            <div class="muted" x-show="!status || !status.modules || status.modules.length === 0">No module directories found.</div>
+            <div class="kw-table-wrap" x-show="status && status.modules && status.modules.length > 0">
+              <table class="kw-table">
+                <thead><tr><th></th><th>Version</th><th>/boot</th><th>Size</th></tr></thead>
+                <tbody>
+                  <template x-for="m in (status && status.modules || [])" :key="m.version">
+                    <tr :class="m.running ? 'kw-row-running' : ''">
+                      <td>
+                        <input type="checkbox" :disabled="m.running"
+                               :checked="modulesCleanup.selected[m.version]"
+                               @change="toggleModulesCleanup(m.version)"
+                               :title="m.running ? 'Running kernel — cannot remove' : ''">
+                      </td>
+                      <td>
+                        <code x-text="m.version"></code>
+                        <span class="kw-badge-running" x-show="m.running">running</span>
+                      </td>
+                      <td x-text="m.in_boot ? '✓' : '—'"></td>
+                      <td x-text="fmtSize(m.size)"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <div class="kw-cleanup-bar" x-show="status && status.modules && status.modules.length > 0">
+              <span class="muted" x-text="Object.values(modulesCleanup.selected).filter(Boolean).length + ' selected'"></span>
+              <button class="kw-btn kw-btn-danger"
+                      @click="startModulesClean()"
+                      :disabled="modulesCleanup.op.running || Object.values(modulesCleanup.selected).filter(Boolean).length === 0">
+                Remove selected
+              </button>
+            </div>
+            <div x-show="modulesCleanup.op.approvalRequest && modulesCleanup.op.approvalRequest.request_id" class="kw-approval">
+              <p class="muted">Waiting for approval. Run this command in a terminal on the host machine:</p>
+              <pre class="approval-cmd" x-text="modulesCleanup.op.approvalCommand"></pre>
+            </div>
+            <div class="kw-term" id="kw-modules-clean-term" x-show="modulesCleanup.op.lines.length > 0">
+              <template x-for="(line, i) in modulesCleanup.op.lines" :key="i">
+                <div class="term-line" x-text="line"></div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sources tab -->
+        <div class="kw-tab-panel" x-show="!loading && activeTab === 'sources'">
+
+          <!-- /usr/src dirs — full width -->
+          <h3 class="kw-section-hdr">Sources in /usr/src</h3>
+          <div class="muted" x-show="srcDirs().length === 0">No kernel source directories found.</div>
+          <div class="kw-table-wrap" x-show="srcDirs().length > 0">
+            <table class="kw-table">
+              <thead><tr><th></th><th>Directory</th><th>Type</th><th>Symlink</th><th>Status</th><th>Size</th><th></th></tr></thead>
+              <tbody>
+                <template x-for="src in srcDirs()" :key="src.name">
+                  <tr>
+                    <td>
+                      <input type="checkbox" :disabled="src.active"
+                             :checked="srcCleanup.selected[src.name]"
+                             @change="toggleSrcCleanup(src.name)"
+                             :title="src.active ? 'Active source — cannot remove' : ''">
+                    </td>
+                    <td><code x-text="src.name"></code></td>
+                    <td><span class="kw-type-badge" x-text="src.portage ? 'portage' : 'vanilla'"></span></td>
+                    <td>
+                      <span x-show="src.active" class="kw-badge kw-badge-installed">active</span>
+                      <span x-show="!src.active" class="kw-badge" style="opacity:0.4">—</span>
+                    </td>
+                    <td class="kw-src-status-cell">
+                      <span :class="src.built ? 'kw-badge kw-badge-installed' : 'kw-badge kw-badge-available'" title="make (kernel build)">built</span>
+                      <span :class="src.modules_installed ? 'kw-badge kw-badge-installed' : 'kw-badge kw-badge-available'" title="make modules_install">mods</span>
+                      <span :class="src.kernel_in_boot ? 'kw-badge kw-badge-installed' : 'kw-badge kw-badge-available'" title="make install → /boot/vmlinuz">/boot</span>
+                      <span :class="src.initramfs_in_boot ? 'kw-badge kw-badge-installed' : 'kw-badge kw-badge-available'" title="dracut initramfs in /boot">initrd</span>
+                    </td>
+                    <td x-text="fmtSize(src.size)"></td>
+                    <td class="kw-actions">
+                      <div class="kw-actions-inner">
+                        <button class="kw-btn" @click="startSwitchSrc(src.name)"
+                                :disabled="src.active || switchSrc.op.running"
+                                x-show="!src.active">Switch symlink</button>
+                        <button class="kw-btn kw-btn-primary" @click="selectSource(src)">Build →</button>
+                      </div>
+                    </td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <div class="kw-cleanup-bar" x-show="srcDirs().length > 0">
+            <span class="muted" x-text="Object.values(srcCleanup.selected).filter(Boolean).length + ' selected'"></span>
+            <button class="kw-btn kw-btn-danger"
+                    @click="startSrcClean()"
+                    :disabled="srcCleanup.op.running || Object.values(srcCleanup.selected).filter(Boolean).length === 0">
+              Remove selected
+            </button>
+          </div>
+          <div x-show="srcCleanup.op.approvalRequest && srcCleanup.op.approvalRequest.request_id" class="kw-approval">
+            <p class="muted">Waiting for approval. Run this command in a terminal on the host machine:</p>
+            <pre class="approval-cmd" x-text="srcCleanup.op.approvalCommand"></pre>
+          </div>
+          <div class="kw-term" id="kw-src-clean-term" x-show="srcCleanup.op.lines.length > 0">
+            <template x-for="(line, i) in srcCleanup.op.lines" :key="i">
+              <div class="term-line" x-text="line"></div>
+            </template>
+          </div>
+          <div x-show="switchSrc.op.lines.length > 0" style="margin-top:0.4rem">
+            <div class="kw-term-hdr">
+              <span x-show="switchSrc.op.running" class="kw-spinner"> switching…</span>
+              <span x-show="!switchSrc.op.running && switchSrc.op.rc === 0" class="kw-rc-ok"
+                    x-text="' ✓ /usr/src/linux → ' + (switchSrc.dirname || '')"></span>
+              <span x-show="!switchSrc.op.running && switchSrc.op.rc !== null && switchSrc.op.rc !== 0"
+                    class="kw-rc-err" x-text="' ✗ ' + (switchSrc.op.lines[switchSrc.op.lines.length-1] || '')"></span>
+            </div>
+          </div>
+
+          <!-- Portage + kernel.org — side by side below -->
+          <div class="kw-two-col" style="margin-top:1.5rem">
+            <div class="kw-col">
+              <h3 class="kw-section-hdr">Available versions (Portage)</h3>
+              <div class="muted" x-show="available.length === 0">No upgradeable kernel packages found.</div>
+              <div class="kw-table-wrap" x-show="available.length > 0">
+                <table class="kw-table">
+                  <thead><tr><th>Package</th><th>Type</th><th>Status</th><th></th></tr></thead>
+                  <tbody>
+                    <template x-for="pkg in available" :key="pkg.cpv">
+                      <tr :class="selectedAtom === pkg.cpv ? 'kw-row-selected' : ''">
+                        <td><code x-text="pkg.cpv"></code></td>
+                        <td><span class="kw-type-badge" x-text="kernelType(pkg.pf)"></span></td>
+                        <td>
+                          <span class="kw-badge" :class="pkg.installed ? 'kw-badge-installed' : 'kw-badge-available'"
+                                x-text="pkg.installed ? 'installed' : 'available'"></span>
+                        </td>
+                        <td class="kw-actions">
+                          <div class="kw-actions-inner">
+                            <button class="kw-btn" @click="startKernelPretend(pkg.cpv)"
+                                    :disabled="pretend.running || install.running">Pretend</button>
+                            <button class="kw-btn kw-btn-primary" @click="startKernelInstall(pkg.cpv)"
+                                    :disabled="pretend.running || install.running">Install</button>
+                          </div>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div class="kw-term-wrap" x-show="selectedAtom !== null">
+                <div class="kw-term-hdr">
+                  <span x-show="pretend.running || (pretend.lines.length > 0 && install.lines.length === 0)">
+                    Pretend: <code x-text="selectedAtom"></code>
+                    <span x-show="pretend.running" class="kw-spinner">…</span>
+                    <span x-show="!pretend.running && pretend.rc !== null"
+                          :class="pretend.rc === 0 ? 'kw-rc-ok' : 'kw-rc-err'"
+                          x-text="pretend.rc === 0 ? '✓ ok' : '✗ rc=' + pretend.rc"></span>
+                  </span>
+                  <span x-show="install.running || install.lines.length > 0">
+                    Install: <code x-text="selectedAtom"></code>
+                    <span x-show="install.running" class="kw-spinner">…</span>
+                    <span x-show="!install.running && install.rc !== null"
+                          :class="install.rc === 0 ? 'kw-rc-ok' : 'kw-rc-err'"
+                          x-text="install.rc === 0 ? '✓ ok' : '✗ rc=' + install.rc"></span>
+                  </span>
+                </div>
+                <div class="kw-approval" x-show="install.approvalRequest && install.approvalRequest.request_id">
+                  <p class="muted">Waiting for approval. Run this command in a terminal on the host machine:</p>
+                  <pre class="approval-cmd" x-text="install.approvalCommand"></pre>
+                </div>
+                <div class="kw-term" id="kw-term">
+                  <template x-for="(line, i) in (install.lines.length > 0 ? install.lines : pretend.lines)" :key="i">
+                    <div class="term-line" x-text="line"></div>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <div class="kw-col">
+              <h3 class="kw-section-hdr">kernel.org upstream</h3>
+              <div class="muted" x-show="!orgReleases">Unavailable — check internet connectivity.</div>
+              <p class="kw-dl-note" x-show="orgReleases">Vanilla kernel — sources only, not tracked by Portage.</p>
+              <div class="kw-table-wrap" x-show="orgReleases && orgReleases.releases && orgReleases.releases.length > 0">
+                <table class="kw-table">
+                  <thead><tr><th>Version</th><th>Type</th><th>Released</th><th></th></tr></thead>
+                  <tbody>
+                    <template x-for="r in (orgReleases && orgReleases.releases || [])" :key="r.version">
+                      <tr :class="r.iseol ? 'kw-row-eol' : (download.version === r.version ? 'kw-row-selected' : '')">
+                        <td><code x-text="r.version"></code></td>
+                        <td x-text="r.moniker"></td>
+                        <td x-text="orgReleaseDate(r)"></td>
+                        <td class="kw-actions">
+                          <div x-show="!r.iseol && r.source" class="kw-actions-inner">
+                            <button class="kw-btn kw-btn-primary"
+                                    @click="startKernelDownload(r.source, r.version)"
+                                    :disabled="download.op.running">
+                              Download
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div class="kw-term-wrap" x-show="download.op.lines.length > 0 || download.op.running">
+                <div class="kw-term-hdr">
+                  <span x-show="download.version" x-text="'linux-' + (download.version || '')"></span>
+                  <span x-show="download.op.running && download.total > 0"
+                        x-text="' — ' + Math.round(download.progress / (1024*1024)) + ' / ' + Math.round(download.total / (1024*1024)) + ' MB'"></span>
+                  <span x-show="download.op.running" class="kw-spinner"> …</span>
+                  <span x-show="!download.op.running && download.op.rc === 0" class="kw-rc-ok"> ✓ ready</span>
+                  <span x-show="!download.op.running && download.op.rc !== null && download.op.rc !== 0"
+                        class="kw-rc-err" x-text="' ✗ rc=' + download.op.rc"></span>
+                </div>
+                <div x-show="download.op.approvalRequest && download.op.approvalRequest.request_id" class="kw-approval">
+                  <p class="muted">Waiting for approval:</p>
+                  <pre class="approval-cmd" x-text="download.op.approvalCommand"></pre>
+                </div>
+                <div class="kw-term" id="kw-dl-term">
+                  <template x-for="(line, i) in download.op.lines" :key="i">
+                    <div class="term-line" x-text="line"></div>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bootloader tab -->
+        <div class="kw-tab-panel" x-show="!loading && status && activeTab === 'bootloader'">
+          <div class="kw-two-col">
+            <div class="kw-col">
+              <h3 class="kw-section-hdr">Bootloaders</h3>
+              <div class="muted" x-show="!status || !status.bootloaders || status.bootloaders.length === 0">No bootloaders detected.</div>
+              <div x-show="status && status.bootloaders && status.bootloaders.length > 0">
+                <template x-for="bl in (status && status.bootloaders || [])" :key="bl.name">
+                  <div class="kw-bl-entry">
+                    <div class="kw-bl-info">
+                      <span class="kw-bl-label" x-text="bl.label"></span>
+                      <code class="kw-bl-cfg" x-text="bl.cfg"></code>
+                    </div>
+                    <div x-show="bl.name === 'grub2' || bl.name === 'systemd-boot'" class="kw-bl-action">
+                      <button class="kw-btn kw-btn-primary"
+                              @click="startBootloaderUpdate(bl.name)"
+                              :disabled="bootloader.op.running">
+                        Update config
+                      </button>
+                      <span x-show="bootloader.op.running && bootloader.name === bl.name" class="kw-spinner"> …</span>
+                    </div>
+                    <div x-show="bl.name === 'limine'" class="kw-bl-limine">
+                      <p class="kw-bl-limine-note">
+                        Limine config must be updated manually — add an entry for the new kernel in
+                        <code x-text="bl.cfg"></code>.
+                      </p>
+                      <p class="kw-bl-limine-note" x-show="status && status.limine_disk">
+                        If using BIOS boot, run after editing the config:
+                      </p>
+                      <pre class="kw-bl-limine-cmd" x-show="status && status.limine_disk"
+                           x-text="'limine bios-install ' + (status && status.limine_disk || '/dev/sdX')"></pre>
+                    </div>
+                  </div>
+                </template>
+                <div x-show="bootloader.op.approvalRequest && bootloader.op.approvalRequest.request_id" class="kw-approval">
+                  <p class="muted">Waiting for approval. Run this command in a terminal on the host machine:</p>
+                  <pre class="approval-cmd" x-text="bootloader.op.approvalCommand"></pre>
+                </div>
+                <div class="kw-term" id="kw-bl-term" x-show="bootloader.op.lines.length > 0">
+                  <template x-for="(line, i) in bootloader.op.lines" :key="i">
+                    <div class="term-line" x-text="line"></div>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <div class="kw-col" x-show="limineHasLimine()">
+              <h3 class="kw-section-hdr">
+                Limine config
+                <span x-show="limine.dirty" class="kw-badge" style="background:rgb(187 128 9/0.2);color:#d29922;border:1px solid rgb(187 128 9/0.4);margin-left:0.5rem;font-size:0.7rem">unsaved changes</span>
+                <span x-show="!limine.dirty && limine.config" class="muted" style="font-size:0.75rem;font-weight:400;margin-left:0.5rem" x-text="limineLinuxEntries().length + ' kernel entr' + (limineLinuxEntries().length === 1 ? 'y' : 'ies')"></span>
+              </h3>
+              <div x-show="limine.loading" class="muted" style="padding:0.5rem 0">Loading…</div>
+              <div x-show="limine.error" class="kw-rc-err" x-text="limine.error"></div>
+              <div x-show="!limine.loading && limine.edited">
+                <div class="kw-limine-globals">
+                  <div class="kw-limine-global-row">
+                    <label class="kw-limine-label">Timeout (s)</label>
+                    <input class="kw-limine-input kw-limine-input-sm" type="number" min="0" max="99"
+                           x-model="limine.edited.timeout" @input="limine.dirty = true">
+                  </div>
+                  <div class="kw-limine-global-row">
+                    <label class="kw-limine-label">Default entry</label>
+                    <select class="kw-limine-select" x-ref="limineDefaultSel"
+                            x-effect="limineDefaultSelSync()"
+                            @change="limineDefaultEntryChanged($event.target.selectedIndex)">
+                      <template x-for="(entry, idx) in limineEntries()" :key="idx">
+                        <option x-text="(idx + 1) + ' — ' + (entry.group_name || entry.type)"></option>
+                      </template>
+                    </select>
+                  </div>
+                  <div class="kw-limine-global-row">
+                    <label class="kw-limine-label">Remember last</label>
+                    <select class="kw-limine-select kw-limine-input-sm" x-model="limine.edited.remember_last_entry"
+                            @change="limine.dirty = true">
+                      <option value="yes">yes</option>
+                      <option value="no">no</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="kw-limine-entries">
+                  <template x-for="(entry, idx) in limineEntries()" :key="idx">
+                    <div :class="entry.type === 'raw' ? 'kw-limine-entry kw-limine-entry-raw' : 'kw-limine-entry'">
+                      <div x-show="entry.type === 'raw'" class="kw-limine-entry-raw-inner">
+                        <span class="kw-type-badge">preserved</span>
+                        <code class="kw-limine-raw-label" x-text="entry.raw ? entry.raw.split('\n')[0] : ''"></code>
+                      </div>
+                      <div x-show="entry.type === 'linux'" class="kw-limine-entry-linux">
+                        <div class="kw-limine-entry-hdr">
+                          <span class="kw-limine-entry-num" x-text="idx + 1"></span>
+                          <input class="kw-limine-name-input" type="text" :value="entry.group_name"
+                                 @input="entry.group_name = $event.target.value; limine.dirty = true"
+                                 placeholder="Menu label">
+                          <div class="kw-limine-entry-actions">
+                            <button class="kw-btn kw-btn-sm" @click="limineMoveUp(idx)" :disabled="idx === 0" title="Move up">↑</button>
+                            <button class="kw-btn kw-btn-sm" @click="limineMoveDown(idx)" :disabled="idx >= limineEntries().length - 1" title="Move down">↓</button>
+                            <button class="kw-btn kw-btn-sm kw-btn-danger-sm" @click="limineRemoveEntry(idx)" title="Remove">✕</button>
+                          </div>
+                        </div>
+                        <div class="kw-limine-fields">
+                          <div class="kw-limine-field">
+                            <label>vmlinuz path</label>
+                            <input type="text" class="kw-limine-field-input" :value="entry.path"
+                                   @input="entry.path = $event.target.value; limine.dirty = true"
+                                   placeholder="boot():/vmlinuz-...">
+                          </div>
+                          <div class="kw-limine-field">
+                            <label>initramfs path</label>
+                            <input type="text" class="kw-limine-field-input" :value="entry.module_path"
+                                   @input="entry.module_path = $event.target.value; limine.dirty = true"
+                                   placeholder="boot():/initramfs-....img">
+                          </div>
+                          <div class="kw-limine-field">
+                            <label>cmdline</label>
+                            <input type="text" class="kw-limine-field-input" :value="entry.cmdline"
+                                   @input="entry.cmdline = $event.target.value; limine.dirty = true"
+                                   placeholder="root=UUID=... rw ...">
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+                <div style="margin-top:0.75rem">
+                  <button class="kw-btn" @click="limineAddEntry()">+ Add kernel entry</button>
+                </div>
+                <div style="margin-top:0.75rem">
+                  <button class="kw-btn" @click="limine.showPreview = !limine.showPreview"
+                          x-text="limine.showPreview ? 'Hide preview' : 'Preview limine.conf'"></button>
+                </div>
+                <div x-show="limine.showPreview" style="margin-top:0.5rem">
+                  <pre class="kw-limine-preview" x-text="liminePreviewText()"></pre>
+                </div>
+                <div class="kw-limine-save-row" x-show="limine.dirty" style="margin-top:0.75rem">
+                  <button class="kw-btn kw-btn-primary" @click="limineSave()"
+                          :disabled="limine.saveOp.running">
+                    <span x-show="limine.saveOp.running">Saving…</span>
+                    <span x-show="!limine.saveOp.running">Save limine.conf</span>
+                  </button>
+                  <span class="muted" style="font-size:0.75rem;margin-left:0.5rem">A timestamped backup will be created in /boot before saving.</span>
+                </div>
+                <div x-show="limine.saveOp.approvalRequest && limine.saveOp.approvalRequest.request_id" class="kw-approval" style="margin-top:0.5rem">
+                  <p class="muted">Waiting for approval:</p>
+                  <pre class="approval-cmd" x-text="limine.saveOp.approvalCommand"></pre>
+                </div>
+                <div x-show="limine.saveOp.lines.length > 0" class="kw-term" style="margin-top:0.5rem">
+                  <template x-for="(line, i) in limine.saveOp.lines" :key="i">
+                    <div class="term-line" x-text="line"></div>
+                  </template>
+                </div>
+                <div x-show="!limine.saveOp.running && limine.saveOp.rc === 0" class="kw-rc-ok" style="margin-top:0.25rem"> ✓ saved</div>
+                <div x-show="!limine.saveOp.running && limine.saveOp.rc !== null && limine.saveOp.rc !== 0" class="kw-rc-err" x-text="' ✗ rc=' + limine.saveOp.rc" style="margin-top:0.25rem"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Build tab -->
+        <div class="kw-tab-panel" x-show="!loading && activeTab === 'build'">
+          <div x-show="!showManualFlow()" class="kw-tab-empty">
+            <p>No source selected. Go to <button class="kw-link-btn" @click="activeTab = 'sources'">Sources</button> and click <strong>Build →</strong> on a kernel source.</p>
+          </div>
+          <div x-show="showManualFlow()">
+            <div class="kw-mf-header">
+              <span class="kw-mf-header-title">Build wizard</span>
+              <code class="kw-mf-header-src" x-show="manualFlow.kver" x-text="'linux-' + manualFlow.kver"></code>
+              <button class="kw-mf-reset-btn" @click="resetManualFlow()" title="Reset wizard">✕</button>
+            </div>
+            <div class="kw-mf-body">
+
+              <!-- Step 1: config -->
+              <div class="kw-mf-step">
+                <div class="kw-mf-step-hdr">
+                  <span class="kw-mf-step-num">1</span>
+                  <span class="kw-mf-step-title">Kernel config</span>
+                  <span class="kw-mf-step-note">Copy from existing source or use current .config</span>
+                </div>
+                <div class="kw-mf-step-body">
+                  <!-- copy .config from another source -->
+                  <div x-show="configSources().length > 0" class="kw-mf-config-copy">
+                    <label class="kw-mf-kver-label">Copy .config from:</label>
+                    <select class="kw-mf-select" x-model="copyConfig.srcDirname">
+                      <option value="">— select source —</option>
+                      <template x-for="s in configSources()" :key="s.name">
+                        <option :value="s.name" x-text="s.name"></option>
+                      </template>
+                    </select>
+                    <button class="kw-btn" @click="startCopyConfig()"
+                            :disabled="!copyConfig.srcDirname || copyConfig.op.running">
+                      Copy .config
+                    </button>
+                    <span x-show="copyConfig.op.running" class="kw-spinner"> copying…</span>
+                    <span x-show="!copyConfig.op.running && copyConfig.op.rc === 0" class="kw-rc-ok"> ✓ copied</span>
+                    <span x-show="!copyConfig.op.running && copyConfig.op.rc !== null && copyConfig.op.rc !== 0" class="kw-rc-err"> ✗ failed</span>
+                  </div>
+                  <div class="kw-mf-sep" x-show="configSources().length > 0"></div>
+                  <button class="kw-btn" @click="startOldconfig()"
+                          :disabled="manualFlow.oldconfig.running || manualFlow.olddefconfig.running">
+                    listnewconfig
+                  </button>
+                  <span x-show="manualFlow.oldconfig.running" class="kw-spinner"> running…</span>
+                  <span x-show="!manualFlow.oldconfig.running && manualFlow.oldconfig.rc === 0" class="kw-rc-ok"> ✓</span>
+                  <span x-show="!manualFlow.oldconfig.running && manualFlow.oldconfig.rc !== null && manualFlow.oldconfig.rc !== 0"
+                        class="kw-rc-err" x-text="'✗ rc=' + manualFlow.oldconfig.rc"></span>
+                  <div class="kw-mf-sep"></div>
+                  <button class="kw-btn kw-btn-primary" @click="startOlddefconfig()"
+                          :disabled="manualFlow.oldconfig.running || manualFlow.olddefconfig.running">
+                    Accept defaults (olddefconfig)
+                  </button>
+                  <span x-show="manualFlow.olddefconfig.running" class="kw-spinner"> running…</span>
+                  <span x-show="!manualFlow.olddefconfig.running && manualFlow.olddefconfig.rc === 0" class="kw-rc-ok"> ✓ applied</span>
+                  <span x-show="!manualFlow.olddefconfig.running && manualFlow.olddefconfig.rc !== null && manualFlow.olddefconfig.rc !== 0"
+                        class="kw-rc-err" x-text="'✗ rc=' + manualFlow.olddefconfig.rc"></span>
+                  <div x-show="manualFlow.olddefconfig.approvalRequest && manualFlow.olddefconfig.approvalRequest.request_id" class="kw-approval" style="width:100%">
+                    <p class="muted">Waiting for approval:</p>
+                    <pre class="approval-cmd" x-text="manualFlow.olddefconfig.approvalCommand"></pre>
+                  </div>
+                  <p class="kw-mf-hint">For advanced configuration, open a terminal and run <code>make menuconfig</code> in <code>/usr/src/linux</code></p>
+                  <div class="kw-term" id="kw-mf-oldconfig" x-show="manualFlow.oldconfig.lines.length > 0">
+                    <template x-for="(line, i) in manualFlow.oldconfig.lines" :key="i">
+                      <div class="term-line" x-text="line"></div>
+                    </template>
+                  </div>
+                  <div class="kw-term" id="kw-mf-olddefconfig" x-show="manualFlow.olddefconfig.lines.length > 0">
+                    <template x-for="(line, i) in manualFlow.olddefconfig.lines" :key="i">
+                      <div class="term-line" x-text="line"></div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 2: build -->
+              <div class="kw-mf-step">
+                <div class="kw-mf-step-hdr">
+                  <span class="kw-mf-step-num">2</span>
+                  <span class="kw-mf-step-title">Build kernel (make -jN)</span>
+                  <span class="kw-mf-step-note">This can take 30–90 minutes</span>
+                </div>
+                <div class="kw-mf-step-body">
+                  <button class="kw-btn kw-btn-primary" @click="startBuild()"
+                          :disabled="manualFlow.build.running">
+                    Start build
+                  </button>
+                  <span x-show="manualFlow.build.running" class="kw-spinner"> building…</span>
+                  <span x-show="!manualFlow.build.running && manualFlow.build.rc === 0" class="kw-rc-ok"> ✓ done</span>
+                  <span x-show="!manualFlow.build.running && manualFlow.build.rc !== null && manualFlow.build.rc !== 0"
+                        class="kw-rc-err" x-text="' ✗ rc=' + manualFlow.build.rc"></span>
+                  <div x-show="manualFlow.build.approvalRequest && manualFlow.build.approvalRequest.request_id" class="kw-approval">
+                    <p class="muted">Waiting for approval:</p>
+                    <pre class="approval-cmd" x-text="manualFlow.build.approvalCommand"></pre>
+                  </div>
+                  <div class="kw-term" id="kw-mf-build" x-show="manualFlow.build.lines.length > 0">
+                    <template x-for="(line, i) in manualFlow.build.lines" :key="i">
+                      <div class="term-line" x-text="line"></div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 3: modules_install -->
+              <div class="kw-mf-step">
+                <div class="kw-mf-step-hdr">
+                  <span class="kw-mf-step-num">3</span>
+                  <span class="kw-mf-step-title">Install modules (make modules_install)</span>
+                </div>
+                <div class="kw-mf-step-body">
+                  <button class="kw-btn kw-btn-primary" @click="startModulesInstall()"
+                          :disabled="manualFlow.modulesInstall.running">
+                    Run modules_install
+                  </button>
+                  <span x-show="manualFlow.modulesInstall.running" class="kw-spinner"> running…</span>
+                  <span x-show="!manualFlow.modulesInstall.running && manualFlow.modulesInstall.rc === 0" class="kw-rc-ok"> ✓ done</span>
+                  <span x-show="!manualFlow.modulesInstall.running && manualFlow.modulesInstall.rc !== null && manualFlow.modulesInstall.rc !== 0"
+                        class="kw-rc-err" x-text="' ✗ rc=' + manualFlow.modulesInstall.rc"></span>
+                  <div x-show="manualFlow.modulesInstall.approvalRequest && manualFlow.modulesInstall.approvalRequest.request_id" class="kw-approval">
+                    <p class="muted">Waiting for approval:</p>
+                    <pre class="approval-cmd" x-text="manualFlow.modulesInstall.approvalCommand"></pre>
+                  </div>
+                  <div class="kw-term" id="kw-mf-modules-install" x-show="manualFlow.modulesInstall.lines.length > 0">
+                    <template x-for="(line, i) in manualFlow.modulesInstall.lines" :key="i">
+                      <div class="term-line" x-text="line"></div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 4: make install -->
+              <div class="kw-mf-step">
+                <div class="kw-mf-step-hdr">
+                  <span class="kw-mf-step-num">4</span>
+                  <span class="kw-mf-step-title">Install kernel image (make install)</span>
+                </div>
+                <div class="kw-mf-step-body">
+                  <button class="kw-btn kw-btn-primary" @click="startMakeInstall()"
+                          :disabled="manualFlow.makeInstall.running">
+                    Run make install
+                  </button>
+                  <span x-show="manualFlow.makeInstall.running" class="kw-spinner"> running…</span>
+                  <span x-show="!manualFlow.makeInstall.running && manualFlow.makeInstall.rc === 0" class="kw-rc-ok"> ✓ done</span>
+                  <span x-show="!manualFlow.makeInstall.running && manualFlow.makeInstall.rc !== null && manualFlow.makeInstall.rc !== 0"
+                        class="kw-rc-err" x-text="' ✗ rc=' + manualFlow.makeInstall.rc"></span>
+                  <div x-show="manualFlow.makeInstall.approvalRequest && manualFlow.makeInstall.approvalRequest.request_id" class="kw-approval">
+                    <p class="muted">Waiting for approval:</p>
+                    <pre class="approval-cmd" x-text="manualFlow.makeInstall.approvalCommand"></pre>
+                  </div>
+                  <div class="kw-term" id="kw-mf-make-install" x-show="manualFlow.makeInstall.lines.length > 0">
+                    <template x-for="(line, i) in manualFlow.makeInstall.lines" :key="i">
+                      <div class="term-line" x-text="line"></div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 5: dracut -->
+              <div class="kw-mf-step">
+                <div class="kw-mf-step-hdr">
+                  <span class="kw-mf-step-num">5</span>
+                  <span class="kw-mf-step-title">Generate initramfs (dracut)</span>
+                </div>
+                <div class="kw-mf-step-body">
+                  <div class="kw-mf-kver-row">
+                    <label class="kw-mf-kver-label">Kernel version:</label>
+                    <input class="kw-mf-kver-input" type="text" x-model="manualFlow.kver"
+                           placeholder="e.g. 7.0.9-gentoo-r4">
+                  </div>
+                  <button class="kw-btn kw-btn-primary" @click="startInitramfs()"
+                          :disabled="manualFlow.initramfs.running || !manualFlow.kver">
+                    Run dracut
+                  </button>
+                  <span x-show="manualFlow.initramfs.running" class="kw-spinner"> running…</span>
+                  <span x-show="!manualFlow.initramfs.running && manualFlow.initramfs.rc === 0 && manualFlow.initramfs.initramfs_found === true"
+                        class="kw-rc-ok"> ✓ initramfs created</span>
+                  <span x-show="!manualFlow.initramfs.running && manualFlow.initramfs.rc === 0 && manualFlow.initramfs.initramfs_found === false"
+                        class="kw-rc-err"> ✗ dracut succeeded but initramfs not found in /boot</span>
+                  <span x-show="!manualFlow.initramfs.running && manualFlow.initramfs.rc !== null && manualFlow.initramfs.rc !== 0"
+                        class="kw-rc-err" x-text="' ✗ rc=' + manualFlow.initramfs.rc"></span>
+                  <div x-show="manualFlow.initramfs.approvalRequest && manualFlow.initramfs.approvalRequest.request_id" class="kw-approval">
+                    <p class="muted">Waiting for approval:</p>
+                    <pre class="approval-cmd" x-text="manualFlow.initramfs.approvalCommand"></pre>
+                  </div>
+                  <div class="kw-term" id="kw-mf-initramfs" x-show="manualFlow.initramfs.lines.length > 0">
+                    <template x-for="(line, i) in manualFlow.initramfs.lines" :key="i">
+                      <div class="term-line" x-text="line"></div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 6: module-rebuild -->
+              <div class="kw-mf-step">
+                <div class="kw-mf-step-hdr">
+                  <span class="kw-mf-step-num">6</span>
+                  <span class="kw-mf-step-title">Rebuild external modules (@module-rebuild)</span>
+                  <span class="kw-mf-step-note">Skip if no external kernel modules are installed</span>
+                </div>
+                <div class="kw-mf-step-body">
+                  <button class="kw-btn" @click="startModuleRebuild()"
+                          :disabled="manualFlow.moduleRebuild.running">
+                    Run @module-rebuild
+                  </button>
+                  <span x-show="manualFlow.moduleRebuild.running" class="kw-spinner"> running…</span>
+                  <span x-show="!manualFlow.moduleRebuild.running && manualFlow.moduleRebuild.rc === 0" class="kw-rc-ok"> ✓ done</span>
+                  <span x-show="!manualFlow.moduleRebuild.running && manualFlow.moduleRebuild.rc !== null && manualFlow.moduleRebuild.rc !== 0"
+                        class="kw-rc-err" x-text="' ✗ rc=' + manualFlow.moduleRebuild.rc"></span>
+                  <div x-show="manualFlow.moduleRebuild.approvalRequest && manualFlow.moduleRebuild.approvalRequest.request_id" class="kw-approval">
+                    <p class="muted">Waiting for approval:</p>
+                    <pre class="approval-cmd" x-text="manualFlow.moduleRebuild.approvalCommand"></pre>
+                  </div>
+                  <div class="kw-term" id="kw-mf-modules" x-show="manualFlow.moduleRebuild.lines.length > 0">
+                    <template x-for="(line, i) in manualFlow.moduleRebuild.lines" :key="i">
+                      <div class="term-line" x-text="line"></div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Step 7: Limine auto-update (only shown when Limine is detected) -->
+              <div class="kw-mf-step" x-show="limineHasLimine()">
+                <div class="kw-mf-step-hdr">
+                  <span class="kw-mf-step-num">7</span>
+                  <span class="kw-mf-step-title">Update Limine bootloader config</span>
+                  <span class="kw-mf-step-note">Copies the running kernel entry and points it at the new kernel</span>
+                </div>
+                <div class="kw-mf-step-body">
+                  <button class="kw-btn kw-btn-primary" @click="startLimineAutoUpdate()"
+                          :disabled="manualFlow.limineAutoUpdate.running || !manualFlow.kver">
+                    Auto-update Limine
+                  </button>
+                  <span x-show="manualFlow.limineAutoUpdate.running" class="kw-spinner"> running…</span>
+                  <span x-show="!manualFlow.limineAutoUpdate.running && manualFlow.limineAutoUpdate.rc === 0" class="kw-rc-ok"> ✓ done</span>
+                  <span x-show="!manualFlow.limineAutoUpdate.running && manualFlow.limineAutoUpdate.rc !== null && manualFlow.limineAutoUpdate.rc !== 0"
+                        class="kw-rc-err" x-text="' ✗ rc=' + manualFlow.limineAutoUpdate.rc"></span>
+                  <div x-show="manualFlow.limineAutoUpdate.approvalRequest && manualFlow.limineAutoUpdate.approvalRequest.request_id" class="kw-approval">
+                    <p class="muted">Waiting for approval:</p>
+                    <pre class="approval-cmd" x-text="manualFlow.limineAutoUpdate.approvalCommand"></pre>
+                  </div>
+                  <div class="kw-term" id="kw-mf-limine-auto" x-show="manualFlow.limineAutoUpdate.lines.length > 0">
+                    <template x-for="(line, i) in manualFlow.limineAutoUpdate.lines" :key="i">
+                      <div class="term-line" x-text="line"></div>
+                    </template>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <!-- Reboot -->
+        <div class="kw-reboot-panel" x-show="!loading">
+          <div class="kw-reboot-hdr">Reboot</div>
+          <p class="kw-reboot-note">
+            This will immediately reboot the system. The browser will lose connection.
+          </p>
+          <div class="kw-reboot-row">
+            <label class="kw-reboot-label">Type <strong>REBOOT</strong> to enable:</label>
+            <input class="kw-reboot-input" type="text" x-model="reboot.confirmText"
+                   placeholder="REBOOT" autocomplete="off" spellcheck="false">
+            <button class="kw-btn kw-btn-danger" @click="startReboot()"
+                    :disabled="reboot.confirmText !== 'REBOOT' || reboot.op.running">
+              <span x-show="reboot.op.running" class="kw-spinner"> …</span>
+              <span x-show="!reboot.op.running">Reboot now</span>
+            </button>
+          </div>
+          <div x-show="reboot.op.lines.length > 0 || reboot.op.running" class="kw-term-wrap" style="margin-top:0.75rem">
+            <div class="kw-term-hdr">
+              <span x-show="reboot.op.running" class="kw-spinner"> Rebooting…</span>
+              <span x-show="!reboot.op.running && reboot.op.rc === 0" class="kw-rc-ok"> ✓ reboot scheduled</span>
+              <span x-show="!reboot.op.running && reboot.op.rc !== null && reboot.op.rc !== 0"
+                    class="kw-rc-err" x-text="' ✗ rc=' + reboot.op.rc"></span>
+            </div>
+            <div x-show="reboot.op.approvalRequest && reboot.op.approvalRequest.request_id" class="kw-approval">
+              <p class="muted">Waiting for approval:</p>
+              <pre class="approval-cmd" x-text="reboot.op.approvalCommand"></pre>
+            </div>
+            <div class="kw-term" id="kw-reboot-term">
+              <template x-for="(line, i) in reboot.op.lines" :key="i">
+                <div class="term-line" x-text="line"></div>
+              </template>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
       </div><!-- /app-content -->
 
     </main>
