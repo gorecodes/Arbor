@@ -1017,8 +1017,8 @@ async def pkg_stats(auth: Auth):
     return data
 
 
-@app.get("/api/disk-usage")
-async def disk_usage(auth: Auth):
+@app.get("/api/storage-stats")
+async def storage_stats(auth: Auth):
     return await query_one("disk_usage")
 
 
