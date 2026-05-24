@@ -1908,7 +1908,7 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
 
 .dash-summary-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
