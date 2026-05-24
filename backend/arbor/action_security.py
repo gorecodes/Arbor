@@ -39,12 +39,14 @@ _READONLY_COMMANDS = {
     "glsa_list",
     "eclean_pretend",
     "snapshot_export",
+    "disk_usage",
 }
 
 _PRETEND_COMMANDS = {
     "emerge_pretend",
     "emerge_uninstall_pretend",
     "emerge_depclean_pretend",
+    "revdep_rebuild_pretend",
 }
 
 _APPROVAL_REQUIRED_COMMANDS = {
@@ -60,6 +62,7 @@ _APPROVAL_REQUIRED_COMMANDS = {
     "history_purge",
     "eclean_run",
     "snapshot_import",
+    "revdep_rebuild",
 }
 
 _TARGET_KEYS = ("atom", "name", "cfg_file", "job_id")

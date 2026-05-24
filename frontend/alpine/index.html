@@ -635,6 +635,7 @@
         </div>
         <p class="muted" x-show="loading">Loading…</p>
         <div x-show="!loading">
+          <div class="pkg-table-wrap">
           <table class="pkg-table">
             <thead>
               <tr>
@@ -652,6 +653,7 @@
               </template>
             </tbody>
           </table>
+          </div>
           <p class="pkg-count" x-text="packages.length + ' packages'"></p>
         </div>
       </div>
@@ -687,6 +689,7 @@
           <p class="error" x-show="error" x-text="error"></p>
           <p class="muted" x-show="loading">Loading USE flags…</p>
 
+          <div class="pkg-table-wrap">
           <table class="pkg-table" x-show="!loading && !error && filteredFlags().length">
             <thead>
               <tr>
@@ -718,6 +721,7 @@
               </template>
             </tbody>
           </table>
+          </div>
 
           <p class="pkg-count" x-show="!loading && !error && filteredFlags().length" x-text="visibleCountText()"></p>
           <p class="muted" x-show="!loading && !error && !filteredFlags().length" x-text="emptyStateText()"></p>
@@ -755,23 +759,23 @@
                 <p class="ufi-summary-sub" x-show="selectedFlagOriginFile()" x-text="selectedFlagOriginFile()"></p>
               </div>
               <div>
-                <dt>Overrides <span class="ufi-term-help" tabindex="0" :title="termHelp('override')" aria-label="Override help">?</span></dt>
+                <dt>Overrides <span class="ufi-term-help" x-data="{ tipOpen: false }" tabindex="0" :title="termHelp('override')" aria-label="Override help" @click.stop="tipOpen = !tipOpen" @keydown.enter="tipOpen = !tipOpen" @click.outside="tipOpen = false">?<span class="tip" x-show="tipOpen" x-cloak x-text="termHelp('override')"></span></span></dt>
                 <dd x-text="packageOverrideCount(selectedFlag()) + ' packages'"></dd>
               </div>
               <div>
-                <dt>Installed supporting <span class="ufi-term-help" tabindex="0" :title="termHelp('supporting-package')" aria-label="Supporting package help">?</span></dt>
+                <dt>Installed supporting <span class="ufi-term-help" x-data="{ tipOpen: false }" tabindex="0" :title="termHelp('supporting-package')" aria-label="Supporting package help" @click.stop="tipOpen = !tipOpen" @keydown.enter="tipOpen = !tipOpen" @click.outside="tipOpen = false">?<span class="tip" x-show="tipOpen" x-cloak x-text="termHelp('supporting-package')"></span></span></dt>
                 <dd x-text="installedSupportCount(selectedFlag()) + ' packages'"></dd>
               </div>
               <div>
-                <dt>Built enabled <span class="ufi-term-help" tabindex="0" :title="termHelp('built-enabled')" aria-label="Built enabled help">?</span></dt>
+                <dt>Built enabled <span class="ufi-term-help" x-data="{ tipOpen: false }" tabindex="0" :title="termHelp('built-enabled')" aria-label="Built enabled help" @click.stop="tipOpen = !tipOpen" @keydown.enter="tipOpen = !tipOpen" @click.outside="tipOpen = false">?<span class="tip" x-show="tipOpen" x-cloak x-text="termHelp('built-enabled')"></span></span></dt>
                 <dd x-text="installedEnabledCount(selectedFlag()) + ' packages'"></dd>
               </div>
               <div>
-                <dt>Built disabled <span class="ufi-term-help" tabindex="0" :title="termHelp('built-disabled')" aria-label="Built disabled help">?</span></dt>
+                <dt>Built disabled <span class="ufi-term-help" x-data="{ tipOpen: false }" tabindex="0" :title="termHelp('built-disabled')" aria-label="Built disabled help" @click.stop="tipOpen = !tipOpen" @keydown.enter="tipOpen = !tipOpen" @click.outside="tipOpen = false">?<span class="tip" x-show="tipOpen" x-cloak x-text="termHelp('built-disabled')"></span></span></dt>
                 <dd x-text="installedDisabledCount(selectedFlag()) + ' packages'"></dd>
               </div>
               <div>
-                <dt>Mismatch <span class="ufi-term-help" tabindex="0" :title="termHelp('mismatch')" aria-label="Mismatch help">?</span></dt>
+                <dt>Mismatch <span class="ufi-term-help" x-data="{ tipOpen: false }" tabindex="0" :title="termHelp('mismatch')" aria-label="Mismatch help" @click.stop="tipOpen = !tipOpen" @keydown.enter="tipOpen = !tipOpen" @click.outside="tipOpen = false">?<span class="tip" x-show="tipOpen" x-cloak x-text="termHelp('mismatch')"></span></span></dt>
                 <dd :class="summaryValueClass(selectedFlag(), 'mismatch')" x-text="mismatchCount(selectedFlag()) + ' packages'"></dd>
               </div>
             </dl>
@@ -804,7 +808,7 @@
               <section class="ufi-panel-section">
                 <header class="ufi-section-header">
                   <div>
-                    <h4>Package-specific overrides <span class="ufi-term-help" tabindex="0" :title="termHelp('override')" aria-label="Override help">?</span></h4>
+                    <h4>Package-specific overrides <span class="ufi-term-help" x-data="{ tipOpen: false }" tabindex="0" :title="termHelp('override')" aria-label="Override help" @click.stop="tipOpen = !tipOpen" @keydown.enter="tipOpen = !tipOpen" @click.outside="tipOpen = false">?<span class="tip" x-show="tipOpen" x-cloak x-text="termHelp('override')"></span></span></h4>
                     <p class="ufi-section-note">Explicit package.use state for this flag. These rows may include packages that are not installed.</p>
                   </div>
                 </header>
@@ -855,7 +859,7 @@
               <section class="ufi-panel-section">
                 <header class="ufi-section-header">
                   <div>
-                    <h4>Installed packages built with this flag enabled <span class="ufi-term-help" tabindex="0" :title="termHelp('built-enabled')" aria-label="Built enabled help">?</span></h4>
+                    <h4>Installed packages built with this flag enabled <span class="ufi-term-help" x-data="{ tipOpen: false }" tabindex="0" :title="termHelp('built-enabled')" aria-label="Built enabled help" @click.stop="tipOpen = !tipOpen" @keydown.enter="tipOpen = !tipOpen" @click.outside="tipOpen = false">?<span class="tip" x-show="tipOpen" x-cloak x-text="termHelp('built-enabled')"></span></span></h4>
                     <p class="ufi-section-note">Installed packages whose IUSE supports this flag and whose current build has it enabled.</p>
                   </div>
                 </header>
@@ -882,7 +886,7 @@
               <section class="ufi-panel-section">
                 <header class="ufi-section-header">
                   <div>
-                    <h4>Installed packages supporting this flag but built without it <span class="ufi-term-help" tabindex="0" :title="termHelp('built-disabled')" aria-label="Built disabled help">?</span></h4>
+                    <h4>Installed packages supporting this flag but built without it <span class="ufi-term-help" x-data="{ tipOpen: false }" tabindex="0" :title="termHelp('built-disabled')" aria-label="Built disabled help" @click.stop="tipOpen = !tipOpen" @keydown.enter="tipOpen = !tipOpen" @click.outside="tipOpen = false">?<span class="tip" x-show="tipOpen" x-cloak x-text="termHelp('built-disabled')"></span></span></h4>
                     <p class="ufi-section-note">Installed packages whose IUSE supports this flag but whose current build does not enable it.</p>
                   </div>
                 </header>
@@ -934,12 +938,13 @@
       <div x-show="$store.router.view === 'search'" x-data="searchComponent">
         <div class="pkg-toolbar">
           <h2>Search Portage Tree</h2>
-          <input type="search" x-model="query" @input="onInput()" placeholder="package name…" style="width:300px">
+          <input type="search" x-model="query" @input="onInput()" placeholder="package name…" class="pkg-search-input">
         </div>
         <p class="muted" x-show="loading">Searching…</p>
         <p class="muted" x-show="!loading && searched && results.length === 0">
           No results for "<span x-text="query"></span>"
         </p>
+        <div class="pkg-table-wrap">
         <table class="pkg-table" x-show="!loading && results.length > 0">
           <thead>
             <tr>
@@ -956,6 +961,7 @@
             </template>
           </tbody>
         </table>
+        </div>
       </div>
 
       <!-- Maintenance / world-update / sync -->
@@ -1106,6 +1112,34 @@
                   </template>
                   <div class="line cursor" x-show="preserved.running">▊</div>
                   <div class="line muted-line" x-show="preserved.lines.length === 0 && !preserved.running">Rebuild libraries preserved after updates.</div>
+                </div>
+              </div>
+
+              <div class="mv-card" id="updates-revdep" :class="{ active: selectedAction === 'revdep' }" @click="selectAction('revdep')" @focusin="selectAction('revdep')">
+                <div class="mv-card-header">
+                  <div class="mv-card-title">
+                    <div class="mv-card-title-row">
+                      <span class="mv-title">Revdep rebuild</span>
+                      <span class="mv-state-chip" :class="'is-' + cardState('revdep').tone" x-text="cardState('revdep').text"></span>
+                    </div>
+                    <span class="mv-cmd">revdep-rebuild</span>
+                    <p class="mv-card-summary" x-text="actionSummary('revdep')"></p>
+                  </div>
+                  <div class="mv-card-actions">
+                    <button class="mv-btn-toggle" @click="revdep.expanded = !revdep.expanded"
+                            x-text="revdep.expanded ? '▲' : '▼'"></button>
+                    <button class="mv-btn-run" @click="startRevdepPretend()" :disabled="revdep.running"
+                            x-text="revdep.running ? 'Running…' : revdep.rc !== null ? 'Re-check' : 'Check'"></button>
+                    <button class="mv-btn-run" x-show="$store.auth.canOperate" @click="startRevdep()" :disabled="revdep.running"
+                            x-text="revdep.running ? 'Running…' : revdep.rc !== null ? 'Retry' : 'Rebuild'"></button>
+                  </div>
+                </div>
+                <div class="terminal" x-ref="revdepTerm" x-show="revdep.expanded">
+                  <template x-for="(line, i) in revdep.lines" :key="i">
+                    <div class="line" :class="lineClass(line)" x-text="line || ' '"></div>
+                  </template>
+                  <div class="line cursor" x-show="revdep.running">▊</div>
+                  <div class="line muted-line" x-show="revdep.lines.length === 0 && !revdep.running">Scan and rebuild packages with broken library dependencies.</div>
                 </div>
               </div>
 

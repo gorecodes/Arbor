@@ -105,6 +105,15 @@
     await _post('/auth/step-up/ensure', {})
   }
 
+  function _fmtBytes(b) {
+    if (!b) return '0 B'
+    const gb = b / 1024 ** 3
+    if (gb >= 1) return gb.toFixed(1) + ' GB'
+    const mb = b / 1024 ** 2
+    if (mb >= 1) return mb.toFixed(0) + ' MB'
+    return (b / 1024).toFixed(0) + ' KB'
+  }
+
   const api = {
     authBackend: () => _get('/auth/backend'),
     authSession: () => _get('/auth/session'),
@@ -131,6 +140,7 @@
     newsRead:    (id)        => _post('/news/read', { id }),
     newsReadAll: ()          => _post('/news/read-all', {}),
     glsa:        ()          => _get('/glsa'),
+    diskUsage:   ()          => _get('/disk-usage'),
     snapshotImport: (file) => {
       const fd = new FormData(); fd.append('file', file)
       return fetch('/api/snapshot/import', { method: 'POST', credentials: 'same-origin', headers: { 'X-CSRF-Token': _csrfToken() }, body: fd })
@@ -249,7 +259,7 @@
   // and read-only attaches do not.
   const _MUTATING_EMERGE_CMDS = new Set([
     'install', 'uninstall', 'autounmask',
-    'world-update', 'depclean', 'preserved-rebuild', 'sync', 'eclean',
+    'world-update', 'depclean', 'preserved-rebuild', 'sync', 'eclean', 'revdep-rebuild',
   ])
 
   function wsEmerge(cmd, atom, onMsg, extra = {}) {
@@ -350,7 +360,7 @@
     if (request.action_cmd === 'emerge_uninstall' && args.atom) {
       return { view: 'uninstall', param: _approvalAtomKey(args.atom) }
     }
-    if (['emerge_world_update', 'emerge_depclean', 'emerge_preserved_rebuild', 'emerge_sync'].includes(request.action_cmd)) {
+    if (['emerge_world_update', 'emerge_depclean', 'emerge_preserved_rebuild', 'emerge_sync', 'revdep_rebuild'].includes(request.action_cmd)) {
       return { view: 'updates', param: null }
     }
     if (['overlay_sync', 'overlay_add', 'overlay_remove'].includes(request.action_cmd)) {
@@ -1054,6 +1064,7 @@
             { id: 'updates-check', label: 'Check' },
             { id: 'updates-world', label: '@world' },
             { id: 'updates-preserved', label: 'Preserved' },
+            { id: 'updates-revdep', label: 'Revdep' },
             { id: 'updates-depclean', label: 'Depclean' },
             { id: 'updates-clean', label: 'Clean' },
           ]
@@ -1212,6 +1223,7 @@
       recentHistory: [],
       newsData: null,
       glsaData: null,
+      diskUsage: null,
       error: null,
       _timer: null,
       init() {
@@ -1230,7 +1242,7 @@
       async _load() {
         try {
           this.error = null
-          const [statusRes, statsRes, pkgStatsRes, compileCatsRes, jobsRes, historyRes, newsRes, glsaRes] = await Promise.allSettled([
+          const [statusRes, statsRes, pkgStatsRes, compileCatsRes, jobsRes, historyRes, newsRes, glsaRes, diskUsageRes] = await Promise.allSettled([
             api.status(),
             api.stats(),
             api.pkgStats(),
@@ -1239,6 +1251,7 @@
             jobHistory.list(12, 0, ''),
             api.news(),
             api.glsa(),
+            api.diskUsage(),
           ])
           if (statusRes.status !== 'fulfilled') throw statusRes.reason
           this.status = statusRes.value
@@ -1249,6 +1262,7 @@
           this.recentHistory = historyRes.status === 'fulfilled' && Array.isArray(historyRes.value?.items) ? historyRes.value.items : []
           this.newsData = newsRes.status === 'fulfilled' ? newsRes.value : null
           this.glsaData = glsaRes.status === 'fulfilled' ? glsaRes.value : null
+          this.diskUsage = diskUsageRes.status === 'fulfilled' ? diskUsageRes.value : null
         } catch(e) { this.error = e.message }
         finally { this.$nextTick(() => this._renderCompileCats()) }
       },
@@ -1505,6 +1519,20 @@
             tone: 'muted',
           },
         ]
+        // Disk usage (distfiles + binpkgs + tmp)
+        if (this.diskUsage) {
+          const du = this.diskUsage
+          const dist = du.distfiles || 0
+          const bin = du.binpkgs || 0
+          const tmp = du.tmp_portage || 0
+          items.push({
+            key: 'disk-usage',
+            label: 'Portage cache',
+            value: _fmtBytes(dist + bin + tmp),
+            detail: 'distfiles ' + _fmtBytes(dist) + ' · binpkgs ' + _fmtBytes(bin) + ' · tmp ' + _fmtBytes(tmp),
+            tone: 'muted',
+          })
+        }
         // Unread news
         const unreadNews = Array.isArray(this.newsData) ? this.newsData.filter(n => n.unread).length : null
         if (unreadNews !== null) {
@@ -3599,6 +3627,16 @@ ${labels}
         'This is typically follow-up work after updates changed linked libraries.',
       ],
     },
+    revdep: {
+      id: 'revdep',
+      title: 'Revdep rebuild',
+      summary: 'Scan and rebuild packages with broken library dependencies.',
+      risk: 'Low. Only rebuilds packages that reference missing or changed shared libraries.',
+      notes: [
+        'Run the pretend phase first to see which packages will be rebuilt.',
+        'Useful after library upgrades that left dependent packages with broken linkage.',
+      ],
+    },
     depclean: {
       id: 'depclean',
       title: 'Depclean',
@@ -3630,6 +3668,7 @@ ${labels}
       worldUpdate:  mkOp(false),
       depclean:     { ...mkOp(false), dcStep: 'idle' },
       preserved:    mkOp(false),
+      revdep:       mkOp(false),
       clean: { ...mkOp(false), cleanStep: 'idle', cleanTarget: 'dist' },
       pkgStats: null,
       selectedAction: 'worldPretend',
@@ -3704,6 +3743,7 @@ ${labels}
         if (id === 'worldPretend') return 'emerge -uDN --pretend @world'
         if (id === 'sync') return 'emaint sync -a'
         if (id === 'preserved') return 'emerge @preserved-rebuild'
+        if (id === 'revdep') return 'revdep-rebuild'
         if (id === 'depclean') return 'emerge --depclean'
         if (id === 'clean') return this.clean.cleanTarget === 'dist' ? 'eclean-dist' : 'eclean-pkg'
         return ''
@@ -3810,6 +3850,7 @@ ${labels}
           if (cmd === 'emerge_world_update') return this._startWorldUpdate()
           if (cmd === 'emerge_depclean') return this._startDepclean()
           if (cmd === 'emerge_preserved_rebuild') return this._startPreserved()
+          if (cmd === 'revdep_rebuild') return this._startRevdep()
         })
         op.expanded = true
         op.running = false
@@ -3837,6 +3878,10 @@ ${labels}
           this.selectAction('preserved')
           op = this.preserved
           onApproved = () => this._startPreserved()
+        } else if (request.action_cmd === 'revdep_rebuild') {
+          this.selectAction('revdep')
+          op = this.revdep
+          onApproved = () => this._startRevdep()
         } else {
           return false
         }
@@ -4048,6 +4093,37 @@ ${labels}
           if (msg.line !== undefined) this._appendLine(this.preserved, 'psTerm', msg.line)
           if (msg.done) { this.preserved.running = false; this.preserved.rc = msg.returncode ?? null; this.preserved.ws = null; _scopedStorageRemove(_JOB_META.preserved.storage) }
         })
+      },
+      startRevdepPretend() {
+        this.selectAction('revdep')
+        this.revdep.lines = []; this.revdep.rc = null; this.revdep.running = true; this.revdep.expanded = true
+        this.revdep.ws = wsGlobalEmerge('revdep-pretend', (msg) => {
+          if (msg.job_id) return
+          if (msg.line !== undefined) this._appendLine(this.revdep, 'revdepTerm', msg.line)
+          if (msg.done) { this.revdep.running = false; this.revdep.rc = msg.returncode ?? null; this.revdep.ws = null }
+        })
+      },
+      startRevdep() {
+        this.selectAction('revdep')
+        this._startRevdep()
+      },
+      async _startRevdep() {
+        this.revdep.lines = []; this.revdep.rc = null; this.revdep.running = true; this.revdep.expanded = true
+        let approval
+        try {
+          approval = await this._requestOpApproval(this.revdep, 'revdep_rebuild', {})
+        } catch (e) {
+          this.revdep.lines = ['Error: ' + e.message]
+          return
+        }
+        if (!approval) return
+        clearApprovalState(this.revdep)
+        this.revdep.running = true
+        this.revdep.ws = wsGlobalEmerge('revdep-rebuild', (msg) => {
+          if (msg.job_id) return
+          if (msg.line !== undefined) this._appendLine(this.revdep, 'revdepTerm', msg.line)
+          if (msg.done) { this.revdep.running = false; this.revdep.rc = msg.returncode ?? null; this.revdep.ws = null }
+        }, { approval_request_id: approval.request_id })
       },
     }
   }

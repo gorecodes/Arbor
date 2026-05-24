@@ -72,6 +72,9 @@ _KNOWN_DAEMON_COMMANDS = {
     "totp_enroll_begin",
     "totp_enroll_confirm",
     "totp_disable",
+    "revdep_rebuild_pretend",
+    "revdep_rebuild",
+    "disk_usage",
 }
 
 _ROLE_ALLOWED_CLASSES = {

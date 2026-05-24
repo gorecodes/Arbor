@@ -805,6 +805,27 @@ async def ws_emerge_preserved_rebuild(
     )
 
 
+@app.websocket("/ws/emerge/revdep-pretend")
+async def ws_revdep_pretend(websocket: WebSocket):
+    await _ws_job_cmd(websocket, "revdep_rebuild_pretend", {})
+
+
+@app.websocket("/ws/emerge/revdep-rebuild")
+async def ws_revdep_rebuild(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "revdep_rebuild",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
 @app.websocket("/ws/emerge/world-pretend")
 async def ws_emerge_world_pretend(websocket: WebSocket):
     await _ws_job_cmd(websocket, "world_updates", {})
@@ -994,6 +1015,11 @@ async def history_stats(auth: Auth):
 async def pkg_stats(auth: Auth):
     data = await query_one("pkg_stats", {})
     return data
+
+
+@app.get("/api/disk-usage")
+async def disk_usage(auth: Auth):
+    return await query_one("disk_usage")
 
 
 @app.get("/api/analytics/compile-time-by-category")

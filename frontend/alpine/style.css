@@ -41,6 +41,11 @@
   --chart-4: #8794a1;
   --chart-5: #8f7c73;
 
+  /* Responsive tokens */
+  --touch-target: 44px;
+  --pad-mobile: 1rem;
+  --pad-desktop: 2rem;
+
   /* Backward-compatible aliases for the existing stylesheet. */
   --bg-app: var(--background);
   --bg-nav: var(--nav);
@@ -164,7 +169,7 @@ nav li.active button { color: #7ee787; border-left: 2px solid #7ee787; }
   border: 1px solid #30363d;
   border-radius: 8px;
   padding: 2.5rem;
-  width: 340px;
+  width: min(340px, calc(100% - 2rem));
 }
 
 .card h1 { font-size: 1.8rem; color: #7ee787; margin-bottom: 0.25rem; }
@@ -3236,7 +3241,7 @@ h2 { color: #e6edf3; margin-bottom: 0.25rem; }
   flex-wrap: wrap;
 }
 .mv-title { color: #c9d1d9; font-size: 0.88rem; font-weight: bold; }
-.mv-cmd { color: #6e7681; font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; }
+.mv-cmd { color: #6e7681; font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; overflow-wrap: anywhere; word-break: break-all; }
 .mv-card-summary {
   color: var(--text-muted);
   font-size: 0.76rem;
@@ -4705,3 +4710,112 @@ input:focus,
 .sn-import-result { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 .sn-result-ok { font-size: 0.82rem; color: #88a784; font-weight: 600; }
 .sn-result-backup { font-size: 0.78rem; color: #6e7681; font-family: monospace; }
+
+/* ── Responsive additions ────────────────────────────────────────────────── */
+
+/* Search input (replaces inline style="width:300px") */
+.pkg-search-input { max-width: 300px; width: 100%; }
+
+/* pkg-toolbar-copy: cap flex-basis so it doesn't overflow narrow viewports */
+.pkg-toolbar-copy { flex-basis: min(28rem, 100%); }
+
+/* Table scroll containers */
+.pkg-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* Touch parity: :active mirrors :hover on clickable table rows */
+.pkg-table tr.clickable:active td { background: #161b22; }
+
+/* ── Tablet (641px – 960px) ──────────────────────────────────────────────── */
+@media (min-width: 641px) and (max-width: 960px) {
+  .pkg-explorer-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .mv-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .ufi-sidebar {
+    position: static;
+    max-height: none;
+  }
+
+  .pkg-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .pkg-toolbar-copy,
+  .pkg-toolbar-controls {
+    flex: 1 1 45%;
+  }
+}
+
+/* ── Mobile (≤ 640px) ────────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Login card */
+  .card {
+    width: min(340px, calc(100% - 2rem));
+    padding: 1.75rem 1.25rem;
+  }
+
+  /* Toolbar inputs */
+  .pkg-toolbar input,
+  .pkg-search-input { width: 100%; max-width: none; }
+
+  .pkg-toolbar {
+    flex-wrap: wrap;
+    gap: 0.65rem;
+  }
+
+  .pkg-toolbar h2 { flex: 0 0 100%; }
+
+  .pkg-toolbar-copy,
+  .pkg-toolbar-controls {
+    flex: 1 1 100%;
+  }
+
+  /* Touch targets — primary interactive elements only, not compact toggles */
+  .app-primary-link,
+  .app-context-link,
+  .app-logout,
+  .ufi-term-help,
+  .mv-btn-run,
+  .nw-mark-all-btn {
+    min-height: var(--touch-target);
+    min-width: var(--touch-target);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  /* Maintenance: full-width single column, hide context panel */
+  .mv-layout { grid-template-columns: 1fr; }
+  .mv-context-panel { display: none; }
+
+  /* Maintenance card header: stack vertically on small screens */
+  .mv-card-header {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .mv-card-actions {
+    align-self: flex-end;
+  }
+
+  /* Tooltip touch widget */
+  .ufi-term-help { position: relative; }
+  .tip {
+    position: absolute;
+    z-index: 200;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.82rem;
+    max-width: 240px;
+    line-height: 1.5;
+    color: var(--text);
+    white-space: normal;
+    pointer-events: none;
+  }
+}

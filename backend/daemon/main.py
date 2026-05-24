@@ -111,6 +111,9 @@ ALLOWED_COMMANDS = {
     "eclean_run",
     "snapshot_export",
     "snapshot_import",
+    "revdep_rebuild_pretend",
+    "revdep_rebuild",
+    "disk_usage",
 }
 
 # ---------------------------------------------------------------------------
@@ -2158,7 +2161,7 @@ def _canonical_approval_args(action_cmd: str, args: dict | None) -> dict:
     if action_cmd == "emerge_world_update":
         opts = ",".join(_parse_opts(str(data.get("opts", "")), _UPDATE_OPTS))
         return {"opts": opts} if opts else {}
-    if action_cmd in {"emerge_depclean", "emerge_preserved_rebuild", "emerge_sync"}:
+    if action_cmd in {"emerge_depclean", "emerge_preserved_rebuild", "emerge_sync", "revdep_rebuild"}:
         return {}
     if action_cmd == "overlay_sync":
         return {"name": str(data.get("name", "")).strip()}
@@ -2753,6 +2756,62 @@ async def cmd_emerge_preserved_rebuild(_args):
         action_args={},
     ):
         yield item
+
+
+async def cmd_revdep_rebuild_pretend(_args):
+    async for item in _start_background_job(
+        "@revdep-pretend",
+        ["revdep-rebuild", "--pretend"],
+        kind="revdep-pretend",
+        action_cmd="revdep_rebuild_pretend",
+        action_args={},
+    ):
+        yield item
+
+
+async def cmd_revdep_rebuild(_args):
+    approval_error = await in_thread(
+        _require_approval,
+        "revdep_rebuild",
+        _approval_payload("revdep_rebuild", _args),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    async for item in _start_background_job(
+        "@revdep-rebuild",
+        ["revdep-rebuild"],
+        kind="revdep-rebuild",
+        action_cmd="revdep_rebuild",
+        action_args={},
+    ):
+        yield item
+
+
+def _disk_usage() -> dict:
+    paths = {
+        "distfiles": "/var/cache/distfiles",
+        "binpkgs": "/var/cache/binpkgs",
+        "tmp_portage": "/var/tmp/portage",
+    }
+    result = {}
+    for key, path in paths.items():
+        total = 0
+        try:
+            for dirpath, _dirs, files in os.walk(path):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, f))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        result[key] = total
+    return result
+
+
+async def cmd_disk_usage(_args):
+    yield await in_thread(_disk_usage)
 
 
 async def cmd_emerge_sync(_args):
@@ -3731,6 +3790,9 @@ HANDLERS = {
     "eclean_run":         cmd_eclean_run,
     "snapshot_export":    cmd_snapshot_export,
     "snapshot_import":    cmd_snapshot_import,
+    "revdep_rebuild_pretend": cmd_revdep_rebuild_pretend,
+    "revdep_rebuild":         cmd_revdep_rebuild,
+    "disk_usage":             cmd_disk_usage,
 }
 
 
