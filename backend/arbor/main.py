@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -805,6 +805,27 @@ async def ws_emerge_preserved_rebuild(
     )
 
 
+@app.websocket("/ws/emerge/revdep-pretend")
+async def ws_revdep_pretend(websocket: WebSocket):
+    await _ws_job_cmd(websocket, "revdep_rebuild_pretend", {})
+
+
+@app.websocket("/ws/emerge/revdep-rebuild")
+async def ws_revdep_rebuild(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "revdep_rebuild",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
 @app.websocket("/ws/emerge/world-pretend")
 async def ws_emerge_world_pretend(websocket: WebSocket):
     await _ws_job_cmd(websocket, "world_updates", {})
@@ -994,6 +1015,11 @@ async def history_stats(auth: Auth):
 async def pkg_stats(auth: Auth):
     data = await query_one("pkg_stats", {})
     return data
+
+
+@app.get("/api/storage-stats")
+async def storage_stats(auth: Auth):
+    return await query_one("disk_usage")
 
 
 @app.get("/api/analytics/compile-time-by-category")
@@ -1274,6 +1300,372 @@ async def snapshot_import(auth: Auth, request: Request, file: UploadFile = File(
                 _os.unlink(tmp_path)
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Kernel status / available / kernel.org releases
+# ---------------------------------------------------------------------------
+
+_kernel_org_cache: dict = {"data": None, "ts": 0.0}
+_KERNEL_ORG_CACHE_TTL = 3600.0
+_KERNEL_ORG_URL = "https://www.kernel.org/releases.json"
+
+
+@app.get("/api/kernel/status")
+async def kernel_status(auth: Auth):
+    return await query_one("kernel_status")
+
+
+@app.get("/api/kernel/available")
+async def kernel_available(auth: Auth):
+    results = await query_all("kernel_available")
+    return [r for r in results if "cpv" in r]
+
+
+@app.get("/api/kernel/org-releases")
+async def kernel_org_releases(auth: Auth):
+    import time as _time
+    import httpx
+    global _kernel_org_cache
+    now = _time.time()
+    if _kernel_org_cache["data"] is not None and now - _kernel_org_cache["ts"] < _KERNEL_ORG_CACHE_TTL:
+        return _kernel_org_cache["data"]
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(_KERNEL_ORG_URL)
+            resp.raise_for_status()
+            data = resp.json()
+        _kernel_org_cache = {"data": data, "ts": now}
+        return data
+    except Exception as exc:
+        log.warning("kernel.org fetch failed: %s", exc)
+        if _kernel_org_cache["data"] is not None:
+            return _kernel_org_cache["data"]
+        return JSONResponse(status_code=502, content={"error": f"Failed to fetch kernel.org releases: {exc}"})
+
+
+async def _ws_kernel_mutating(websocket: WebSocket, daemon_cmd: str, args: dict):
+    """Stream a mutating kernel daemon command directly (no background job)."""
+    if not await _ws_require_auth(websocket):
+        return
+    if not await _ws_step_up_if_mutating(websocket, daemon_cmd, args):
+        return
+    try:
+        daemon_args = {**args, "request_principal": _websocket_principal_binding(websocket)}
+        async for chunk in query(daemon_cmd, daemon_args):
+            await websocket.send_text(json.dumps(chunk))
+            if chunk.get("done") or chunk.get("error"):
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_text(json.dumps({"error": str(e), "done": True}))
+        except Exception:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@app.websocket("/ws/kernel/install-pretend")
+async def ws_kernel_install_pretend(websocket: WebSocket, atom: str = Query(default="")):
+    await _ws_emerge(websocket, "kernel_install_pretend", atom)
+
+
+@app.websocket("/ws/kernel/install")
+async def ws_kernel_install(
+    websocket: WebSocket,
+    atom: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "kernel_install",
+        {
+            "atom": atom,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/bootloader-update")
+async def ws_kernel_bootloader_update(
+    websocket: WebSocket,
+    bootloader_name: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_kernel_mutating(
+        websocket,
+        "kernel_bootloader_update",
+        {
+            "bootloader_name": bootloader_name,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/boot-clean")
+async def ws_kernel_boot_clean(
+    websocket: WebSocket,
+    versions: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    ver_list = [v.strip() for v in versions.split(",") if v.strip()]
+    await _ws_kernel_mutating(
+        websocket,
+        "kernel_boot_clean",
+        {
+            "versions": ver_list,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/src-clean")
+async def ws_kernel_src_clean(
+    websocket: WebSocket,
+    names: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    name_list = [n.strip() for n in names.split(",") if n.strip()]
+    await _ws_kernel_mutating(
+        websocket,
+        "kernel_src_clean",
+        {
+            "names": name_list,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/modules-clean")
+async def ws_kernel_modules_clean(
+    websocket: WebSocket,
+    versions: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    ver_list = [v.strip() for v in versions.split(",") if v.strip()]
+    await _ws_kernel_mutating(
+        websocket,
+        "kernel_modules_clean",
+        {
+            "versions": ver_list,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/oldconfig")
+async def ws_kernel_oldconfig(websocket: WebSocket):
+    await _ws_kernel_mutating(websocket, "kernel_oldconfig", {})
+
+
+@app.websocket("/ws/kernel/olddefconfig")
+async def ws_kernel_olddefconfig(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_kernel_mutating(
+        websocket,
+        "kernel_olddefconfig",
+        {"approval_request_id": approval_request_id, "approval_token": approval_token},
+    )
+
+
+@app.websocket("/ws/kernel/build")
+async def ws_kernel_build(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "kernel_build",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/initramfs")
+async def ws_kernel_initramfs(
+    websocket: WebSocket,
+    kver: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_kernel_mutating(
+        websocket,
+        "kernel_initramfs",
+        {
+            "kver": kver,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/module-rebuild")
+async def ws_kernel_module_rebuild(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "kernel_module_rebuild",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/download-tarball")
+async def ws_kernel_download_tarball(
+    websocket: WebSocket,
+    url: str = Query(default=""),
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_kernel_mutating(
+        websocket,
+        "kernel_download_tarball",
+        {
+            "url": url,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/modules-install")
+async def ws_kernel_modules_install(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "kernel_modules_install",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/make-install")
+async def ws_kernel_make_install(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_job_cmd(
+        websocket,
+        "kernel_make_install",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+@app.websocket("/ws/kernel/switch-src")
+async def ws_kernel_switch_src(websocket: WebSocket, dirname: str = Query(default="")):
+    await _ws_kernel_mutating(websocket, "kernel_switch_src", {"dirname": dirname})
+
+
+@app.websocket("/ws/kernel/copy-config")
+async def ws_kernel_copy_config(websocket: WebSocket, src_dirname: str = Query(default="")):
+    await _ws_kernel_mutating(websocket, "kernel_copy_config", {"src_dirname": src_dirname})
+
+
+@app.websocket("/ws/kernel/reboot")
+async def ws_kernel_reboot(
+    websocket: WebSocket,
+    approval_request_id: str = Query(default=""),
+    approval_token: str = Query(default=""),
+):
+    await _ws_kernel_mutating(
+        websocket,
+        "kernel_reboot",
+        {
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Limine config
+# ---------------------------------------------------------------------------
+
+@app.get("/api/limine/config")
+async def api_limine_config_get(auth: Auth):
+    result = await query_one("limine_config_read", {})
+    if result.get("error"):
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@app.post("/api/limine/config")
+async def api_limine_config_post(auth: Auth, request: Request):
+    require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    config_json = body.get("config_json", "")
+    approval_request_id = str(body.get("approval_request_id", "")).strip()
+    approval_token = str(body.get("approval_token", "")).strip()
+    result = await query_one(
+        "limine_config_write",
+        {
+            "config_json": config_json,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+            "request_principal": _request_principal_binding(request),
+        },
+    )
+    return result
+
+
+@app.post("/api/limine/auto-update")
+async def api_limine_auto_update(auth: Auth, request: Request):
+    require_min_role("owner")
+    require_recent_step_up_unless_cli_mode()
+    body = await _json_object_body(request)
+    if isinstance(body, JSONResponse):
+        return body
+    kver = str(body.get("kver", "")).strip()
+    approval_request_id = str(body.get("approval_request_id", "")).strip()
+    approval_token = str(body.get("approval_token", "")).strip()
+    result = await query_one(
+        "limine_config_auto_update",
+        {
+            "kver": kver,
+            "approval_request_id": approval_request_id,
+            "approval_token": approval_token,
+            "request_principal": _request_principal_binding(request),
+        },
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -39,12 +39,21 @@ _READONLY_COMMANDS = {
     "glsa_list",
     "eclean_pretend",
     "snapshot_export",
+    "disk_usage",
+    "kernel_status",
+    "kernel_available",
+    "limine_config_read",
 }
 
 _PRETEND_COMMANDS = {
     "emerge_pretend",
     "emerge_uninstall_pretend",
     "emerge_depclean_pretend",
+    "revdep_rebuild_pretend",
+    "kernel_install_pretend",
+    "kernel_oldconfig",
+    "kernel_switch_src",
+    "kernel_copy_config",
 }
 
 _APPROVAL_REQUIRED_COMMANDS = {
@@ -60,6 +69,22 @@ _APPROVAL_REQUIRED_COMMANDS = {
     "history_purge",
     "eclean_run",
     "snapshot_import",
+    "revdep_rebuild",
+    "kernel_install",
+    "kernel_bootloader_update",
+    "kernel_boot_clean",
+    "kernel_modules_clean",
+    "kernel_src_clean",
+    "kernel_olddefconfig",
+    "kernel_build",
+    "kernel_modules_install",
+    "kernel_make_install",
+    "kernel_initramfs",
+    "kernel_module_rebuild",
+    "kernel_download_tarball",
+    "kernel_reboot",
+    "limine_config_write",
+    "limine_config_auto_update",
 }
 
 _TARGET_KEYS = ("atom", "name", "cfg_file", "job_id")

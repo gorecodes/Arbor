@@ -111,6 +111,31 @@ ALLOWED_COMMANDS = {
     "eclean_run",
     "snapshot_export",
     "snapshot_import",
+    "revdep_rebuild_pretend",
+    "revdep_rebuild",
+    "disk_usage",
+    "kernel_status",
+    "kernel_available",
+    "kernel_install_pretend",
+    "kernel_install",
+    "kernel_bootloader_update",
+    "kernel_boot_clean",
+    "kernel_modules_clean",
+    "kernel_src_clean",
+    "kernel_oldconfig",
+    "kernel_olddefconfig",
+    "kernel_build",
+    "kernel_initramfs",
+    "kernel_module_rebuild",
+    "kernel_download_tarball",
+    "kernel_reboot",
+    "kernel_switch_src",
+    "kernel_copy_config",
+    "kernel_modules_install",
+    "kernel_make_install",
+    "limine_config_read",
+    "limine_config_write",
+    "limine_config_auto_update",
 }
 
 # ---------------------------------------------------------------------------
@@ -2158,7 +2183,7 @@ def _canonical_approval_args(action_cmd: str, args: dict | None) -> dict:
     if action_cmd == "emerge_world_update":
         opts = ",".join(_parse_opts(str(data.get("opts", "")), _UPDATE_OPTS))
         return {"opts": opts} if opts else {}
-    if action_cmd in {"emerge_depclean", "emerge_preserved_rebuild", "emerge_sync"}:
+    if action_cmd in {"emerge_depclean", "emerge_preserved_rebuild", "emerge_sync", "revdep_rebuild"}:
         return {}
     if action_cmd == "overlay_sync":
         return {"name": str(data.get("name", "")).strip()}
@@ -2614,6 +2639,7 @@ async def _start_background_job(
     action_cmd: str = "",
     action_args: dict | None = None,
     stderr=asyncio.subprocess.STDOUT,
+    cwd: str | None = None,
 ):
     meta = action_metadata(action_cmd, action_args or {}) if action_cmd else {}
     async with _get_jobs_lock():
@@ -2627,6 +2653,7 @@ async def _start_background_job(
             stdout=asyncio.subprocess.PIPE,
             stderr=stderr,
             env=_EMERGE_ENV,
+            **({"cwd": cwd} if cwd is not None else {}),
         )
         job_id = str(uuid.uuid4())
         _jobs[job_id] = _Job(
@@ -2753,6 +2780,1312 @@ async def cmd_emerge_preserved_rebuild(_args):
         action_args={},
     ):
         yield item
+
+
+async def cmd_revdep_rebuild_pretend(_args):
+    async for item in _start_background_job(
+        "@revdep-pretend",
+        ["revdep-rebuild", "--pretend"],
+        kind="revdep-pretend",
+        action_cmd="revdep_rebuild_pretend",
+        action_args={},
+    ):
+        yield item
+
+
+async def cmd_revdep_rebuild(_args):
+    approval_error = await in_thread(
+        _require_approval,
+        "revdep_rebuild",
+        _approval_payload("revdep_rebuild", _args),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    async for item in _start_background_job(
+        "@revdep-rebuild",
+        ["revdep-rebuild"],
+        kind="revdep-rebuild",
+        action_cmd="revdep_rebuild",
+        action_args={},
+    ):
+        yield item
+
+
+def _disk_usage() -> dict:
+    import subprocess
+    paths = {
+        "distfiles": "/var/cache/distfiles",
+        "binpkgs": "/var/cache/binpkgs",
+        "tmp_portage": "/var/tmp/portage",
+    }
+    result = {}
+    for key, path in paths.items():
+        try:
+            out = subprocess.check_output(
+                ["du", "-sb", path], stderr=subprocess.DEVNULL, timeout=10
+            ).decode()
+            result[key] = int(out.split()[0])
+        except Exception:
+            result[key] = 0
+    return result
+
+
+async def cmd_disk_usage(_args):
+    yield await in_thread(_disk_usage)
+
+
+# ---------------------------------------------------------------------------
+# Kernel status / information
+# ---------------------------------------------------------------------------
+
+def _kernel_status() -> dict:
+    import re, subprocess, os
+    from pathlib import Path
+    _maybe_reload_portage()
+    import portage
+
+    try:
+        running = subprocess.check_output(["uname", "-r"], text=True, timeout=5).strip()
+    except Exception:
+        running = "unknown"
+
+    src_link = Path("/usr/src/linux")
+    src_target = ""
+    try:
+        if src_link.is_symlink():
+            src_target = os.readlink(str(src_link))
+    except OSError:
+        pass
+
+    vdb = portage.db[portage.root]["vartree"].dbapi
+    kernel_pkgs = []
+    for cpv in sorted(vdb.cpv_all()):
+        if not cpv.startswith("sys-kernel/"):
+            continue
+        _cat, pf = cpv.split("/", 1)
+        slot, build_time = vdb.aux_get(cpv, ["SLOT", "BUILD_TIME"])
+        kernel_pkgs.append({"cpv": cpv, "pf": pf, "slot": slot, "build_time": build_time})
+
+    installkernel = bool(vdb.match("sys-kernel/installkernel"))
+
+    boot_dir = Path("/boot")
+    boot_size = 0
+    kernels = []
+    if boot_dir.exists():
+        try:
+            out = subprocess.check_output(
+                ["du", "-sb", "/boot"], stderr=subprocess.DEVNULL, timeout=10, text=True
+            )
+            boot_size = int(out.split()[0])
+        except Exception:
+            pass
+
+        vmlinuz_re = re.compile(r"^vmlinuz-(.+?)(?:\.old)?$")
+        config_re  = re.compile(r"^config-(.+?)(?:\.old)?$")
+        initrd_re  = re.compile(r"^initramfs-(.+?)\.img(?:\.old)?$")
+        sysmap_re  = re.compile(r"^System\.map-(.+?)(?:\.old)?$")
+        versions: dict = {}
+        all_files = sorted(boot_dir.iterdir())
+
+        # Pass 1: build versions dict from vmlinuz files only.
+        # Must be separate because config/initramfs sort before vmlinuz (c,i < v)
+        # so a single pass would miss associated files for not-yet-seen versions.
+        for f in all_files:
+            m = vmlinuz_re.match(f.name)
+            if not m:
+                continue
+            ver = m.group(1)
+            is_old = f.name.endswith(".old")
+            try:
+                sz = f.stat().st_size
+            except OSError:
+                sz = 0
+            if ver not in versions:
+                versions[ver] = {
+                    "version": ver, "running": ver == running,
+                    "has_vmlinuz": False, "has_config": False,
+                    "has_initramfs": False, "has_system_map": False,
+                    "old_count": 0, "size": 0,
+                }
+            versions[ver]["size"] += sz
+            if is_old:
+                versions[ver]["old_count"] += 1
+            else:
+                versions[ver]["has_vmlinuz"] = True
+
+        # Pass 2: associate config, initramfs, System.map with known versions.
+        for f in all_files:
+            name = f.name
+            try:
+                sz = f.stat().st_size
+            except OSError:
+                sz = 0
+            for pattern, field in [
+                (config_re, "has_config"),
+                (initrd_re, "has_initramfs"),
+                (sysmap_re, "has_system_map"),
+            ]:
+                m = pattern.match(name)
+                if m:
+                    ver = m.group(1)
+                    if ver in versions:
+                        versions[ver]["size"] += sz
+                        if name.endswith(".old"):
+                            versions[ver]["old_count"] += 1
+                        else:
+                            versions[ver][field] = True
+                    break
+
+        kernels = sorted(versions.values(), key=lambda x: x["version"])
+
+    bootloaders = []
+    for cfg_path, name, label in [
+        ("/boot/grub/grub.cfg",           "grub2",        "GRUB2"),
+        ("/boot/grub2/grub.cfg",          "grub2",        "GRUB2"),
+        ("/boot/limine.conf",             "limine",       "Limine"),
+        ("/boot/loader/loader.conf",      "systemd-boot", "systemd-boot"),
+        ("/efi/loader/loader.conf",       "systemd-boot", "systemd-boot"),
+        ("/boot/syslinux/syslinux.cfg",   "syslinux",     "Syslinux"),
+        ("/boot/extlinux/extlinux.conf",  "syslinux",     "Extlinux"),
+    ]:
+        if Path(cfg_path).exists():
+            if not any(b["name"] == name for b in bootloaders):
+                bootloaders.append({"name": name, "label": label, "cfg": cfg_path})
+
+    limine_disk = None
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "/boot":
+                    dev = parts[0]
+                    limine_disk = re.sub(r"p?\d+$", "", dev)
+                    break
+    except OSError:
+        pass
+
+    # Scan /usr/src for linux-* source directories
+    src_dirs = []
+    try:
+        src_base = Path("/usr/src")
+        installed_pfs = {pkg["pf"] for pkg in kernel_pkgs}
+        for entry in sorted(src_base.iterdir()):
+            if not (entry.is_dir() and entry.name.startswith("linux-")):
+                continue
+            name = entry.name
+            kver = name[6:]  # strip "linux-"
+            # Heuristic: portage kernels have suffix like -gentoo-rN
+            from_portage = name in installed_pfs or any(
+                p["pf"].endswith(kver) or kver in p["pf"] for p in kernel_pkgs
+            )
+            # Derive real kver from source Makefile.
+            # The dir name may omit SUBLEVEL (e.g. linux-7.1-rc4 → 7.1.0-rc4).
+            real_kver = kver
+            try:
+                mk = entry / "Makefile"
+                if mk.is_file():
+                    _vp: dict = {}
+                    with mk.open() as _mf:
+                        for _i, _ml in enumerate(_mf):
+                            if _i > 30:
+                                break
+                            _ml = _ml.strip()
+                            if not _ml or _ml.startswith('#'):
+                                continue
+                            if '=' in _ml:
+                                _lhs, _, _rhs = _ml.partition('=')
+                                _lhs = _lhs.strip()
+                                if _lhs in ("VERSION", "PATCHLEVEL", "SUBLEVEL", "EXTRAVERSION"):
+                                    _vp[_lhs] = _rhs.strip()
+                    if "VERSION" in _vp and "PATCHLEVEL" in _vp:
+                        _sl = _vp.get("SUBLEVEL", "0") or "0"
+                        _ev = _vp.get("EXTRAVERSION", "")
+                        real_kver = f"{_vp['VERSION']}.{_vp['PATCHLEVEL']}.{_sl}{_ev}"
+            except OSError:
+                pass
+            # For module/boot checks try both dirname-kver and Makefile-kver
+            _check_kvers = list(dict.fromkeys([real_kver, kver]))  # dedup, real_kver first
+            # Check build artifacts
+            built = False
+            try:
+                arch_dir = entry / "arch"
+                if arch_dir.is_dir():
+                    for arch_sub in arch_dir.iterdir():
+                        boot_d = arch_sub / "boot"
+                        if boot_d.is_dir():
+                            for img in ("bzImage", "zImage", "Image", "Image.gz"):
+                                if (boot_d / img).is_file():
+                                    built = True
+                                    break
+                        if built:
+                            break
+                if not built:
+                    built = (entry / "vmlinux").is_file()
+            except OSError:
+                pass
+            modules_installed = any(
+                Path(f"/lib/modules/{k}/modules.dep").is_file() for k in _check_kvers
+            )
+            kernel_in_boot = any(
+                Path(f"/boot/vmlinuz-{k}").is_file() for k in _check_kvers
+            )
+            initramfs_in_boot = any(
+                Path(f"/boot/initramfs-{k}.img").is_file() for k in _check_kvers
+            )
+            src_size = 0
+            try:
+                out = subprocess.check_output(
+                    ["du", "-sb", str(entry)], stderr=subprocess.DEVNULL, timeout=15, text=True
+                )
+                src_size = int(out.split()[0])
+            except Exception:
+                pass
+            src_dirs.append({
+                "name": name,
+                "kver": kver,
+                "real_kver": real_kver,
+                "active": name == src_target or ("/" + name) == src_target,
+                "portage": from_portage,
+                "has_config": (entry / ".config").is_file(),
+                "built": built,
+                "modules_installed": modules_installed,
+                "kernel_in_boot": kernel_in_boot,
+                "initramfs_in_boot": initramfs_in_boot,
+                "size": src_size,
+            })
+    except OSError:
+        pass
+
+    # Scan /lib/modules for installed module directories
+    modules = []
+    try:
+        mod_base = Path("/lib/modules")
+        boot_versions = {k["version"] for k in kernels}
+        for entry in sorted(mod_base.iterdir()):
+            if not entry.is_dir():
+                continue
+            ver = entry.name
+            mod_size = 0
+            try:
+                out = subprocess.check_output(
+                    ["du", "-sb", str(entry)], stderr=subprocess.DEVNULL, timeout=10, text=True
+                )
+                mod_size = int(out.split()[0])
+            except Exception:
+                pass
+            modules.append({
+                "version": ver,
+                "running": ver == running,
+                "in_boot": ver in boot_versions,
+                "size": mod_size,
+            })
+    except OSError:
+        pass
+
+    return {
+        "running": running,
+        "src_link": str(src_link),
+        "src_target": src_target,
+        "installkernel": installkernel,
+        "installed": kernel_pkgs,
+        "boot_size": boot_size,
+        "kernels": kernels,
+        "bootloaders": bootloaders,
+        "limine_disk": limine_disk,
+        "src_dirs": src_dirs,
+        "modules": modules,
+    }
+
+
+def _kernel_available() -> list:
+    _maybe_reload_portage()
+    import portage
+    porttree = portage.db[portage.root]["porttree"].dbapi
+    vdb = portage.db[portage.root]["vartree"].dbapi
+
+    UPGRADEABLE_CPS = [
+        "sys-kernel/gentoo-sources",
+        "sys-kernel/gentoo-kernel",
+        "sys-kernel/gentoo-kernel-bin",
+        "sys-kernel/vanilla-sources",
+        "sys-kernel/hardened-sources",
+    ]
+    results = []
+    for cp in UPGRADEABLE_CPS:
+        try:
+            versions = porttree.cp_list(cp)
+        except Exception:
+            continue
+        if not versions:
+            continue
+        installed_set = set(vdb.match(cp))
+        for cpv in versions[-5:]:
+            _cat, pf = cpv.split("/", 1)
+            desc = ""
+            try:
+                desc = porttree.aux_get(cpv, ["DESCRIPTION"])[0]
+            except Exception:
+                pass
+            results.append({
+                "cpv": cpv, "cp": cp, "pf": pf,
+                "installed": cpv in installed_set,
+                "description": desc,
+            })
+
+    # Sort newest-first across all package types using portage's version comparator.
+    try:
+        import functools
+        from portage.versions import vercmp, cpv_getkey as _cpv_getkey
+
+        def _ver_of(cpv):
+            cp = _cpv_getkey(cpv)
+            return cpv[len(cp) + 1:] if cp else cpv
+
+        results.sort(
+            key=lambda x: functools.cmp_to_key(vercmp)(_ver_of(x["cpv"])),
+            reverse=True,
+        )
+    except Exception:
+        pass
+
+    return results
+
+
+async def cmd_kernel_status(_args):
+    yield await in_thread(_kernel_status)
+
+
+async def cmd_kernel_available(_args):
+    for item in await in_thread(_kernel_available):
+        yield item
+    yield {"done": True}
+
+
+async def cmd_kernel_install_pretend(args):
+    atom_raw = args.get("atom", "")
+    atom = _checked_atom(atom_raw)
+    if not atom or "sys-kernel/" not in atom:
+        yield {"error": "invalid kernel atom"}
+        return
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "emerge", "--pretend", "--verbose", "--color=n", atom,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        async for raw in proc.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc.wait()
+        yield {"done": True, "returncode": proc.returncode}
+    finally:
+        await _terminate_subprocess(proc)
+
+
+async def cmd_kernel_install(args):
+    atom_raw = args.get("atom", "")
+    atom = _checked_atom(atom_raw)
+    if not atom or "sys-kernel/" not in atom:
+        yield {"error": "invalid kernel atom"}
+        return
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_install",
+        _approval_payload("kernel_install", args, {"atom": atom}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    async for item in _start_background_job(
+        atom,
+        ["emerge", "--verbose", "--color=n", atom],
+        kind="install",
+        action_cmd="kernel_install",
+        action_args={"atom": atom},
+    ):
+        yield item
+
+
+async def cmd_kernel_bootloader_update(args):
+    bootloader_name = str(args.get("bootloader_name", "")).strip()
+    if bootloader_name not in {"grub2", "systemd-boot"}:
+        yield {"error": "invalid bootloader_name; must be 'grub2' or 'systemd-boot'"}
+        return
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_bootloader_update",
+        _approval_payload("kernel_bootloader_update", args, {"bootloader_name": bootloader_name}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    if bootloader_name == "grub2":
+        from pathlib import Path as _Path
+        if _Path("/boot/grub2/grub.cfg").exists():
+            grub_cfg = "/boot/grub2/grub.cfg"
+        else:
+            grub_cfg = "/boot/grub/grub.cfg"
+        cmd = ["grub-mkconfig", "-o", grub_cfg]
+    else:
+        cmd = ["bootctl", "update"]
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=_EMERGE_ENV,
+        )
+        async for raw in proc.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc.wait()
+        yield {"done": True, "returncode": proc.returncode}
+    finally:
+        await _terminate_subprocess(proc)
+
+
+async def cmd_kernel_boot_clean(args):
+    import re as _re
+    versions = args.get("versions", [])
+    if not isinstance(versions, list) or not versions:
+        yield {"error": "versions must be a non-empty list of strings"}
+        return
+    _ver_re = _re.compile(r'^[\w.+-]+$')
+    for v in versions:
+        if not isinstance(v, str) or not _ver_re.match(v):
+            yield {"error": f"invalid version string: {v!r}"}
+            return
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_boot_clean",
+        _approval_payload("kernel_boot_clean", args, {"versions": versions}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+
+    def _do_clean():
+        from pathlib import Path as _Path
+        boot = _Path("/boot")
+        lines = []
+        for ver in versions:
+            candidates = [
+                f"vmlinuz-{ver}", f"vmlinuz-{ver}.old",
+                f"initramfs-{ver}.img", f"initramfs-{ver}.img.old",
+                f"initrd-{ver}.img", f"initrd-{ver}.img.old",
+                f"config-{ver}", f"config-{ver}.old",
+                f"System.map-{ver}", f"System.map-{ver}.old",
+            ]
+            for name in candidates:
+                path = boot / name
+                if path.exists():
+                    path.unlink(missing_ok=True)
+                    lines.append(f"Removed: {path}")
+                else:
+                    lines.append(f"Skipped (not found): {path}")
+        return lines
+
+    result_lines = await in_thread(_do_clean)
+    for line in result_lines:
+        yield {"line": line}
+    yield {"done": True, "returncode": 0}
+
+
+async def cmd_kernel_modules_clean(args):
+    import re as _re
+    versions = args.get("versions", [])
+    if not isinstance(versions, list) or not versions:
+        yield {"error": "versions must be a non-empty list of strings"}
+        return
+    _ver_re = _re.compile(r'^[\w.+-]+$')
+    for v in versions:
+        if not isinstance(v, str) or not _ver_re.match(v):
+            yield {"error": f"invalid version string: {v!r}"}
+            return
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_modules_clean",
+        _approval_payload("kernel_modules_clean", args, {"versions": versions}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+
+    def _do_clean():
+        import shutil as _shutil
+        from pathlib import Path as _Path
+        mod_base = _Path("/lib/modules")
+        running = ""
+        try:
+            import subprocess as _sp
+            running = _sp.check_output(["uname", "-r"], text=True, timeout=5).strip()
+        except Exception:
+            pass
+        lines = []
+        for ver in versions:
+            if ver == running:
+                lines.append(f"Skipped (running): /lib/modules/{ver}")
+                continue
+            path = mod_base / ver
+            if path.exists() and path.is_dir():
+                try:
+                    _shutil.rmtree(str(path))
+                    lines.append(f"Removed: /lib/modules/{ver}")
+                except Exception as e:
+                    lines.append(f"Error removing /lib/modules/{ver}: {e}")
+            else:
+                lines.append(f"Skipped (not found): /lib/modules/{ver}")
+        return lines
+
+    result_lines = await in_thread(_do_clean)
+    for line in result_lines:
+        yield {"line": line}
+    yield {"done": True, "returncode": 0}
+
+
+async def cmd_kernel_src_clean(args):
+    import re as _re
+    names = args.get("names", [])
+    if not isinstance(names, list) or not names:
+        yield {"error": "names must be a non-empty list of strings"}
+        return
+    _name_re = _re.compile(r'^linux-[\w.+-]+$')
+    for n in names:
+        if not isinstance(n, str) or not _name_re.match(n):
+            yield {"error": f"invalid source name: {n!r}"}
+            return
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_src_clean",
+        _approval_payload("kernel_src_clean", args, {"names": names}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+
+    def _do_clean():
+        import shutil as _shutil, os as _os
+        from pathlib import Path as _Path
+        src_base = _Path("/usr/src")
+        # Resolve active symlink
+        active = ""
+        try:
+            lnk = src_base / "linux"
+            if lnk.is_symlink():
+                target = _os.readlink(str(lnk))
+                active = target.lstrip("/").split("/")[-1] if "/" in target else target
+        except OSError:
+            pass
+        lines = []
+        for name in names:
+            if name == active:
+                lines.append(f"Skipped (active symlink): /usr/src/{name}")
+                continue
+            path = src_base / name
+            if path.exists() and path.is_dir():
+                try:
+                    _shutil.rmtree(str(path))
+                    lines.append(f"Removed: /usr/src/{name}")
+                except Exception as e:
+                    lines.append(f"Error removing /usr/src/{name}: {e}")
+            else:
+                lines.append(f"Skipped (not found): /usr/src/{name}")
+        return lines
+
+    result_lines = await in_thread(_do_clean)
+    for line in result_lines:
+        yield {"line": line}
+    yield {"done": True, "returncode": 0}
+
+
+async def cmd_kernel_oldconfig(_args):
+    from pathlib import Path as _Path
+    src = _Path("/usr/src/linux").resolve()
+    if not src.exists() or not src.is_dir():
+        yield {"error": f"/usr/src/linux does not resolve to a directory (got {src})"}
+        return
+    src_dir = str(src)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "make", "listnewconfig",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=src_dir,
+        )
+        async for raw in proc.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc.wait()
+        yield {"done": True, "returncode": proc.returncode}
+    finally:
+        await _terminate_subprocess(proc)
+
+
+async def cmd_kernel_olddefconfig(args):
+    from pathlib import Path as _Path
+    src = _Path("/usr/src/linux").resolve()
+    if not src.exists() or not src.is_dir():
+        yield {"error": f"/usr/src/linux does not resolve to a directory (got {src})"}
+        return
+    src_dir = str(src)
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_olddefconfig",
+        _approval_payload("kernel_olddefconfig", args, {}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "make", "olddefconfig",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=src_dir,
+        )
+        async for raw in proc.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc.wait()
+        yield {"done": True, "returncode": proc.returncode}
+    finally:
+        await _terminate_subprocess(proc)
+
+
+async def cmd_kernel_build(args):
+    import subprocess as _subprocess
+    from pathlib import Path as _Path
+    src = _Path("/usr/src/linux").resolve()
+    if not src.exists() or not src.is_dir():
+        yield {"error": f"/usr/src/linux does not resolve to a directory (got {src})"}
+        return
+    src_dir = str(src)
+    nproc = _subprocess.check_output(["nproc"], text=True, timeout=5).strip()
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_build",
+        _approval_payload("kernel_build", args, {}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    async for item in _start_background_job(
+        "kernel-build",
+        ["make", f"-j{nproc}"],
+        kind="kernel-build",
+        action_cmd="kernel_build",
+        action_args={},
+        cwd=src_dir,
+    ):
+        yield item
+
+
+async def cmd_kernel_modules_install(args):
+    from pathlib import Path as _Path
+    src = _Path("/usr/src/linux").resolve()
+    if not src.exists() or not src.is_dir():
+        yield {"error": f"/usr/src/linux does not resolve to a directory (got {src})"}
+        return
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_modules_install",
+        _approval_payload("kernel_modules_install", args, {}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    async for item in _start_background_job(
+        "kernel-modules-install",
+        ["make", "modules_install"],
+        kind="kernel-modules-install",
+        action_cmd="kernel_modules_install",
+        action_args={},
+        cwd=str(src),
+    ):
+        yield item
+
+
+async def cmd_kernel_make_install(args):
+    from pathlib import Path as _Path
+    src = _Path("/usr/src/linux").resolve()
+    if not src.exists() or not src.is_dir():
+        yield {"error": f"/usr/src/linux does not resolve to a directory (got {src})"}
+        return
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_make_install",
+        _approval_payload("kernel_make_install", args, {}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    async for item in _start_background_job(
+        "kernel-make-install",
+        ["make", "install"],
+        kind="kernel-make-install",
+        action_cmd="kernel_make_install",
+        action_args={},
+        cwd=str(src),
+    ):
+        yield item
+
+
+async def cmd_kernel_initramfs(args):
+    import re as _re
+    from pathlib import Path as _Path
+    kver = args.get("kver", "")
+    if not kver or not isinstance(kver, str):
+        yield {"error": "kver is required"}
+        return
+    if len(kver) > 64 or not _re.match(r'^[\w.+-]+$', kver):
+        yield {"error": f"invalid kver: {kver!r}"}
+        return
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_initramfs",
+        _approval_payload("kernel_initramfs", args, {"kver": kver}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "dracut", "--force", "--kver", kver,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        async for raw in proc.stdout:
+            yield {"line": _ANSI.sub("", raw.decode(errors="replace").rstrip())}
+        await proc.wait()
+        rc = proc.returncode
+        done_chunk: dict = {"done": True, "returncode": rc}
+        if rc == 0:
+            boot = _Path("/boot")
+            initramfs_found = (
+                (boot / f"initramfs-{kver}.img").exists()
+                or (boot / f"initrd-{kver}.img").exists()
+            )
+            done_chunk["initramfs_found"] = initramfs_found
+        yield done_chunk
+    finally:
+        await _terminate_subprocess(proc)
+
+
+async def cmd_kernel_module_rebuild(args):
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_module_rebuild",
+        _approval_payload("kernel_module_rebuild", args, {}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+    async for item in _start_background_job(
+        "@module-rebuild",
+        ["emerge", "--verbose", "--color=n", "@module-rebuild"],
+        kind="module-rebuild",
+        action_cmd="kernel_module_rebuild",
+        action_args={},
+    ):
+        yield item
+
+
+async def cmd_kernel_download_tarball(args):
+    import re as _re, threading as _threading, urllib.request as _urllib
+
+    url = str(args.get("url", "")).strip()
+    _ALLOWED_HOSTS = ("https://cdn.kernel.org/", "https://www.kernel.org/")
+    if not any(url.startswith(h) for h in _ALLOWED_HOSTS):
+        yield {"error": "URL must be from cdn.kernel.org or www.kernel.org"}
+        return
+    if not (url.endswith(".tar.xz") or url.endswith(".tar.gz")):
+        yield {"error": "URL must point to a .tar.xz or .tar.gz tarball"}
+        return
+
+    filename = url.split("/")[-1]
+    if filename.endswith(".tar.xz"):
+        dirname = filename[:-7]
+    else:
+        dirname = filename[:-7]
+    if not _re.match(r"^linux-[\w.+-]+$", dirname):
+        yield {"error": f"unexpected tarball name: {filename}"}
+        return
+
+    from pathlib import Path as _Path
+    src_base = _Path("/usr/src")
+    dest_dir = src_base / dirname
+    tarball_path = src_base / filename
+
+    if dest_dir.exists():
+        yield {"error": f"{dest_dir} already exists — remove it first or pick a different version"}
+        return
+
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_download_tarball",
+        _approval_payload("kernel_download_tarball", args, {"url": url}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+
+    yield {"line": f"WARNING: GPG signature verification skipped"}
+    yield {"line": f"Downloading {filename} from kernel.org…"}
+
+    # url is pre-validated above: HTTPS + kernel.org allowlist + tarball extension only.
+    # file:// and arbitrary hosts are impossible here.
+    total = 0
+    try:
+        req = _urllib.Request(url, method="HEAD")
+        with _urllib.urlopen(req, timeout=15) as r:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+            total = int(r.headers.get("Content-Length", 0))
+    except Exception:
+        pass
+    if total:
+        yield {"line": f"File size: {total // (1024 * 1024)} MB"}
+
+    # Download in background thread, poll file size for progress.
+    # urlretrieve is deprecated; use urlopen with explicit streaming write.
+    done_evt = _threading.Event()
+    err_holder: list = []
+
+    def _dl():
+        try:
+            req = _urllib.Request(url)
+            with _urllib.urlopen(req, timeout=300) as resp, open(str(tarball_path), "wb") as fout:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    fout.write(chunk)
+        except Exception as exc:
+            err_holder.append(str(exc))
+        finally:
+            done_evt.set()
+
+    t = _threading.Thread(target=_dl, daemon=True)
+    t.start()
+
+    last_pct = -1
+    while not done_evt.is_set():
+        await asyncio.sleep(1)
+        try:
+            size = tarball_path.stat().st_size
+            if total:
+                pct = min(int(size * 100 / total), 99)
+                if pct != last_pct:
+                    yield {"line": f"  {pct}%  ({size // (1024 * 1024)}/{total // (1024 * 1024)} MB)", "progress": size, "total": total}
+                    last_pct = pct
+            else:
+                yield {"line": f"  {size // (1024 * 1024)} MB downloaded…", "progress": size}
+        except OSError:
+            pass
+
+    if err_holder:
+        try:
+            tarball_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        yield {"error": f"Download failed: {err_holder[0]}"}
+        return
+
+    yield {"line": f"Download complete. Extracting to /usr/src/…"}
+
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "tar", "-xf", str(tarball_path), "-C", str(src_base),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            if line:
+                yield {"line": line}
+        await proc.wait()
+        if proc.returncode != 0:
+            yield {"error": f"tar extraction failed (rc={proc.returncode})"}
+            return
+    finally:
+        await _terminate_subprocess(proc)
+
+    # Remove tarball
+    try:
+        tarball_path.unlink(missing_ok=True)
+        yield {"line": f"Tarball removed."}
+    except OSError as exc:
+        yield {"line": f"Warning: could not remove tarball: {exc}"}
+
+    # Update /usr/src/linux symlink
+    linux_link = src_base / "linux"
+    try:
+        if linux_link.is_symlink() or linux_link.exists():
+            linux_link.unlink()
+        linux_link.symlink_to(dirname)
+        yield {"line": f"/usr/src/linux → {dirname}"}
+    except OSError as exc:
+        yield {"line": f"Warning: could not update /usr/src/linux symlink: {exc}"}
+
+    yield {"line": f"Done. Sources ready in /usr/src/{dirname}"}
+    yield {"done": True, "returncode": 0, "dirname": dirname}
+
+
+async def cmd_kernel_reboot(args):
+    approval_error = await in_thread(
+        _require_approval,
+        "kernel_reboot",
+        _approval_payload("kernel_reboot", args, {}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+
+    yield {"line": "Scheduling reboot…"}
+
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "shutdown", "-r", "now",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            if line:
+                yield {"line": line}
+        await proc.wait()
+        yield {"done": True, "returncode": proc.returncode}
+    finally:
+        await _terminate_subprocess(proc)
+
+
+async def cmd_kernel_switch_src(args):
+    import re as _re
+    dirname = str(args.get("dirname", "")).strip()
+    if not _re.match(r'^linux-[\w.+-]+$', dirname):
+        yield {"error": "invalid source directory name"}
+        return
+    from pathlib import Path as _Path
+    target = _Path("/usr/src") / dirname
+    if not target.is_dir():
+        yield {"error": f"/usr/src/{dirname} is not a directory"}
+        return
+
+    def _switch():
+        link = _Path("/usr/src/linux")
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(dirname)
+
+    await in_thread(_switch)
+    yield {"line": f"/usr/src/linux → {dirname}"}
+    yield {"done": True, "returncode": 0}
+
+
+async def cmd_kernel_copy_config(args):
+    import re as _re, shutil as _shutil
+    src_dirname = str(args.get("src_dirname", "")).strip()
+    if not _re.match(r'^linux-[\w.+-]+$', src_dirname):
+        yield {"error": "invalid source directory name"}
+        return
+    from pathlib import Path as _Path
+    src_config = _Path("/usr/src") / src_dirname / ".config"
+    if not src_config.is_file():
+        yield {"error": f"/usr/src/{src_dirname}/.config not found"}
+        return
+    dst_dir = _Path("/usr/src/linux").resolve()
+    if not dst_dir.is_dir():
+        yield {"error": "/usr/src/linux does not resolve to a directory"}
+        return
+    dst_config = dst_dir / ".config"
+
+    def _copy():
+        _shutil.copy2(str(src_config), str(dst_config))
+
+    await in_thread(_copy)
+    yield {"line": f"Copied {src_config} → {dst_config}"}
+    yield {"done": True, "returncode": 0}
+
+
+# ---------------------------------------------------------------------------
+# Limine bootloader config
+# ---------------------------------------------------------------------------
+
+def _parse_limine_conf(text: str) -> dict:
+    """Parse /boot/limine.conf into structured data."""
+    import re as _re
+    lines = text.replace('\r\n', '\n').split('\n')
+
+    # Split preamble (before first entry line starting with /) from body
+    preamble = []
+    body = []
+    in_body = False
+    for line in lines:
+        if not in_body and line.startswith('/'):
+            in_body = True
+        (body if in_body else preamble).append(line)
+
+    global_raw = '\n'.join(preamble)
+
+    def _extract_global(key):
+        m = _re.search(r'^' + _re.escape(key) + r':\s*(.*)$', global_raw, _re.MULTILINE)
+        return m.group(1).strip() if m else ''
+
+    # Split body into entry blocks (new block starts at column-0 '/')
+    blocks = []
+    cur = []
+    for line in body:
+        if line.startswith('/') and cur:
+            while cur and not cur[-1].strip():
+                cur.pop()
+            blocks.append(cur)
+            cur = [line]
+        else:
+            cur.append(line)
+    if cur:
+        while cur and not cur[-1].strip():
+            cur.pop()
+        if cur:
+            blocks.append(cur)
+
+    entries = []
+    for block in blocks:
+        if not block:
+            continue
+        header = block[0]
+        group_name = header.lstrip('/+').strip()
+        sub_name = ''
+        keys = {}
+        extra = []
+        has_sub = False
+        for line in block[1:]:
+            s = line.strip()
+            if not s:
+                continue
+            if line.lstrip().startswith('//'):
+                sub_name = line.lstrip().lstrip('/').strip()
+                has_sub = True
+            elif ':' in s and not s.startswith('#'):
+                k, _, v = s.partition(':')
+                k = k.strip(); v = v.strip()
+                if k in ('protocol', 'path', 'module_path', 'cmdline'):
+                    keys[k] = v
+                else:
+                    extra.append(line)
+            else:
+                extra.append(line)
+        if has_sub and keys.get('protocol') == 'linux':
+            entries.append({
+                'type': 'linux',
+                'group_name': group_name,
+                'sub_name': sub_name,
+                'path': keys.get('path', ''),
+                'module_path': keys.get('module_path', ''),
+                'cmdline': keys.get('cmdline', ''),
+            })
+        else:
+            entries.append({'type': 'raw', 'raw': '\n'.join(block)})
+
+    return {
+        'global_raw': global_raw,
+        'timeout': _extract_global('timeout'),
+        'default_entry': _extract_global('default_entry'),
+        'remember_last_entry': _extract_global('remember_last_entry'),
+        'entries': entries,
+    }
+
+
+def _serialize_limine_conf(data: dict) -> str:
+    """Serialize structured config back to limine.conf text."""
+    import re as _re
+    global_raw = data.get('global_raw', '')
+
+    def _replace_setting(text, key, value):
+        pat = _re.compile(r'^(' + _re.escape(key) + r':\s*)(.*)$', _re.MULTILINE)
+        if pat.search(text):
+            return pat.sub(r'\g<1>' + str(value), text)
+        return key + ': ' + str(value) + '\n' + text
+
+    global_raw = _replace_setting(global_raw, 'timeout', data.get('timeout', '5'))
+    global_raw = _replace_setting(global_raw, 'default_entry', data.get('default_entry', '1'))
+    rl = data.get('remember_last_entry', '')
+    if rl:
+        global_raw = _replace_setting(global_raw, 'remember_last_entry', rl)
+
+    if not global_raw.endswith('\n'):
+        global_raw += '\n'
+
+    parts = [global_raw]
+    for entry in data.get('entries', []):
+        if entry.get('type') == 'linux':
+            b = f"/+{entry['group_name']}\n"
+            if entry.get('sub_name'):
+                b += f" //{entry['sub_name']}\n"
+            b += f"  protocol: linux\n"
+            b += f"  path: {entry.get('path', '')}\n"
+            if entry.get('module_path'):
+                b += f"  module_path: {entry['module_path']}\n"
+            if entry.get('cmdline'):
+                b += f"  cmdline: {entry['cmdline']}\n"
+            parts.append(b)
+        elif entry.get('type') == 'raw':
+            parts.append(entry.get('raw', ''))
+
+    result = ''
+    for i, part in enumerate(parts):
+        if i == 0:
+            result = part
+        else:
+            if result and not result.endswith('\n\n'):
+                result = result.rstrip('\n') + '\n\n'
+            result += part
+    if not result.endswith('\n'):
+        result += '\n'
+    return result
+
+
+async def cmd_limine_config_read(_args):
+    from pathlib import Path as _Path
+    conf = _Path("/boot/limine.conf")
+    if not conf.is_file():
+        yield {"error": "/boot/limine.conf not found"}
+        return
+    try:
+        text = conf.read_text(errors="replace")
+        parsed = _parse_limine_conf(text)
+        yield parsed
+    except OSError as e:
+        yield {"error": str(e)}
+
+
+async def cmd_limine_config_write(args):
+    import json as _json, shutil as _shutil, datetime as _dt
+    from pathlib import Path as _Path
+
+    config_json = args.get("config_json", "")
+    if not config_json:
+        yield {"error": "config_json is required"}
+        return
+    try:
+        config_data = _json.loads(config_json)
+    except Exception as e:
+        yield {"error": f"invalid config_json: {e}"}
+        return
+
+    approval_error = await in_thread(
+        _require_approval,
+        "limine_config_write",
+        _approval_payload("limine_config_write", args, {}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+
+    conf_path = _Path("/boot/limine.conf")
+
+    def _do_write():
+        ts = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
+        backup = conf_path.parent / f"limine.conf.bak.{ts}"
+        _shutil.copy2(str(conf_path), str(backup))
+        new_text = _serialize_limine_conf(config_data)
+        conf_path.write_text(new_text)
+        return str(backup)
+
+    backup = await in_thread(_do_write)
+    yield {"done": True, "returncode": 0, "backup": backup}
+
+
+async def cmd_limine_config_auto_update(args):
+    """Clone the currently-running kernel's Limine entry and point it at kver."""
+    import copy as _copy, os as _os, shutil as _shutil
+    import datetime as _dt
+    from pathlib import Path as _Path
+
+    kver = str(args.get("kver", "")).strip()
+    if not kver:
+        yield {"error": "kver is required"}
+        return
+
+    approval_error = await in_thread(
+        _require_approval,
+        "limine_config_auto_update",
+        _approval_payload("limine_config_auto_update", args, {"kver": kver}),
+    )
+    if approval_error:
+        yield approval_error
+        return
+
+    def _do():
+        conf_path = _Path("/boot/limine.conf")
+        if not conf_path.is_file():
+            return {"error": "limine.conf not found"}
+
+        text = conf_path.read_text(errors="replace")
+        data = _parse_limine_conf(text)
+
+        running_kver = _os.uname().release
+        linux_entries = [e for e in data["entries"] if e.get("type") == "linux"]
+
+        if not linux_entries:
+            return {"error": "no linux entries found in limine.conf"}
+
+        # Find the entry matching the running kernel; fall back to first linux entry
+        source_entry = None
+        for e in linux_entries:
+            if running_kver in e.get("path", ""):
+                source_entry = e
+                break
+        if source_entry is None:
+            source_entry = linux_entries[0]
+
+        def _subst(s):
+            if running_kver and running_kver != kver and running_kver in s:
+                return s.replace(running_kver, kver)
+            return s
+
+        new_entry = _copy.deepcopy(source_entry)
+        src_path = source_entry.get("path", "")
+        new_entry["path"] = _subst(src_path) if src_path else f"boot():/vmlinuz-{kver}"
+        src_mp = source_entry.get("module_path", "")
+        new_entry["module_path"] = _subst(src_mp) if src_mp else f"boot():/initramfs-{kver}.img"
+        new_entry["group_name"] = _subst(source_entry.get("group_name", f"Linux {kver}"))
+
+        # Replace existing entry for kver in-place, or insert before first linux entry
+        target_idx = None
+        for i, e in enumerate(data["entries"]):
+            if e.get("type") == "linux" and kver in e.get("path", ""):
+                target_idx = i
+                break
+
+        if target_idx is not None:
+            data["entries"][target_idx] = new_entry
+            new_entry_pos = target_idx + 1  # 1-based
+        else:
+            first_linux = next((i for i, e in enumerate(data["entries"]) if e.get("type") == "linux"), 0)
+            data["entries"].insert(first_linux, new_entry)
+            new_entry_pos = first_linux + 1  # 1-based
+
+        # Only update default_entry; leave timeout and remember_last_entry
+        # untouched so the user can still pick a different kernel from the menu.
+        data["default_entry"] = str(new_entry_pos)
+
+        ts = _dt.datetime.now().strftime("%Y%m%d%H%M%S")
+        backup = conf_path.parent / f"limine.conf.bak.{ts}"
+        _shutil.copy2(str(conf_path), str(backup))
+        conf_path.write_text(_serialize_limine_conf(data))
+        return {
+            "done": True, "returncode": 0,
+            "backup": str(backup),
+            "kver": kver,
+            "source_kver": running_kver,
+            "default_entry": new_entry_pos,
+        }
+
+    result = await in_thread(_do)
+    yield result
 
 
 async def cmd_emerge_sync(_args):
@@ -3731,6 +5064,31 @@ HANDLERS = {
     "eclean_run":         cmd_eclean_run,
     "snapshot_export":    cmd_snapshot_export,
     "snapshot_import":    cmd_snapshot_import,
+    "revdep_rebuild_pretend": cmd_revdep_rebuild_pretend,
+    "revdep_rebuild":         cmd_revdep_rebuild,
+    "disk_usage":             cmd_disk_usage,
+    "kernel_status":          cmd_kernel_status,
+    "kernel_available":       cmd_kernel_available,
+    "kernel_install_pretend": cmd_kernel_install_pretend,
+    "kernel_install":         cmd_kernel_install,
+    "kernel_bootloader_update": cmd_kernel_bootloader_update,
+    "kernel_boot_clean":        cmd_kernel_boot_clean,
+    "kernel_modules_clean":     cmd_kernel_modules_clean,
+    "kernel_src_clean":         cmd_kernel_src_clean,
+    "kernel_oldconfig":         cmd_kernel_oldconfig,
+    "kernel_olddefconfig":      cmd_kernel_olddefconfig,
+    "kernel_build":             cmd_kernel_build,
+    "kernel_modules_install":   cmd_kernel_modules_install,
+    "kernel_make_install":      cmd_kernel_make_install,
+    "kernel_initramfs":         cmd_kernel_initramfs,
+    "kernel_module_rebuild":    cmd_kernel_module_rebuild,
+    "kernel_download_tarball":  cmd_kernel_download_tarball,
+    "kernel_reboot":            cmd_kernel_reboot,
+    "kernel_switch_src":        cmd_kernel_switch_src,
+    "kernel_copy_config":       cmd_kernel_copy_config,
+    "limine_config_read":            cmd_limine_config_read,
+    "limine_config_write":           cmd_limine_config_write,
+    "limine_config_auto_update":     cmd_limine_config_auto_update,
 }
 
 
