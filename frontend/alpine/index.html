@@ -145,18 +145,61 @@
 
           <nav class="app-primary-nav" aria-label="Primary sections">
             <ul>
-              <template x-for="item in items" :key="item.id">
-                <li>
-                  <button
-                    type="button"
-                    class="app-primary-link"
-                    :class="{ active: isActive(item.id) }"
-                    :aria-current="isActive(item.id) ? 'page' : 'false'"
-                    @click="nav(item.id)"
-                    x-text="item.label"
-                  ></button>
-                </li>
-              </template>
+              <li>
+                <button type="button" class="app-primary-link"
+                        :class="{ active: isActive('dashboard') }"
+                        :aria-current="isActive('dashboard') ? 'page' : 'false'"
+                        @click="nav('dashboard')">Dashboard</button>
+              </li>
+              <li class="app-nav-group">
+                <button type="button" class="app-primary-link"
+                        :class="{ active: isNavGroupActive('packages') || openNavGroup === 'packages' }"
+                        @click="toggleNavGroup('packages')">
+                  Packages <span class="app-nav-chevron" :class="{ 'app-nav-chevron-open': openNavGroup === 'packages' }">▾</span>
+                </button>
+                <ul class="app-nav-dropdown" x-show="openNavGroup === 'packages'" x-cloak>
+                  <li><button type="button" class="app-nav-dropdown-item" :class="{ active: isActive('packages') }" @click="navTo('packages')">Installed packages</button></li>
+                  <li><button type="button" class="app-nav-dropdown-item" :class="{ active: isActive('search') }" @click="navTo('search')">Search</button></li>
+                  <li><button type="button" class="app-nav-dropdown-item" :class="{ active: isActive('use-flags') }" @click="navTo('use-flags')">USE Flags</button></li>
+                </ul>
+              </li>
+              <li class="app-nav-group">
+                <button type="button" class="app-primary-link"
+                        :class="{ active: isNavGroupActive('system') || openNavGroup === 'system' }"
+                        @click="toggleNavGroup('system')">
+                  System <span class="app-nav-chevron" :class="{ 'app-nav-chevron-open': openNavGroup === 'system' }">▾</span>
+                </button>
+                <ul class="app-nav-dropdown" x-show="openNavGroup === 'system'" x-cloak>
+                  <li><button type="button" class="app-nav-dropdown-item" :class="{ active: isActive('updates') }" @click="navTo('updates')">Maintenance</button></li>
+                  <li><button type="button" class="app-nav-dropdown-item" :class="{ active: isActive('overlays') }" @click="navTo('overlays')">Overlays</button></li>
+                  <li><button type="button" class="app-nav-dropdown-item" :class="{ active: isActive('snapshot') }" @click="navTo('snapshot')">Snapshot</button></li>
+                  <li><button type="button" class="app-nav-dropdown-item" :class="{ active: isActive('kernel') }" @click="navTo('kernel')">Kernel (beta)</button></li>
+                </ul>
+              </li>
+              <li>
+                <button type="button" class="app-primary-link"
+                        :class="{ active: isActive('jobs') }"
+                        :aria-current="isActive('jobs') ? 'page' : 'false'"
+                        @click="nav('jobs')">Jobs</button>
+              </li>
+              <li>
+                <button type="button" class="app-primary-link"
+                        :class="{ active: isActive('news') }"
+                        :aria-current="isActive('news') ? 'page' : 'false'"
+                        @click="nav('news')">News</button>
+              </li>
+              <li>
+                <button type="button" class="app-primary-link"
+                        :class="{ active: isActive('glsa') }"
+                        :aria-current="isActive('glsa') ? 'page' : 'false'"
+                        @click="nav('glsa')">Advisories</button>
+              </li>
+              <li x-show="$store.auth && $store.auth.canOwner">
+                <button type="button" class="app-primary-link"
+                        :class="{ active: isActive('security') }"
+                        :aria-current="isActive('security') ? 'page' : 'false'"
+                        @click="nav('security')">Security</button>
+              </li>
             </ul>
           </nav>
         </div>

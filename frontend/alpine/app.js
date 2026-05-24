@@ -846,6 +846,14 @@
           if (approvalPending(request)) _navigateToApprovalRequest(request)
         })
       },
+      openNavGroup: '',
+      toggleNavGroup(id) { this.openNavGroup = this.openNavGroup === id ? '' : id },
+      closeNavGroup() { this.openNavGroup = '' },
+      navTo(id) { this.closeNavGroup(); this.nav(id) },
+      isNavGroupActive(id) {
+        const _g = { packages: ['packages','search','use-flags'], system: ['updates','overlays','snapshot','kernel'] }
+        return (_g[id] || []).indexOf(Alpine.store('router').view) !== -1
+      },
       isActive(id) { return isPrimaryRouteActive(id) },
       nav(id) {
         if (Alpine.store('approvalGate').active) return

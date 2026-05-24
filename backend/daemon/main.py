@@ -3635,24 +3635,32 @@ async def cmd_kernel_download_tarball(args):
     yield {"line": f"WARNING: GPG signature verification skipped"}
     yield {"line": f"Downloading {filename} from kernel.org…"}
 
-    # Get total size via HEAD
+    # url is pre-validated above: HTTPS + kernel.org allowlist + tarball extension only.
+    # file:// and arbitrary hosts are impossible here.
     total = 0
     try:
         req = _urllib.Request(url, method="HEAD")
-        with _urllib.urlopen(req, timeout=15) as r:
+        with _urllib.urlopen(req, timeout=15) as r:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
             total = int(r.headers.get("Content-Length", 0))
     except Exception:
         pass
     if total:
         yield {"line": f"File size: {total // (1024 * 1024)} MB"}
 
-    # Download in background thread, poll file size for progress
+    # Download in background thread, poll file size for progress.
+    # urlretrieve is deprecated; use urlopen with explicit streaming write.
     done_evt = _threading.Event()
     err_holder: list = []
 
     def _dl():
         try:
-            _urllib.urlretrieve(url, str(tarball_path))
+            req = _urllib.Request(url)
+            with _urllib.urlopen(req, timeout=300) as resp, open(str(tarball_path), "wb") as fout:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    fout.write(chunk)
         except Exception as exc:
             err_holder.append(str(exc))
         finally:

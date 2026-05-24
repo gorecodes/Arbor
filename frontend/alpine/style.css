@@ -4389,6 +4389,10 @@ input:focus,
   transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease;
 }
 
+.app-primary-link {
+  border-radius: 999px;
+}
+
 .app-brand,
 .app-primary-link,
 .app-context-link,
@@ -4432,6 +4436,66 @@ input:focus,
   flex: 1 1 auto;
 }
 
+.app-nav-group {
+  position: relative;
+}
+
+.app-nav-chevron {
+  display: inline-block;
+  font-size: 0.6rem;
+  margin-left: 0.2rem;
+  vertical-align: middle;
+  transition: transform 0.15s ease;
+}
+
+.app-nav-chevron-open {
+  transform: rotate(180deg);
+}
+
+.app-nav-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.3rem;
+  min-width: 12rem;
+  background: rgb(18 23 29 / 0.98);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.45);
+}
+
+.app-nav-dropdown-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.45rem 0.85rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.app-nav-dropdown-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.app-nav-dropdown-item.active {
+  color: var(--primary);
+}
+
 .app-primary-link,
 .app-context-link,
 .app-logout {
@@ -4440,7 +4504,7 @@ input:focus,
 }
 
 .app-primary-link {
-  padding: 0.42rem 0.72rem;
+  padding: 0.38rem 0.95rem;
   color: var(--text-subtle);
 }
 
@@ -4453,8 +4517,8 @@ input:focus,
 }
 
 .app-primary-link.active {
-  background: var(--primary-surface);
-  border-color: rgb(136 167 132 / 0.35);
+  background: rgb(136 167 132 / 0.16);
+  border-color: rgb(136 167 132 / 0.28);
   color: var(--text);
 }
 
