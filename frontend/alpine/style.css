@@ -4651,17 +4651,11 @@ input:focus,
 
   .app-primary-nav {
     width: 100%;
-    overflow-x: auto;
-    padding-bottom: 0.15rem;
-  }
-
-  .app-primary-nav::-webkit-scrollbar {
-    height: 6px;
+    /* overflow-x removed: would clip position:absolute dropdowns */
   }
 
   .app-primary-nav ul {
-    min-width: max-content;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
   }
 
   .app-context-nav {
